@@ -122,8 +122,11 @@ RepositoryDetail  { ...RepositorySummary, manifest_count, platform_count,
 TagSummary  { name, digest, media_type, size, compressed_size,
               platforms: Platform[], pull_count, updated_at }
 TagDetail   { ...TagSummary, manifest: object,
-              config: object|null, layers: LayerInfo[], can_pull, can_push }
-Platform    { os, architecture, variant|null, digest, size }
+              config: object|null, layers: LayerInfo[],
+              platform_details: PlatformDetail[], can_pull, can_push }
+Platform      { os, architecture, variant|null, digest, size }
+PlatformDetail{ os, architecture, variant|null, digest, media_type, size,
+                manifest: object, config: object|null, layers: LayerInfo[] }
 LayerInfo   { digest, media_type, size, role: "config"|"layer" }
 TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
               platforms: Platform[], updated_at }
@@ -133,6 +136,14 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   repository (push implies pull); the UI uses them to offer reads to pullers and
   mutations only to pushers.
 - `size` is the sum of the compressed blob sizes referenced by the tag.
+- A tag's top-level `manifest`, `config` and `layers` describe the *combined*
+  view: `layers` is the union of every reachable child manifest's blobs,
+  deduplicated by digest, and `config` is the first config blob found. For a
+  multi-platform index, `platform_details` breaks that down per architecture —
+  one entry per child manifest (`digest` is the child's digest, `os`/
+  `architecture`/`variant` its platform, and `manifest`/`config`/`layers` that
+  child's own data). A plain image manifest yields a single entry. The UI uses
+  this to offer an "All platforms" vs per-arch view.
 - `unique_size` is the storage owned by the entity — every blob for which its
   earliest referencing tag (by `tags.created_at`) lives here; `shared_size` is
   `size - unique_size`, bytes an earlier tag already owned. Reuse between tags

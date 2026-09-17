@@ -21,7 +21,14 @@ export function RepositoryRouteView() {
   if (!parsed || parsed.repo.length === 0) return <NotFoundPage />
 
   if (parsed.view === 'tag') {
-    return <TagPage namespace={namespace} repo={parsed.repo} tag={parsed.tag} />
+    return (
+      <TagPage
+        key={`${namespace}/${parsed.repo}:${parsed.tag}`}
+        namespace={namespace}
+        repo={parsed.repo}
+        tag={parsed.tag}
+      />
+    )
   }
 
   if (parsed.view === 'layer') {

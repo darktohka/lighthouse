@@ -144,6 +144,19 @@ pub struct LayerInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PlatformDetail {
+    pub os: String,
+    pub architecture: String,
+    pub variant: Option<String>,
+    pub digest: String,
+    pub media_type: String,
+    pub size: i64,
+    pub manifest: Value,
+    pub config: Option<Value>,
+    pub layers: Vec<LayerInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PublicPermission {
     pub id: i64,
     pub subject_type: String,
@@ -172,6 +185,7 @@ pub struct TagDetail {
     pub manifest: Value,
     pub config: Option<Value>,
     pub layers: Vec<LayerInfo>,
+    pub platform_details: Vec<PlatformDetail>,
     pub can_pull: bool,
     pub can_push: bool,
 }

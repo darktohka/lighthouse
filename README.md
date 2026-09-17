@@ -40,7 +40,7 @@ statistics, storage analytics and an in-browser layer filesystem viewer.
   `/v2` (anonymous pull included), a configurable `WWW-Authenticate` challenge
   (`Bearer`, `Basic` or both), push implies pull.
 - **Control plane** — dashboard and activity timeline, image and tag detail with
-  compressed/uncompressed sizes and platforms, JSON manifest/config browsing,
+  sizes and platforms, JSON manifest/config browsing,
   in-browser layer filesystem, storage analytics, profile pages with a yearly
   contribution heatmap and follows.
 - **Operations** — daily-rotated logs with per-request IP/user-agent/timestamp,

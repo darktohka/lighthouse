@@ -237,6 +237,19 @@ export const layerInfoSchema = v.object({
 })
 export type LayerInfo = v.InferOutput<typeof layerInfoSchema>
 
+export const platformDetailSchema = v.object({
+  os: v.string(),
+  architecture: v.string(),
+  variant: v.nullable(v.string()),
+  digest: v.string(),
+  media_type: v.string(),
+  size: v.number(),
+  manifest: jsonObjectSchema,
+  config: v.nullable(jsonObjectSchema),
+  layers: v.array(layerInfoSchema),
+})
+export type PlatformDetail = v.InferOutput<typeof platformDetailSchema>
+
 export const tagDetailSchema = v.object({
   name: v.string(),
   digest: v.string(),
@@ -249,6 +262,7 @@ export const tagDetailSchema = v.object({
   manifest: jsonObjectSchema,
   config: v.nullable(jsonObjectSchema),
   layers: v.array(layerInfoSchema),
+  platform_details: v.array(platformDetailSchema),
   can_pull: v.boolean(),
   can_push: v.boolean(),
 })

@@ -24,9 +24,10 @@ use crate::state::{AppState, AuthContext};
 use super::layers;
 use super::permissions as delegations;
 use super::{
-    LayerInfo, PageQuery, Pagination, Platform, RepositoryDetail, RepositorySummary, TagDetail,
-    TagSizeEntry, TagSummary, is_namespace_owner, load_namespace, namespace_by_id,
-    repository_blob_totals, tag_size_map, user_summary, visible_repository, visible_repository_ids,
+    LayerInfo, PageQuery, Pagination, Platform, PlatformDetail, RepositoryDetail,
+    RepositorySummary, TagDetail, TagSizeEntry, TagSummary, is_namespace_owner, load_namespace,
+    namespace_by_id, repository_blob_totals, tag_size_map, user_summary, visible_repository,
+    visible_repository_ids,
 };
 
 // ---------------------------------------------------------------------------
@@ -460,6 +461,43 @@ pub(crate) async fn platforms_for(
     }])
 }
 
+async fn manifest_blob_edges(
+    state: &AppState,
+    manifest_id: i64,
+) -> ApiResult<Vec<(String, Option<String>, i64, String)>> {
+    let edges = sqlx::query_as::<_, (String, Option<String>, i64, String)>(
+        "SELECT b.digest, b.media_type, b.size, mb.role \
+         FROM manifest_blobs mb JOIN blobs b ON b.id = mb.blob_id \
+         WHERE mb.manifest_id = ? ORDER BY mb.role = 'config' DESC, b.digest",
+    )
+    .bind(manifest_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(edges)
+}
+
+async fn config_and_layers(
+    state: &AppState,
+    edges: Vec<(String, Option<String>, i64, String)>,
+) -> (Option<Value>, Vec<LayerInfo>) {
+    let mut layers = Vec::with_capacity(edges.len());
+    let mut config: Option<Value> = None;
+    for (digest, media_type, size, role) in edges {
+        if role == "config" && config.is_none() {
+            if let Some(value) = blob_json(state, &digest).await {
+                config = Some(value);
+            }
+        }
+        layers.push(LayerInfo {
+            digest,
+            media_type,
+            size,
+            role,
+        });
+    }
+    (config, layers)
+}
+
 async fn build_tag_summary(
     state: &AppState,
     repository_id: i64,
@@ -523,29 +561,58 @@ async fn build_tag_detail(
     .fetch_all(&state.db)
     .await?;
 
-    let mut layers = Vec::with_capacity(edges.len());
-    let mut config: Option<Value> = None;
-    for (digest, media_type, size, role) in edges {
-        if role == "config" && config.is_none() {
-            if let Some(value) = blob_json(state, &digest).await {
-                config = Some(value);
-            }
-        }
-        layers.push(LayerInfo {
-            digest,
-            media_type,
-            size,
-            role,
-        });
-    }
+    let (config, layers) = config_and_layers(state, edges).await;
 
     let manifest_json =
         serde_json::from_slice(&manifest.content).unwrap_or(Value::Null);
+
+    let platform_details = if media_types::is_index_type(&manifest.media_type) {
+        let mut details = Vec::with_capacity(summary.platforms.len());
+        for platform in &summary.platforms {
+            let digest = Digest::parse(&platform.digest).map_err(ApiError::from)?;
+            let Some(child) = state.registry.manifest(&digest).await? else {
+                continue;
+            };
+            let child_edges = manifest_blob_edges(state, child.id).await?;
+            let (child_config, child_layers) = config_and_layers(state, child_edges).await;
+            let child_manifest =
+                serde_json::from_slice(&child.content).unwrap_or(Value::Null);
+            details.push(PlatformDetail {
+                os: platform.os.clone(),
+                architecture: platform.architecture.clone(),
+                variant: platform.variant.clone(),
+                digest: child.digest.clone(),
+                media_type: child.media_type.clone(),
+                size: child.size,
+                manifest: child_manifest,
+                config: child_config,
+                layers: child_layers,
+            });
+        }
+        details
+    } else {
+        let platform = summary.platforms.first();
+        let tag_edges = manifest_blob_edges(state, manifest.id).await?;
+        let (tag_config, tag_layers) = config_and_layers(state, tag_edges).await;
+        vec![PlatformDetail {
+            os: platform.map(|p| p.os.clone()).unwrap_or_default(),
+            architecture: platform.map(|p| p.architecture.clone()).unwrap_or_default(),
+            variant: platform.and_then(|p| p.variant.clone()),
+            digest: manifest.digest.clone(),
+            media_type: manifest.media_type.clone(),
+            size: manifest.size,
+            manifest: manifest_json.clone(),
+            config: tag_config,
+            layers: tag_layers,
+        }]
+    };
+
     Ok(TagDetail {
         summary,
         manifest: manifest_json,
         config,
         layers,
+        platform_details,
         can_pull: access.can_pull,
         can_push: access.can_push,
     })

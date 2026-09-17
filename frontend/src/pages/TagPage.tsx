@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { repositories as repositoriesApi } from '../api/endpoints'
-import type { LayerInfo } from '../api/schemas'
+import type { LayerInfo, PlatformDetail, TagDetail } from '../api/schemas'
 import { CopyButton } from '../components/CopyButton'
 import { JsonViewer } from '../components/json-viewer'
 import { PageHeader } from '../components/PageHeader'
@@ -22,6 +22,7 @@ import {
   formatBytes,
   formatDateTime,
   formatNumber,
+  formatPlatform,
   formatRelativeTime,
   shortDigest,
 } from '../lib/format'
@@ -42,6 +43,15 @@ const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
   { id: 'config', label: 'Config' },
 ]
 
+function defaultPlatformDigest(
+  details: readonly PlatformDetail[],
+): string | null {
+  const preferred = details.find(
+    (item) => item.os === 'linux' && item.architecture === 'amd64',
+  )
+  return (preferred ?? details[0])?.digest ?? null
+}
+
 function tabClass(active: boolean): string {
   return cx(
     '-mb-px border-b-2 px-3 py-1.5 text-sm font-medium',
@@ -53,6 +63,7 @@ function tabClass(active: boolean): string {
 
 export function TagPage({ namespace, repo, tag }: TagPageProps) {
   const [tab, setTab] = useState<TabId>('layers')
+  const [platform, setPlatform] = useState<string | null>(null)
   const state = useAsync(
     (signal) => repositoriesApi.tag(namespace, repo, tag, { signal }),
     `tag:${namespace}:${repo}:${tag}`,
@@ -60,6 +71,14 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
   const detail = state.data
   const host = typeof window === 'undefined' ? '' : window.location.host
   const pullCommand = `docker pull ${host}/${namespace}/${repo}:${tag}`
+
+  function browseConfig(digest: string) {
+    const owner = detail?.platform_details.find((item) =>
+      item.layers.some((edge) => edge.role === 'config' && edge.digest === digest),
+    )
+    if (owner) setPlatform(owner.digest)
+    setTab('config')
+  }
 
   const layerColumns: TableColumn<LayerInfo>[] = [
     {
@@ -99,7 +118,7 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
       align: 'right',
       render: (layer) =>
         layer.role === 'config' ? (
-          <Button size="sm" onClick={() => setTab('config')}>
+          <Button size="sm" onClick={() => browseConfig(layer.digest)}>
             Browse
           </Button>
         ) : (
@@ -109,6 +128,183 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
         ),
     },
   ]
+
+  function renderTagDetail(detail: TagDetail) {
+    const platformDetails = detail.platform_details
+    const scope =
+      platform ??
+      (platformDetails.length > 1
+        ? defaultPlatformDigest(platformDetails)
+        : 'all')
+    const active =
+      scope === 'all'
+        ? null
+        : (platformDetails.find((p) => p.digest === scope) ?? null)
+    const viewManifest = active?.manifest ?? detail.manifest
+    const viewConfig = active ? active.config : detail.config
+    const viewLayers = active ? active.layers : detail.layers
+    const layersCaption = active
+      ? `Layers for ${formatPlatform(active.os, active.architecture, active.variant)}`
+      : 'Layers referenced by this tag'
+
+    return (
+      <>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <Box className="p-3">
+            <p className="text-xs text-muted">Compressed</p>
+            <p className="mt-1 text-lg font-semibold">
+              {formatBytes(detail.compressed_size)}
+            </p>
+          </Box>
+          <Box className="p-3">
+            <p className="text-xs text-muted">Pulls</p>
+            <p className="mt-1 text-lg font-semibold">
+              {formatNumber(detail.pull_count)}
+            </p>
+          </Box>
+          <Box className="p-3">
+            <p className="text-xs text-muted">Platforms</p>
+            <p className="mt-1 text-lg font-semibold">
+              {detail.platforms.length}
+            </p>
+          </Box>
+        </div>
+
+        {detail.can_pull ? (
+          <div className="flex flex-col gap-2 rounded-md border border-border bg-canvas-subtle p-3 sm:flex-row sm:items-center sm:justify-between">
+            <code className="break-all font-mono text-xs">{pullCommand}</code>
+            <CopyButton value={pullCommand} label="Copy pull command" />
+          </div>
+        ) : null}
+
+        <Box className="p-3">
+          <dl className="grid gap-2 text-xs sm:grid-cols-2">
+            <div>
+              <dt className="text-muted">Digest</dt>
+              <dd className="break-all font-mono">{detail.digest}</dd>
+            </div>
+            <div>
+              <dt className="text-muted">Media type</dt>
+              <dd className="break-all font-mono">{detail.media_type}</dd>
+            </div>
+            <div>
+              <dt className="text-muted">Updated</dt>
+              <dd>{formatDateTime(detail.updated_at)}</dd>
+            </div>
+            <div>
+              <dt className="text-muted">Platforms</dt>
+              <dd className="mt-1">
+                <PlatformBadges platforms={detail.platforms} limit={8} />
+              </dd>
+            </div>
+          </dl>
+        </Box>
+
+        <div>
+          {platformDetails.length > 1 ? (
+            <div
+              role="group"
+              aria-label="Platform scope"
+              className="mb-2 flex flex-wrap items-center gap-1.5"
+            >
+              <Button
+                size="sm"
+                variant={scope === 'all' ? 'primary' : 'default'}
+                aria-pressed={scope === 'all'}
+                onClick={() => setPlatform('all')}
+              >
+                All platforms
+              </Button>
+              {platformDetails.map((item) => {
+                const label = formatPlatform(
+                  item.os,
+                  item.architecture,
+                  item.variant,
+                )
+                const selected = scope === item.digest
+                return (
+                  <Button
+                    key={item.digest}
+                    size="sm"
+                    variant={selected ? 'primary' : 'default'}
+                    aria-pressed={selected}
+                    title={`${label} · ${formatBytes(item.size)}`}
+                    onClick={() => setPlatform(item.digest)}
+                  >
+                    <span className="font-mono">{label}</span>
+                  </Button>
+                )
+              })}
+            </div>
+          ) : null}
+
+          <div
+            role="tablist"
+            aria-label="Tag details"
+            className="flex gap-1 border-b border-border"
+          >
+            {TABS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                id={`tab-${item.id}`}
+                aria-selected={tab === item.id}
+                aria-controls={`panel-${item.id}`}
+                onClick={() => setTab(item.id)}
+                className={tabClass(tab === item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          <div
+            role="tabpanel"
+            id={`panel-${tab}`}
+            aria-labelledby={`tab-${tab}`}
+            tabIndex={0}
+            className="pt-4"
+          >
+            {tab === 'manifest' ? (
+              <JsonViewer data={viewManifest} defaultExpandDepth={3} />
+            ) : null}
+
+            {tab === 'config' ? (
+              viewConfig ? (
+                <JsonViewer data={viewConfig} defaultExpandDepth={2} />
+              ) : (
+                <EmptyState
+                  title="No config blob"
+                  description="This manifest does not reference a configuration blob."
+                  icon={<FileIcon size={24} aria-hidden="true" />}
+                />
+              )
+            ) : null}
+
+            {tab === 'layers' ? (
+              viewLayers.length === 0 ? (
+                <EmptyState
+                  title="No layers"
+                  description="This manifest does not list any layers."
+                  icon={<FileIcon size={24} aria-hidden="true" />}
+                />
+              ) : (
+                <Box>
+                  <Table
+                    columns={layerColumns}
+                    rows={viewLayers}
+                    rowKey={(layer) => `${layer.role}:${layer.digest}`}
+                    caption={layersCaption}
+                  />
+                </Box>
+              )
+            ) : null}
+          </div>
+        </div>
+      </>
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -150,122 +346,7 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
         <ErrorState error={state.error} onRetry={state.reload} />
       ) : null}
 
-      {detail ? (
-        <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-            <Box className="p-3">
-              <p className="text-xs text-muted">Compressed</p>
-              <p className="mt-1 text-lg font-semibold">
-                {formatBytes(detail.compressed_size)}
-              </p>
-            </Box>
-            <Box className="p-3">
-              <p className="text-xs text-muted">Pulls</p>
-              <p className="mt-1 text-lg font-semibold">
-                {formatNumber(detail.pull_count)}
-              </p>
-            </Box>
-            <Box className="p-3">
-              <p className="text-xs text-muted">Platforms</p>
-              <p className="mt-1 text-lg font-semibold">
-                {detail.platforms.length}
-              </p>
-            </Box>
-          </div>
-
-          {detail.can_pull ? (
-            <div className="flex flex-col gap-2 rounded-md border border-border bg-canvas-subtle p-3 sm:flex-row sm:items-center sm:justify-between">
-              <code className="break-all font-mono text-xs">{pullCommand}</code>
-              <CopyButton value={pullCommand} label="Copy pull command" />
-            </div>
-          ) : null}
-
-          <Box className="p-3">
-            <dl className="grid gap-2 text-xs sm:grid-cols-2">
-              <div>
-                <dt className="text-muted">Digest</dt>
-                <dd className="break-all font-mono">{detail.digest}</dd>
-              </div>
-              <div>
-                <dt className="text-muted">Media type</dt>
-                <dd className="break-all font-mono">{detail.media_type}</dd>
-              </div>
-              <div>
-                <dt className="text-muted">Updated</dt>
-                <dd>{formatDateTime(detail.updated_at)}</dd>
-              </div>
-              <div>
-                <dt className="text-muted">Platforms</dt>
-                <dd className="mt-1">
-                  <PlatformBadges platforms={detail.platforms} limit={8} />
-                </dd>
-              </div>
-            </dl>
-          </Box>
-
-          <div>
-            <div role="tablist" aria-label="Tag details" className="flex gap-1 border-b border-border">
-              {TABS.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="tab"
-                  id={`tab-${item.id}`}
-                  aria-selected={tab === item.id}
-                  aria-controls={`panel-${item.id}`}
-                  onClick={() => setTab(item.id)}
-                  className={tabClass(tab === item.id)}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-
-            <div
-              role="tabpanel"
-              id={`panel-${tab}`}
-              aria-labelledby={`tab-${tab}`}
-              tabIndex={0}
-              className="pt-4"
-            >
-              {tab === 'manifest' ? (
-                <JsonViewer data={detail.manifest} defaultExpandDepth={3} />
-              ) : null}
-
-              {tab === 'config' ? (
-                detail.config ? (
-                  <JsonViewer data={detail.config} defaultExpandDepth={2} />
-                ) : (
-                  <EmptyState
-                    title="No config blob"
-                    description="This manifest does not reference a configuration blob."
-                    icon={<FileIcon size={24} aria-hidden="true" />}
-                  />
-                )
-              ) : null}
-
-              {tab === 'layers' ? (
-                detail.layers.length === 0 ? (
-                  <EmptyState
-                    title="No layers"
-                    description="This manifest does not list any layers."
-                    icon={<FileIcon size={24} aria-hidden="true" />}
-                  />
-                ) : (
-                  <Box>
-                    <Table
-                      columns={layerColumns}
-                      rows={detail.layers}
-                      rowKey={(layer) => `${layer.role}:${layer.digest}`}
-                      caption="Layers referenced by this tag"
-                    />
-                  </Box>
-                )
-              ) : null}
-            </div>
-          </div>
-        </>
-      ) : null}
+      {detail ? renderTagDetail(detail) : null}
     </div>
   )
 }
