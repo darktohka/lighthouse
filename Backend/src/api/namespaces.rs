@@ -85,7 +85,7 @@ fn normalize(value: Option<String>) -> Option<String> {
     })
 }
 
-async fn namespace_view(
+pub(crate) async fn namespace_view(
     state: &AppState,
     actor: &AuthContext,
     namespace: &Namespace,

@@ -207,14 +207,6 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
               aria-label="Platform scope"
               className="mb-2 flex flex-wrap items-center gap-1.5"
             >
-              <Button
-                size="sm"
-                variant={scope === 'all' ? 'primary' : 'default'}
-                aria-pressed={scope === 'all'}
-                onClick={() => setPlatform('all')}
-              >
-                All platforms
-              </Button>
               {platformDetails.map((item) => {
                 const label = formatPlatform(
                   item.os,

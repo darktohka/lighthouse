@@ -674,7 +674,7 @@ async fn me(
         .user_id
         .ok_or_else(|| ApiError::unauthorized("user session required"))?;
     let user = load_user(&state.db, user_id).await?;
-    let namespaces = sqlx::query_as::<_, Namespace>(
+    let rows = sqlx::query_as::<_, Namespace>(
         "SELECT * FROM namespaces \
          WHERE owner_user_id = ? \
             OR id IN (SELECT namespace_id FROM namespace_members WHERE user_id = ?) \
@@ -684,6 +684,14 @@ async fn me(
     .bind(user_id)
     .fetch_all(&state.db)
     .await?;
+
+    // Serialize each row through the documented `Namespace` view (owner and
+    // repository_count included) so `/auth/me` keeps the same contract as
+    // `/api/namespaces` — the frontend parses both with one schema.
+    let mut namespaces = Vec::with_capacity(rows.len());
+    for namespace in &rows {
+        namespaces.push(crate::api::namespaces::namespace_view(&state, &ctx, namespace).await?);
+    }
 
     Ok(Json(json!({
         "user": UserView::from(&user),

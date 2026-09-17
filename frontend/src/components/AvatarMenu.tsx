@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import { useAuth } from '../lib/auth-context'
 import { cx } from '../lib/cx'
-import { Avatar } from './primitives/Avatar'
+import { LibravatarAvatar } from './LibravatarAvatar'
 
 export function AvatarMenu() {
   const { user, logout } = useAuth()
@@ -54,7 +54,12 @@ export function AvatarMenu() {
         onClick={() => setOpen((previous) => !previous)}
         className="flex items-center gap-1 rounded-full p-0.5 hover:bg-neutral-subtle"
       >
-        <Avatar src={user.avatar_url} name={displayName} size={26} />
+        <LibravatarAvatar
+          src={user.avatar_url}
+          email={user.email}
+          name={displayName}
+          size={26}
+        />
         <ChevronDownIcon size={14} aria-hidden="true" className="text-muted" />
         <span className="sr-only">Account menu</span>
       </button>
