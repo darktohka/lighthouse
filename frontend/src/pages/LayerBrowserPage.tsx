@@ -19,6 +19,7 @@ import {
   LoadingState,
 } from '../components/primitives/StateViews'
 import { Table, type TableColumn } from '../components/primitives/Table'
+import { decodeText, isProbablyBinary } from '../lib/content'
 import { cx } from '../lib/cx'
 import { formatBytes } from '../lib/format'
 import { apiUrl, repoRoute } from '../lib/paths'
@@ -66,10 +67,12 @@ function FilePreview({
       })
       const contentType = response.headers.get('content-type') ?? ''
       if (response.status === 204) return { kind: 'empty' }
-      if (!isTextContentType(contentType)) {
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      if (bytes.length === 0) return { kind: 'empty' }
+      if (!isTextContentType(contentType) && isProbablyBinary(bytes)) {
         return { kind: 'binary', contentType }
       }
-      const text = await response.text()
+      const text = decodeText(bytes)
       if (text.length > MAX_PREVIEW_CHARS) {
         return {
           kind: 'text',
@@ -303,13 +306,6 @@ export function LayerBrowserPage({
         })}
       </nav>
 
-      {state.data?.truncated ? (
-        <Flash variant="warning" title="Large layer">
-          This layer is large. Only the first entries of this directory are
-          shown; use the download link to inspect the full archive.
-        </Flash>
-      ) : null}
-
       <Box>
         {state.loading && !state.data ? (
           <LoadingState label="Listing layer…" />
@@ -318,7 +314,7 @@ export function LayerBrowserPage({
           <ErrorState error={state.error} onRetry={state.reload} />
         ) : null}
         {state.data ? (
-          state.data.entries.length === 0 ? (
+          state.data.length === 0 ? (
             <EmptyState
               title="Empty directory"
               description="There is nothing at this path in the layer."
@@ -326,7 +322,7 @@ export function LayerBrowserPage({
           ) : (
             <Table
               columns={columns}
-              rows={state.data.entries}
+              rows={state.data}
               rowKey={(entry) => `${entry.kind}:${entry.path}`}
               caption={`Contents of /${path}`}
             />

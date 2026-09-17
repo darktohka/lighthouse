@@ -416,16 +416,14 @@ export const layerTreeEntrySchema = v.object({
   path: v.string(),
   kind: layerTreeEntryKindSchema,
   size: v.number(),
-  mode: v.string(),
+  /** Raw tar mode (e.g. `420` for `0644`); the backend serializes it as a number. */
+  mode: v.number(),
   link_target: v.nullable(v.string()),
 })
 export type LayerTreeEntry = v.InferOutput<typeof layerTreeEntrySchema>
 
-export const layerTreeSchema = v.object({
-  entries: v.array(layerTreeEntrySchema),
-  path: v.string(),
-  truncated: v.boolean(),
-})
+/** `GET .../layers/{digest}/tree` returns a bare array of one directory level. */
+export const layerTreeSchema = v.array(layerTreeEntrySchema)
 export type LayerTree = v.InferOutput<typeof layerTreeSchema>
 
 export const layerReferenceSchema = v.object({
