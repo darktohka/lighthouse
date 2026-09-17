@@ -1,0 +1,195 @@
+@import 'tailwindcss';
+
+/* Class-based dark mode (Tailwind v4 defaults to `prefers-color-scheme`). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Primer (GitHub) design tokens.
+ *
+ * Raw values live on `:root` / `.dark` as `--lh-*` custom properties, then get
+ * mapped into Tailwind's theme with `@theme inline` so utilities such as
+ * `bg-canvas-default` / `text-muted` / `border-border` follow the active
+ * palette. `inline` keeps the utility pointing at the variable (rather than
+ * baking the value in), which is what makes the `.dark` override work.
+ */
+:root {
+  /* Canvas */
+  --lh-canvas-default: #ffffff;
+  --lh-canvas-subtle: #f6f8fa;
+  --lh-canvas-overlay: #ffffff;
+  --lh-canvas-inset: #f6f8fa;
+
+  /* Foreground */
+  --lh-fg-default: #1f2328;
+  --lh-fg-muted: #636c76;
+  --lh-fg-subtle: #6e7781;
+  --lh-fg-on-emphasis: #ffffff;
+
+  /* Borders */
+  --lh-border-default: #d0d7de;
+  --lh-border-muted: #d8dee4;
+
+  /* Accent */
+  --lh-accent-fg: #0969da;
+  --lh-accent-emphasis: #0969da;
+  --lh-accent-subtle: #ddf4ff;
+
+  /* Status */
+  --lh-success-fg: #1a7f37;
+  --lh-success-emphasis: #1f883d;
+  --lh-success-subtle: #dafbe1;
+  --lh-attention-fg: #9a6700;
+  --lh-attention-emphasis: #bf8700;
+  --lh-attention-subtle: #fff8c5;
+  --lh-danger-fg: #d1242f;
+  --lh-danger-emphasis: #cf222e;
+  --lh-danger-subtle: #ffebe9;
+
+  /* Neutral overlays (hover rows, muted pills) */
+  --lh-neutral-subtle: rgba(175, 184, 193, 0.2);
+  --lh-neutral-muted: rgba(175, 184, 193, 0.4);
+
+  color-scheme: light;
+}
+
+.dark {
+  --lh-canvas-default: #0d1117;
+  --lh-canvas-subtle: #161b22;
+  --lh-canvas-overlay: #161b22;
+  --lh-canvas-inset: #010409;
+
+  --lh-fg-default: #e6edf3;
+  --lh-fg-muted: #848d97;
+  --lh-fg-subtle: #6e7681;
+  --lh-fg-on-emphasis: #ffffff;
+
+  --lh-border-default: #30363d;
+  --lh-border-muted: #21262d;
+
+  --lh-accent-fg: #2f81f7;
+  --lh-accent-emphasis: #1f6feb;
+  --lh-accent-subtle: rgba(56, 139, 253, 0.15);
+
+  --lh-success-fg: #3fb950;
+  --lh-success-emphasis: #238636;
+  --lh-success-subtle: rgba(46, 160, 67, 0.15);
+  --lh-attention-fg: #d29922;
+  --lh-attention-emphasis: #9e6a03;
+  --lh-attention-subtle: rgba(187, 128, 9, 0.15);
+  --lh-danger-fg: #f85149;
+  --lh-danger-emphasis: #da3633;
+  --lh-danger-subtle: rgba(248, 81, 73, 0.15);
+
+  --lh-neutral-subtle: rgba(110, 118, 129, 0.4);
+  --lh-neutral-muted: rgba(110, 118, 129, 0.4);
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-canvas-default: var(--lh-canvas-default);
+  --color-canvas-subtle: var(--lh-canvas-subtle);
+  --color-canvas-overlay: var(--lh-canvas-overlay);
+  --color-canvas-inset: var(--lh-canvas-inset);
+
+  --color-foreground: var(--lh-fg-default);
+  --color-muted: var(--lh-fg-muted);
+  --color-subtle: var(--lh-fg-subtle);
+  --color-on-emphasis: var(--lh-fg-on-emphasis);
+
+  --color-border: var(--lh-border-default);
+  --color-border-muted: var(--lh-border-muted);
+
+  --color-accent: var(--lh-accent-fg);
+  --color-accent-emphasis: var(--lh-accent-emphasis);
+  --color-accent-subtle: var(--lh-accent-subtle);
+
+  --color-success: var(--lh-success-fg);
+  --color-success-emphasis: var(--lh-success-emphasis);
+  --color-success-subtle: var(--lh-success-subtle);
+  --color-attention: var(--lh-attention-fg);
+  --color-attention-emphasis: var(--lh-attention-emphasis);
+  --color-attention-subtle: var(--lh-attention-subtle);
+  --color-danger: var(--lh-danger-fg);
+  --color-danger-emphasis: var(--lh-danger-emphasis);
+  --color-danger-subtle: var(--lh-danger-subtle);
+
+  --color-neutral-subtle: var(--lh-neutral-subtle);
+  --color-neutral-muted: var(--lh-neutral-muted);
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+    monospace;
+
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-primer: 0 1px 0 rgba(27, 31, 35, 0.04);
+  --shadow-medium:
+    0 3px 6px rgba(140, 149, 159, 0.15), 0 0 0 1px rgba(140, 149, 159, 0.05);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100svh;
+    background-color: var(--lh-canvas-default);
+    color: var(--lh-fg-default);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    min-height: 100svh;
+  }
+
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  /* Primer's high-contrast focus ring. */
+  :focus-visible {
+    outline: 2px solid var(--lh-accent-fg);
+    outline-offset: 1px;
+    border-radius: 3px;
+  }
+
+  ::selection {
+    background-color: var(--lh-accent-subtle);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--lh-border-default) transparent;
+}
+
+/* Blinking caret for the JSON viewer's collapsible affordances. */
+@utility lh-caret {
+  transition: transform 120ms ease;
+}

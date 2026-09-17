@@ -1,0 +1,30 @@
+# Rust
+/Backend/target/
+/Backend/data/
+/Backend/database/
+**/*.rs.bk
+
+# Node
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+
+# Runtime data (flat, host-mapped directories)
+/database/
+/data/
+/logs/
+
+# Env
+.env
+.env.local
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+.omo/
+.codegraph/
+*.log
+
+# Local scratch
+/tmp/

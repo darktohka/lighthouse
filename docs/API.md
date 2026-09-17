@@ -1,0 +1,279 @@
+# Lighthouse — Control-Plane API
+
+Base path `/api`. Every response is JSON. Authentication is the access-token
+cookie (or `Authorization: Bearer`); see `docs/AUTH.md` for the identity surface
+under `/api/auth`.
+
+Errors use the envelope:
+
+```json
+{ "error": { "code": "not_found", "message": "repository not found" } }
+```
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `bad_request` | 400 | validation failure |
+| `unauthorized` | 401 | no/expired credential |
+| `forbidden` | 403 | authenticated but not permitted |
+| `not_found` | 404 | resource does not exist or is not visible |
+| `conflict` | 409 | duplicate name / already exists |
+| `rate_limited` | 429 | limiter exhausted |
+| `internal_error` | 500 | unexpected failure |
+
+## Conventions
+
+- Timestamps are RFC 3339 UTC strings (`2026-09-17T10:30:00.000Z`).
+- Sizes are integers in **bytes**.
+- List endpoints accept `?page=` (1-based) and `?per_page=` (default 25, max 100)
+  and return:
+
+```json
+{ "items": [], "total": 0, "page": 1, "per_page": 25 }
+```
+
+- Repository paths are variable-length (`darktohka/more/complicated/project2`), so
+  repository endpoints place the full name in a capture-all segment and the
+  namespace is always the first path segment.
+- Visibility: a private namespace is invisible unless the caller is the owner, a
+  member, or holds a grant. A public namespace exposes only public repositories
+  plus everything the caller may pull.
+
+---
+
+## 1. Users & social
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/users/{username}` | optional | profile |
+| PATCH | `/users/me` | required | update own profile |
+| GET | `/users/{username}/heatmap?year=YYYY` | optional | daily contribution counts |
+| GET | `/users/{username}/followers` | optional | paginated `UserSummary` |
+| GET | `/users/{username}/following` | optional | paginated `UserSummary` |
+| POST | `/users/{username}/follow` | required | follow (204) |
+| DELETE | `/users/{username}/follow` | required | unfollow (204) |
+| GET | `/users/search?q=&limit=` | optional | username autocomplete (delegations) |
+
+```
+UserSummary   { id, username, first_name, last_name, avatar_url }
+UserProfile   { id, username, first_name, last_name, bio, company, location,
+                website, avatar_url, created_at, namespace,
+                repository_count, public_repository_count, total_pulls,
+                follower_count, following_count, is_following, is_self }
+HeatmapDay    { date, count }
+Heatmap       { year, days: [HeatmapDay], total }
+UpdateProfile { first_name?, last_name?, bio?, company?, location?, website?, theme? }
+```
+
+`avatar_url` is resolved by the frontend from `LIBRAVATAR_BASE_URL` + the
+SHA-256 of the e-mail unless the user supplied an explicit override.
+
+---
+
+## 2. Namespaces
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/namespaces` | optional | visible namespaces |
+| POST | `/namespaces` | required | create workspace |
+| GET | `/namespaces/{name}` | optional | detail |
+| PATCH | `/namespaces/{name}` | required (owner) | description / visibility |
+| DELETE | `/namespaces/{name}` | required (owner) | delete workspace (not personal namespaces) |
+| GET | `/namespaces/{name}/members` | optional | members |
+| POST | `/namespaces/{name}/members` | required (owner) | add member `{username, role}` |
+| DELETE | `/namespaces/{name}/members/{username}` | required (owner) | remove member |
+
+```
+Namespace       { id, name, kind: "user"|"workspace", owner: UserSummary|null,
+                  description, is_public, repository_count, created_at }
+NamespaceMember { user: UserSummary, role: "admin"|"member", created_at }
+```
+
+Creating a workspace whose name collides with an existing username or workspace
+returns `409 conflict` (`namespace_taken`). Reserved first segments
+(`v2`, `api`, `admin`, `static`, `assets`, `login`, `register`, `settings`,
+`explore`, `analytics`, `search`, `new`, `notifications`, `account`,
+`organizations`, `libraries`) are rejected with `400 bad_request`.
+
+---
+
+## 3. Repositories (images) & tags
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/namespaces/{name}/repositories` | optional | list images in a namespace |
+| GET | `/repositories/{namespace}/{*repo}` | optional | image detail |
+| PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility |
+| DELETE | `/repositories/{namespace}/{*repo}` | required | delete the image and all its tags |
+| GET | `/repositories/{namespace}/{*repo}/tags` | optional | paginated tags |
+| GET | `/repositories/{namespace}/{*repo}/tags/{tag}` | optional | tag detail |
+| DELETE | `/repositories/{namespace}/{*repo}/tags/{tag}` | required | delete one tag |
+| POST | `/repositories/{namespace}/{*repo}/tags/batch-delete` | required | `{tags:[…]}` → `{deleted:n}` |
+| GET | `/repositories/{namespace}/{*repo}/pulls?days=30` | optional | pull statistics |
+| GET | `/tags?sort=total_size\|unique_size&order=desc\|asc&namespace=` | optional | all visible tags ranked by size |
+| POST | `/tags/batch-delete` | required | `{items:[{repository,tag}]}` → `{deleted:n}` |
+
+```
+RepositorySummary { id, namespace, path, name, description, is_public,
+                    tag_count, size, pull_count, updated_at }
+RepositoryDetail  { ...RepositorySummary, manifest_count, platform_count,
+                    total_size, unique_size, shared_size, created_at,
+                    created_by: UserSummary|null,
+                    permissions: PublicPermission[] }
+TagSummary  { name, digest, media_type, size, compressed_size,
+              platforms: Platform[], pull_count, updated_at }
+TagDetail   { ...TagSummary, uncompressed_size, manifest: object,
+              config: object|null, layers: LayerInfo[] }
+Platform    { os, architecture, variant|null, digest, size }
+LayerInfo   { digest, media_type, size, uncompressed_size, role: "config"|"layer" }
+TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
+              platforms: Platform[], updated_at }
+```
+
+- `size` is the sum of the compressed blob sizes referenced by the tag;
+  `uncompressed_size` sums `rootfs.diff_ids`-derived layer sizes.
+- `unique_size` counts blobs referenced by **only** this tag; `shared_size` is
+  `size - unique_size`.
+- Deleting an image or tag runs reference-counted cleanup: blobs with no remaining
+  references and no remaining repository links are deleted from disk immediately.
+- `GET /tags` powers the "all my tags by size" page. `sort=unique_size` ranks by
+  storage that would actually be reclaimed.
+
+---
+
+## 4. Manifest & layer browsing
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/repositories/{namespace}/{*repo}/manifests/{digest}` | optional | raw manifest/index JSON |
+| GET | `/repositories/{namespace}/{*repo}/manifests/{digest}/references` | optional | referenced descriptors |
+| GET | `/blobs/{digest}` | optional | raw blob bytes (`application/octet-stream`) |
+| GET | `/blobs/{digest}/json` | optional | blob parsed as JSON (config blobs) |
+| GET | `/repositories/{namespace}/{*repo}/layers/{digest}/tree?path=` | optional | directory listing inside the layer tar |
+| GET | `/repositories/{namespace}/{*repo}/layers/{digest}/file?path=` | optional | one file's bytes (`Content-Type` guessed) |
+| GET | `/repositories/{namespace}/{*repo}/layers/{digest}/download` | optional | raw layer archive |
+
+```
+LayerTreeEntry { name, path, kind: "file"|"dir"|"symlink", size,
+                 mode, link_target }
+LayerReference { digest, media_type, size, role }
+```
+
+Layer archives are decompressed transparently for browsing — `tar`,
+`tar+gzip` and `tar+zstd` are supported, selected by the layer media type. Paths
+are sanitized (no `..`, no absolute paths, no symlink traversal) before use. Large
+layers are streamed and entries are capped per request.
+
+---
+
+## 5. Permissions & delegations
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/namespaces/{name}/permissions` | required (owner) | grants on a namespace |
+| POST | `/namespaces/{name}/permissions` | required (owner) | add grant |
+| DELETE | `/namespaces/{name}/permissions/{id}` | required (owner) | revoke grant |
+| GET | `/repositories/{namespace}/{*repo}/permissions` | required (owner) | grants on an image |
+| POST | `/repositories/{namespace}/{*repo}/permissions` | required (owner) | add grant |
+| DELETE | `/repositories/{namespace}/{*repo}/permissions/{id}` | required (owner) | revoke grant |
+
+```
+CreateGrant { subject_type: "user"|"anonymous", subject?: string, can_push: bool }
+PublicPermission { id, subject_type, subject: UserSummary|null,
+                   can_pull, can_push, created_at }
+```
+
+`can_push` implies `can_pull` server-side. `subject` is a username and is
+required only when `subject_type == "user"`.
+
+---
+
+## 6. Service accounts
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/service-accounts` | required | caller's service accounts |
+| POST | `/service-accounts` | required | create; token returned **once** |
+| GET | `/service-accounts/{id}` | required | detail with grants |
+| DELETE | `/service-accounts/{id}` | required | delete |
+| POST | `/service-accounts/{id}/token` | required | rotate; new token returned once |
+| POST | `/service-accounts/{id}/grants` | required | add a grant |
+| DELETE | `/service-accounts/{id}/grants/{grant_id}` | required | remove a grant |
+
+```
+ServiceAccount { id, name, username, description, token_prefix, token_suffix,
+                 created_at, last_used_at, grants: ServiceAccountGrant[] }
+CreatedServiceAccount { account: ServiceAccount, token: string }
+ServiceAccountGrant { id, namespace: string|null, repository: string|null,
+                      can_pull, can_push }
+CreateServiceAccountGrant { namespace?: string, repository?: string, can_push: bool }
+```
+
+The plaintext token (`lhr_…`) is present only in the create/rotate response.
+Thereafter only `token_prefix` + `token_suffix` are exposed for identification.
+
+---
+
+## 7. Analytics
+
+`GET /api/analytics/overview?namespace=` (auth optional; scoped to what the
+caller may read)
+
+```json
+{
+  "total_size": 0,
+  "unique_size": 0,
+  "shared_size": 0,
+  "shared_percentage": 0.0,
+  "blob_count": 0,
+  "manifest_count": 0,
+  "repository_count": 0,
+  "tag_count": 0,
+  "pull_count": 0,
+  "pull_count_30d": 0,
+  "largest_tags": [],
+  "disk_usage_by_repository": [],
+  "pulls_over_time": [],
+  "top_repositories": []
+}
+```
+
+```
+DiskUsageEntry   { repository, size, unique_size }
+PullsOverTime    { date, pulls }
+TopRepository    { repository, pulls }
+```
+
+`shared_percentage = shared_size / total_size * 100` (0 when total is 0).
+`disk_usage_by_repository` and `largest_tags` are ordered descending.
+
+---
+
+## 8. Activity & dashboard
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/activity` | optional | public activity feed |
+| GET | `/activity/me` | required | the caller's activity |
+| GET | `/dashboard` | required | own repositories + timeline + counters |
+
+```
+ActivityEntry { id, kind, summary, actor: UserSummary|null, namespace,
+                repository, metadata, created_at }
+Dashboard     { repositories: RepositorySummary[],
+                activity: ActivityEntry[],
+                stats: { repository_count, tag_count, total_size,
+                         pull_count_30d } }
+```
+
+Activity kinds include `user.registered`, `namespace.created`,
+`repository.created`, `tag.pushed`, `tag.deleted`, `manifest.deleted`,
+`permission.granted`, `permission.revoked`, `service_account.created`.
+
+---
+
+## 9. Health
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/healthz` | none | liveness |
+| GET | `/api/health` | none | liveness (JSON) |

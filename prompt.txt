@@ -1,0 +1,92 @@
+Create a Rust-based Docker image registry. Called "Lighthouse".
+
+WRITE DOCUMENTATION FOR EVERYTHING IN "docs" FOLDER.
+
+The frontend is a Vite application (TypeScript 6 - TypeScript 7 is not ready yet, Vite 8, Tailwind CSS, React).
+- "frontend" folder.
+- MUST use Valibot for DTOs and types.
+- Follow the GitHub design system and colors. Check PRIMER.md
+- Light mode / dark mode both implemented. Light mode by default.
+- Use cookies , not local storage for main token. Can use local storage for refresh token.
+
+The backend is a Rust application.
+- "Backend" folder.
+- Axum based, async runtime with tokio.
+- Logging is handled. Request-response logs with IP address and user agent per request. Includes timestamp on all logs. Logs are saved into LOGS_DIR folder, following YY-MM-DD.log format (year-month-day.log) and cycling every day.
+- Database is SQLite, using sqlx, with busy_timeout 5000, WAL mode enabled. Work around "database busy" issues. Migrations are handled.
+- Proper Tokio Ctrl+c/sigterm handling that shuts down all connections.
+- The backend works as: 1. a compliant OCI image registry, and 2. a backend for the frontend application.
+- Supports both legacy Docker and modern OCI image formats.
+- Support every operation of a Docker image registry. Pull, push, login, sharing layers (mounting), etc. Compliance with the OCI Distribution Specification is REQUIRED.
+- Dockerfile with final "scratch" layer. Contains built Vite application (/dist) and fully static /app/registry executable (Alpine, rust)
+- GitHub workflow that builds ubuntu-24.04 (x64), ubuntu-24.04-arm (arm64) image and then pushes to darktohka/registry:latest
+- Backend env variables configurable through docker-compose.yaml, environment variables.
+- Database has own ./database partition.
+- Blobs has own ./data partition, where all other things are stored like blobs, configs, manifests, etc.
+- DO not use Docker volumes. Flat folders to map.
+
+===
+GET /v2/ API version check
+Blob operations:
+HEAD /v2/<name>/blobs/<digest>
+GET /v2/<name>/blobs/<digest>
+blob upload initiation
+monolithic uploads
+chunked uploads
+resumable uploads
+upload status
+upload cancellation
+upload completion
+Manifest operations: GET, HEAD, PUT, DELETE
+Tag listing
+Repository catalog
+Pagination using n / last
+Proper HTTP status codes
+OCI/Docker Accept content negotiation
+Content-Type correctness
+Docker-Content-Digest
+Location
+Range / Content-Range
+Content-Length
+ETag where appropriate
+conditional requests where appropriate
+correct 404, 401, 403, 405, 409, 416, 429, 500, etc.
+OCI error response format
+correct Docker-Distribution-API-Version behavior where applicable
+and so on.
+===
+
+- There is a folder called "distribution" - this is the Go-based application that can be used as a reference for a compliant Docker image registry.
+- There is a folder called "image-spec" - this is the OCI image format specification that must be fllowed.
+- Use Rust libraries for parsing Docker images and types if possible. We must support tar, tar.gz, tar.zst as a minimum. Support all types from the specifcation.
+
+Special entities:
+- Users. We use Brevo to send e-mails. (can use reqwest to send e-mails). You can register with an e-mail, username, first name, last name and password. You can log in with either e-mail/username + password. On register, sends e-mail verification that must be followed and your account has to be verified before you can log in for the first time. If a username / workspacename already exists then the username cannot be chosen.
+- By defualt load profile pictures from libravatar. When pressing on change profile picture head to Libravatar.
+- Each user has a namespace. For example, if the host is registry.tohka.us and the username is darktohka then their namespace is registry.tohka.us/darktohka.
+- They can also create new workspaces. If I create a workspace called "tohkas-projects" then the full workspace name iwll be registry.tohka.us/tohkas-projects. Prevent creating workspaces with already existing usernames or workspace names, as the namespace name has to be uniue.
+- In a namespace as the owner you can push / pull to any image. In namespace darktohka for example I can push to registry.tohka.us/darktohka/project1, registry.tohka.us/darktohka/project2, etc. I can also do /darktohka/more/complicated/project2, nested.
+- As a user I can delegate access to another user by e-mail / username - autocomplete the input with potential users as they type. Add ability to push / pull. Anonymous can also be chosen, this means that the push / pull permission will be given without login credentials. YOu can delegate access to a namespace or an already existing image.
+- As a user I can also create service accounts that allows access to a namespace or an image. Service tokens are hidden apart from their first 3 and last 3 letters once created, you can copy it once immediately after creation. Any username + token as password can be used to authenticate as that service token. A service account has a name. A service account can have access to multiple namespaces / repositories, so service accounts are managed on a user-specific page.
+- I want to see image details, sizes (compressed + non-compressed) for each image tag.
+- I want to be able to browse the JSONs for each tag's JSON configs/manifests and the layers, as thoroughly as possible. For the layers I also want to be able to see inside the image as if it was a filesystem on GitHub.
+- By default, all namespaces / images are private, only the owner can pull / push.
+- As a user, I want a main page where I can see my own images, and a timeline of my latest activities: new push to images, new namespace, permissions updated for... etc.
+- I want an analytics page. Important metrics are total disk usage, disk use per image, largest tags. Unique disk usage. Unique disk usage per image. Shared storage percentage. Come with more relevant analytics. Can use recharts.
+- Public namespaces / images are browsable. Private namespaces are also browsable if they have at least one public image, in that case you'll only see the images you have pull / push permission to. GitHub-style. Users each have their own profile page, like on GItHub. GitHub-style yearly heatmap. Allow to follow people, show followers, show people you're following, profile picture, real name, username and allow to set details like on GitHub.
+- Push permission implies pull.
+- Allow user to delete a tag or delete an image.
+- Add a page where all your tags are sorted by size. Allow sorting / showing by total size and sorting / showing by unique size (size that is unique to the tag and not part of any other image). I can delete and cleanup tags on this page batched too.
+- Pull statistics per image AND per image tag.
+- Implement proper cleanup. When an image/tag is removed, all dangling references taken up by that image/tag previously should be deleted forever. Garbage collection with reference graph.
+- Blobs are stored by digest, reuse things that already exist.
+- Multi-platform imags must work. A tag may point to an OCI index or a Docker manifest list , the UI should show those as separate platforms as part of the tag. If there's only one platforms- it should still be treated the same way: a manifest list with one platform entry.
+- Every uploaded blob should have its digest cryptographically verified.
+- Argon2id password hashing.
+- Logins and service token usages should be logged. Pulls / pushs should also be logged we want to know the repository, image, image tags, timestamp, IP address, user agent. We're behind a Caddy reverse proxy.
+- All push / pull / delete / etc. operations should be logged with user ID used for authentication (null if anonymous), IP, http user agent, time, reference, etc.
+- Rate-limiting user login / register. In-memory.
+- Captcha using https://docs.rs/pow-captcha-axum/latest/pow_captcha_axum/ Rust crate and https://www.npmjs.com/package/pow-captcha-react npm package for solving captcha for React. For login, register, forgot password.
+- For user logins: allow user to check their own login history. IP, user agent, time.
+
+Test against Docker client (docker).

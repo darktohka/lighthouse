@@ -1,0 +1,91 @@
+# Lighthouse — docker compose deployment.
+#
+# Copy .env.example to .env and set JWT_SECRET before starting:
+#   cp .env.example .env
+#   openssl rand -hex 32        # paste the result into JWT_SECRET
+#   mkdir -p database data logs
+#   chown -R 10001:10001 database data logs
+#   docker compose up -d
+#
+# All state lives in three flat host directories next to this file:
+#   ./database  SQLite database (WAL mode)
+#   ./data      OCI blobs, manifests and upload sessions
+#   ./logs      daily application logs (YYYY-MM-DD.log)
+#
+# No named volumes are used, so a backup is a plain copy of those folders.
+
+services:
+  lighthouse:
+    image: darktohka/registry:latest
+    # To build the image from this checkout instead, comment out `image:` and
+    # uncomment the following two lines:
+    # build:
+    #   context: .
+    container_name: lighthouse
+    restart: unless-stopped
+    ports:
+      - "${LIGHTHOUSE_PORT:-8080}:${LIGHTHOUSE_PORT:-8080}"
+    environment:
+      # --- bind address & public identity -----------------------------------
+      LIGHTHOUSE_HOST: ${LIGHTHOUSE_HOST:-0.0.0.0}
+      LIGHTHOUSE_PORT: ${LIGHTHOUSE_PORT:-8080}
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost:8080}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-http}
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      # --- storage ----------------------------------------------------------
+      DATABASE_DIR: ${DATABASE_DIR:-/app/database}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///app/database/lighthouse.db?mode=rwc}
+      DATA_DIR: ${DATA_DIR:-/app/data}
+      LOGS_DIR: ${LOGS_DIR:-/app/logs}
+      FRONTEND_DIR: ${FRONTEND_DIR:-/app/dist}
+      # --- authentication ---------------------------------------------------
+      # Required. Generate with: openssl rand -hex 32
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}"
+      ACCESS_TOKEN_TTL_SECS: ${ACCESS_TOKEN_TTL_SECS:-3600}
+      REFRESH_TOKEN_TTL_SECS: ${REFRESH_TOKEN_TTL_SECS:-2592000}
+      EMAIL_VERIFICATION_TTL_SECS: ${EMAIL_VERIFICATION_TTL_SECS:-86400}
+      PASSWORD_RESET_TTL_SECS: ${PASSWORD_RESET_TTL_SECS:-3600}
+      UPLOAD_SESSION_TTL_SECS: ${UPLOAD_SESSION_TTL_SECS:-86400}
+      COOKIE_NAME: ${COOKIE_NAME:-lighthouse_token}
+      # Blank scopes the cookie to the request host.
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      # true requires HTTPS; set false only for plain-HTTP local development.
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Trust X-Forwarded-For / X-Real-IP from a reverse proxy (keep true behind Caddy).
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      # --- transactional e-mail (Brevo) -------------------------------------
+      EMAIL_ENABLED: ${EMAIL_ENABLED:-false}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      BREVO_SENDER_EMAIL: ${BREVO_SENDER_EMAIL:-noreply@example.com}
+      BREVO_SENDER_NAME: ${BREVO_SENDER_NAME:-Lighthouse Registry}
+      # --- abuse protection -------------------------------------------------
+      CAPTCHA_ENABLED: ${CAPTCHA_ENABLED:-false}
+      CAPTCHA_DIFFICULTY: ${CAPTCHA_DIFFICULTY:-18}
+      RATE_LIMIT_LOGIN_PER_MINUTE: ${RATE_LIMIT_LOGIN_PER_MINUTE:-10}
+      RATE_LIMIT_REGISTER_PER_HOUR: ${RATE_LIMIT_REGISTER_PER_HOUR:-20}
+      # --- misc -------------------------------------------------------------
+      # Maximum accepted blob size in bytes; blank means unlimited.
+      MAX_BLOB_SIZE: ${MAX_BLOB_SIZE:-}
+      LIBRAVATAR_BASE_URL: ${LIBRAVATAR_BASE_URL:-https://seccdn.libravatar.org}
+      LIGHTHOUSE_TITLE: ${LIGHTHOUSE_TITLE:-Lighthouse}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # Flat bind mounts — deliberately not named volumes.
+      - ./database:/app/database
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      # Statically linked probe shipped in the scratch image (no shell/curl).
+      test: ["CMD", "/app/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true

@@ -1,0 +1,33 @@
+# Version control and agent/tooling metadata
+.git
+.gitignore
+.github
+.codegraph
+.omo
+
+# Rust build output (rebuilt inside the builder stage)
+/Backend/target
+
+# Frontend dependencies and build output (rebuilt inside the frontend stage)
+/frontend/node_modules
+/frontend/dist
+/frontend/.vite
+
+# Runtime state, bind-mounted by docker-compose — never baked into the image
+/database
+/data
+/logs
+.env
+.env.*
+
+# Documentation and reference copies not needed by the build
+/docs
+/distribution
+/image-spec
+/prompt.txt
+
+# Editor / OS noise
+.DS_Store
+.idea
+.vscode
+*.log

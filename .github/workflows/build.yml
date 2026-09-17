@@ -1,0 +1,226 @@
+name: build
+
+# Trigger policy:
+#   push to main / v* tags → checks, then native amd64+arm64 builds, then a
+#                            multi-arch image published to Docker Hub + GHCR
+#   pull_request           → checks only (no push)
+#   workflow_dispatch      → full pipeline on demand
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Primary image. Docker Hub push is skipped automatically when the
+  # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN repository secrets are not configured.
+  DOCKERHUB_IMAGE: darktohka/registry
+  # Secondary image, always published with the built-in GITHUB_TOKEN.
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast validation: Rust tests + frontend production build.
+  # ---------------------------------------------------------------------------
+  checks:
+    name: Checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Backend/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Backend/Cargo.lock') }}
+
+      - name: cargo test
+        working-directory: Backend
+        env:
+          JWT_SECRET: ci-test-secret
+          RUST_LOG: info
+        run: cargo test --locked
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+
+  # ---------------------------------------------------------------------------
+  # Native per-architecture builds. `push-by-digest` means each job publishes an
+  # untagged single-platform manifest; the merge job stitches them together.
+  # There is no QEMU: amd64 runs on ubuntu-24.04, arm64 on ubuntu-24.04-arm.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: checks
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Optional: only runs when Docker Hub credentials are configured.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Assemble the per-arch digests into one multi-arch manifest list and apply
+  # the release tags. Docker Hub is primary, GHCR is secondary; the Docker Hub
+  # half is skipped when its secrets are absent.
+  # ---------------------------------------------------------------------------
+  merge:
+    name: Publish multi-arch image
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        shell: bash
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+
+          short_sha="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+
+          registries=("${GHCR_IMAGE}")
+          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
+            registries+=("${DOCKERHUB_IMAGE}")
+          fi
+
+          versions=("latest" "sha-${short_sha}")
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+            versions+=("${version}")
+            if [[ "${version}" == *.*.* ]]; then
+              versions+=("${version%.*}" "${version%%.*}")
+            elif [[ "${version}" == *.* ]]; then
+              versions+=("${version%%.*}")
+            fi
+          fi
+
+          args=()
+          for registry in "${registries[@]}"; do
+            for version in "${versions[@]}"; do
+              args+=(-t "${registry}:${version}")
+            done
+          done
+
+          sources=()
+          for digest_file in /tmp/digests/*; do
+            sources+=("${GHCR_IMAGE}@sha256:$(basename "${digest_file}")")
+          done
+
+          printf 'Sources:\n'
+          printf '  %s\n' "${sources[@]}"
+          printf 'Tags:\n'
+          printf '  %s\n' "${args[@]}"
+
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
