@@ -584,6 +584,47 @@ async fn layer_tree_file_and_path_traversal_safety() {
     assert_eq!(downloaded, layer);
 }
 
+#[tokio::test]
+async fn layer_tree_serves_from_cache_and_invalidation_forces_a_rescan() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let layer = layer_archive();
+    let (_, layer_digest) = seed_image(&state, "alice/img", "latest", b"config", &layer).await;
+    let digest = layer_digest.to_string();
+    let tree_uri = format!("/api/repositories/alice/img/layers/{digest}/tree");
+
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.layer_cache.len(), 1, "first request caches the index");
+    assert!(state.layer_cache.weight() > 0);
+
+    // A cache hit must not reopen the archive: corrupt it and the listing is
+    // still served, because only a rescan would read the bytes.
+    let blob_path = state.storage.blob_path(&layer_digest);
+    tokio::fs::write(&blob_path, b"not a tar")
+        .await
+        .expect("corrupt blob");
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "second request is served from the cached index"
+    );
+    let tree = body_json(response).await;
+    assert!(
+        tree.as_array()
+            .expect("tree")
+            .iter()
+            .any(|entry| entry["name"] == "etc")
+    );
+
+    // Dropping the index forces a rebuild, which now fails on the corrupt blob.
+    state.layer_cache.invalidate(&layer_digest);
+    assert_eq!(state.layer_cache.len(), 0);
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
 // ---------------------------------------------------------------------------
 // Permissions and service accounts
 // ---------------------------------------------------------------------------

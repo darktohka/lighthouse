@@ -177,6 +177,7 @@ pub async fn delete(
             .delete_blob(&digest)
             .await
             .map_err(super::storage_failure)?;
+        state.layer_cache.invalidate(&digest);
     }
 
     let digest_text = digest.to_string();

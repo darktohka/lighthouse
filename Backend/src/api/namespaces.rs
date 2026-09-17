@@ -311,6 +311,9 @@ async fn remove(
         .await?;
 
     if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+        for digest in &report.deleted_digests {
+            state.layer_cache.invalidate(digest);
+        }
         tracing::info!(blobs = report.blobs_deleted, "namespace delete gc");
     }
 

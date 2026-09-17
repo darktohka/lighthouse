@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod email;
 mod error;
+mod layer_cache;
 mod logging;
 mod models;
 mod oci;

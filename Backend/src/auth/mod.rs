@@ -110,6 +110,8 @@ pub(crate) mod test_support {
             rate_limit_login_per_minute: 10,
             rate_limit_register_per_hour: 20,
             max_blob_size: None,
+            layer_cache_max_bytes: 64 * 1024 * 1024,
+            layer_cache_ttl_secs: 900,
             libravatar_base_url: "https://seccdn.libravatar.org".to_string(),
             title: "Lighthouse".to_string(),
         }

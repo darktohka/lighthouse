@@ -61,8 +61,8 @@ rather than leaking a panic.
 
 ### Merging, overrides and whiteouts
 
-`tree` scans the whole archive once and folds entries into a map keyed by
-normalized path, applying OCI layer rules in stream order:
+`tree` scans the whole archive once (on a cache miss) and folds entries into a
+map keyed by normalized path, applying OCI layer rules in stream order:
 
 - A repeated path **overrides** the earlier entry (later wins).
 - `.wh.<name>` removes `<name>` from its directory (deleted in a lower layer).
@@ -124,25 +124,26 @@ a single request cannot exhaust memory or CPU.
 
 ---
 
-## 6. Cost and caching opportunity
+## 6. Caching
 
-A tar stream is sequential and has no central directory, so **each request
-rescans from the beginning of the layer**. `tree` must always scan the whole
-archive to resolve overrides and whiteouts; `file` stops at the first match but
-still decompresses every preceding entry.
+A tar stream is sequential and has no central directory, so building the merged
+path map means decompressing the whole archive. `tree` memoizes that map per
+layer digest in `src/layer_cache.rs`: only the first request for a digest pays
+the scan, and every later directory listing of that layer is served from memory.
 
-This is acceptable for interactive browsing because:
+The cache is bounded and self-expiring:
 
-- nothing is buffered except the requested file (≤ 5 MiB),
-- the scan runs on a blocking thread pool, and
-- the layer bytes are read from the local content store.
+| Bound | Default | Behaviour |
+|---|---|---|
+| `LAYER_CACHE_MAX_BYTES` | 64 MiB | Estimated total footprint; least-recently-used indices are evicted first. An index whose own weight exceeds the budget is never cached, so one huge layer cannot flush every other layer. |
+| `LAYER_CACHE_TTL_SECS` | 900 s | An index older than this is a miss and is rebuilt. Expired indices are reclaimed by a sweep scheduled for the earliest entry's expiry, never on a fixed cadence. |
 
-If repeated browsing of the same large layer becomes hot, the natural
-optimization is a per-digest, bounded in-memory index cache: the first `tree`
-builds an ordered `(path, kind, size, mode, link_target, uncompressed_offset)`
-table while streaming (still respecting the caps), and subsequent `tree`/`file`
-requests serve from that table without re-decompressing. The cache could be
-keyed by layer digest, sized by entry count, and invalidated by the garbage
-collector when the blob is removed. The current implementation deliberately does
-not cache so that behaviour stays predictable and memory use is bounded by the
-request.
+Concurrent misses for one digest are collapsed onto a single scan: the first
+caller builds on the blocking pool while the rest wait on that digest's build
+lock, then observe the freshly cached index. Entries are dropped explicitly when
+their blob is removed — the garbage collector reports the digests it swept and
+the OCI blob delete invalidates directly. The database checks in step 1 mean a
+deleted layer can never be served from a stale entry regardless.
+
+`file` is not cached: returning a single file's bytes would still require
+decompressing everything before it, so it keeps its early-exit scan.

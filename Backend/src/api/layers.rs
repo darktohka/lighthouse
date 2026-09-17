@@ -6,9 +6,14 @@
 //! number of entries, decompressed bytes and the size of a single browsed file.
 //! Requested paths are sanitized (no absolute paths, no `..`, no NUL, no
 //! symlink traversal) before any lookup. See `docs/LAYER_BROWSER.md`.
+//!
+//! A full scan is expensive, so each layer's merged path map is memoized in
+//! [`crate::layer_cache`]; only the first `tree` request for a digest pays the
+//! decompression cost.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
@@ -23,12 +28,13 @@ use tar::EntryType;
 
 use crate::auth::middleware::Auth;
 use crate::error::{ApiError, ApiResult};
+use crate::layer_cache::{CachedEntry, EntryKind, LayerIndex};
 use crate::models::Blob;
 use crate::oci::digest::Digest;
 use crate::oci::media_types;
+use crate::oci::reference;
 use crate::permissions;
 use crate::state::{AppState, AuthContext};
-use crate::oci::reference;
 use tokio_util::io::ReaderStream;
 
 use super::visible_repository;
@@ -217,43 +223,24 @@ fn map_io(err: io::Error) -> ApiError {
     }
 }
 
-#[derive(Clone)]
-struct EntryData {
-    kind: String,
-    size: i64,
-    mode: u32,
-    link_target: Option<String>,
-}
-
-impl EntryData {
-    fn directory() -> Self {
-        Self {
-            kind: "dir".to_string(),
-            size: 0,
-            mode: 0o755,
-            link_target: None,
-        }
-    }
-}
-
-fn entry_kind(entry_type: EntryType) -> String {
+fn entry_kind(entry_type: EntryType) -> EntryKind {
     if entry_type.is_dir() {
-        "dir".to_string()
+        EntryKind::Dir
     } else if entry_type.is_symlink() {
-        "symlink".to_string()
+        EntryKind::Symlink
     } else {
-        "file".to_string()
+        EntryKind::File
     }
 }
 
 /// Reads the archive through the entry stream, applying the whiteout and
 /// repeated-path rules, and returns the merged path map.
-fn merge_entries(reader: Box<dyn Read + Send>) -> ApiResult<HashMap<String, EntryData>> {
+fn merge_entries(reader: Box<dyn Read + Send>) -> ApiResult<HashMap<String, CachedEntry>> {
     let mut archive = tar::Archive::new(CappedReader {
         inner: reader,
         remaining: MAX_SCAN_BYTES,
     });
-    let mut merged: HashMap<String, EntryData> = HashMap::new();
+    let mut merged: HashMap<String, CachedEntry> = HashMap::new();
     let mut pending_long_name: Option<Vec<u8>> = None;
     let mut count = 0u64;
 
@@ -324,13 +311,13 @@ fn merge_entries(reader: Box<dyn Read + Send>) -> ApiResult<HashMap<String, Entr
                 .link_name()
                 .ok()
                 .flatten()
-                .map(|target| target.to_string_lossy().to_string())
+                .map(|target| target.to_string_lossy().into_owned().into_boxed_str())
         } else {
             None
         };
         merged.insert(
             path,
-            EntryData {
+            CachedEntry {
                 kind: entry_kind(entry_type),
                 size,
                 mode,
@@ -352,18 +339,15 @@ struct LayerTreeEntry {
     link_target: Option<String>,
 }
 
-fn list_level(
-    merged: &HashMap<String, EntryData>,
-    path: &str,
-) -> ApiResult<Vec<LayerTreeEntry>> {
+fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> {
     let prefix = if path.is_empty() {
         String::new()
     } else {
         format!("{path}/")
     };
-    let mut children: HashMap<String, EntryData> = HashMap::new();
-    for (entry_path, data) in merged {
-        if entry_path == path {
+    let mut children: HashMap<String, CachedEntry> = HashMap::new();
+    for (entry_path, data) in index.entries() {
+        if entry_path.as_str() == path {
             continue;
         }
         let rest = if path.is_empty() {
@@ -378,7 +362,9 @@ fn list_level(
         }
         match rest.split_once('/') {
             Some((head, _)) => {
-                children.entry(head.to_string()).or_insert_with(EntryData::directory);
+                children
+                    .entry(head.to_string())
+                    .or_insert_with(CachedEntry::directory);
             }
             None => {
                 children.insert(rest.to_string(), data.clone());
@@ -404,10 +390,10 @@ fn list_level(
             Some(LayerTreeEntry {
                 name,
                 path: full_path,
-                kind: data.kind.clone(),
+                kind: data.kind.as_str().to_string(),
                 size: data.size,
                 mode: data.mode,
-                link_target: data.link_target.clone(),
+                link_target: data.link_target.as_deref().map(str::to_string),
             })
         })
         .collect())
@@ -775,16 +761,25 @@ pub async fn layer_tree(
 ) -> ApiResult<Response> {
     let (_repository, blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
     let path = sanitize_request_path(path.as_deref().unwrap_or_default())?;
-    let file = open_blob(&state, &parsed).await?;
-    let std_file = file.into_std().await;
-    let media_type = blob.media_type.clone();
 
-    let entries = run_blocking(move || {
-        let reader = decompressed(std_file, media_type.as_deref())?;
-        let merged = merge_entries(reader)?;
-        list_level(&merged, &path)
-    })
-    .await?;
+    let index = match state.layer_cache.get(&parsed) {
+        Some(index) => index,
+        None => {
+            let file = open_blob(&state, &parsed).await?;
+            let std_file = file.into_std().await;
+            let media_type = blob.media_type.clone();
+            state
+                .layer_cache
+                .get_or_build(&parsed, move || {
+                    let reader = decompressed(std_file, media_type.as_deref())?;
+                    let merged = merge_entries(reader)?;
+                    Ok(Arc::new(LayerIndex::from_entries(merged)))
+                })
+                .await?
+        }
+    };
+
+    let entries = run_blocking(move || list_level(&index, &path)).await?;
 
     Ok(Json(entries).into_response())
 }

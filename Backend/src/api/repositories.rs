@@ -767,6 +767,9 @@ async fn delete(state: AppState, actor: AuthContext, name: String) -> ApiResult<
     .await;
 
     if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+        for digest in &report.deleted_digests {
+            state.layer_cache.invalidate(digest);
+        }
         tracing::info!(
             blobs = report.blobs_deleted,
             manifests = report.manifests_deleted,
@@ -889,6 +892,9 @@ async fn delete_tag(
     .await;
 
     if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+        for digest in &report.deleted_digests {
+            state.layer_cache.invalidate(digest);
+        }
         tracing::info!(blobs = report.blobs_deleted, "tag delete gc");
     }
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -926,6 +932,9 @@ async fn batch_delete_tags(
         .await;
     }
     if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+        for digest in &report.deleted_digests {
+            state.layer_cache.invalidate(digest);
+        }
         tracing::info!(blobs = report.blobs_deleted, "batch tag delete gc");
     }
     Ok(Json(json!({ "deleted": deleted })).into_response())
@@ -962,6 +971,9 @@ async fn batch_delete_global(
         }
     }
     if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+        for digest in &report.deleted_digests {
+            state.layer_cache.invalidate(digest);
+        }
         tracing::info!(blobs = report.blobs_deleted, "global tag delete gc");
     }
     Ok(Json(json!({ "deleted": deleted })).into_response())

@@ -48,6 +48,11 @@ pub struct Config {
 
     pub max_blob_size: Option<u64>,
 
+    /// Estimated byte budget for the in-memory layer index cache.
+    pub layer_cache_max_bytes: usize,
+    /// Seconds a cached layer index is served before it is rebuilt.
+    pub layer_cache_ttl_secs: u64,
+
     pub libravatar_base_url: String,
     pub title: String,
 }
@@ -110,6 +115,9 @@ impl Config {
             rate_limit_register_per_hour: env_parse("RATE_LIMIT_REGISTER_PER_HOUR", 20)?,
 
             max_blob_size: env::var("MAX_BLOB_SIZE").ok().and_then(|v| v.parse().ok()),
+
+            layer_cache_max_bytes: env_parse("LAYER_CACHE_MAX_BYTES", 64 * 1024 * 1024)?,
+            layer_cache_ttl_secs: env_parse("LAYER_CACHE_TTL_SECS", 900)?,
 
             libravatar_base_url: env_or("LIBRAVATAR_BASE_URL", "https://seccdn.libravatar.org"),
             title: env_or("LIGHTHOUSE_TITLE", "Lighthouse"),

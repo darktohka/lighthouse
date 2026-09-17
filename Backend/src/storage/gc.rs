@@ -16,12 +16,14 @@ use crate::oci::digest::Digest;
 use crate::storage::registry::Registry;
 use crate::storage::Storage;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GcReport {
     pub marked: usize,
     pub blobs_deleted: usize,
     pub manifests_deleted: usize,
     pub bytes_reclaimed: u64,
+    /// Digests whose blob row and file were swept, for cache invalidation.
+    pub deleted_digests: Vec<Digest>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -119,12 +121,14 @@ pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> R
     }
 
     let mut bytes_reclaimed = 0u64;
+    let mut deleted_digests = Vec::new();
     for blob in &unmarked {
         bytes_reclaimed += blob.size.max(0) as u64;
-        if !dry_run {
-            if let Ok(digest) = Digest::parse(&blob.digest) {
+        if let Ok(digest) = Digest::parse(&blob.digest) {
+            if !dry_run {
                 storage.delete_blob(&digest).await?;
             }
+            deleted_digests.push(digest);
         }
     }
 
@@ -133,6 +137,7 @@ pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> R
         blobs_deleted: unmarked.len(),
         manifests_deleted,
         bytes_reclaimed,
+        deleted_digests,
     })
 }
 
@@ -312,6 +317,7 @@ mod tests {
         assert_eq!(report.blobs_deleted, 4);
         assert_eq!(report.manifests_deleted, 3);
         assert!(report.bytes_reclaimed > 0);
+        assert_eq!(report.deleted_digests.len(), 4);
         assert!(index_digest.to_string().starts_with("sha256:"));
 
         let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
@@ -365,6 +371,7 @@ mod tests {
         assert_eq!(report.blobs_deleted, 4);
         assert_eq!(report.manifests_deleted, 3);
         assert!(report.bytes_reclaimed > 0);
+        assert_eq!(report.deleted_digests.len(), 4);
 
         let blob_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
             .fetch_one(registry.db())
