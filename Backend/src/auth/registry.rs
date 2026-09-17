@@ -4,7 +4,7 @@
 
 use axum::http::{HeaderName, HeaderValue, header};
 
-use crate::config::Config;
+use crate::config::{Config, RegistryAuthChallenge};
 use crate::permissions::{self, Access};
 use crate::state::{AppState, AuthContext};
 
@@ -130,6 +130,22 @@ pub fn basic_challenge() -> (HeaderName, HeaderValue) {
         header::WWW_AUTHENTICATE,
         HeaderValue::from_static("Basic realm=\"Lighthouse Registry\""),
     )
+}
+
+/// The `WWW-Authenticate` challenge(s) for a `401`, honouring the configured
+/// [`RegistryAuthChallenge`].
+///
+/// The two schemes are returned as separate header values rather than one
+/// comma-joined value: Bearer's own parameters are comma-separated, so joining
+/// them would be ambiguous for a client to parse.
+pub fn challenge(config: &Config, scope: Option<&str>) -> Vec<(HeaderName, HeaderValue)> {
+    match config.registry_auth_challenge {
+        RegistryAuthChallenge::Bearer => vec![bearer_challenge(config, scope)],
+        RegistryAuthChallenge::Basic => vec![basic_challenge()],
+        RegistryAuthChallenge::Both => {
+            vec![bearer_challenge(config, scope), basic_challenge()]
+        }
+    }
 }
 
 /// Renders the `repository:<name>:pull[,push]` scope for a `/v2` request.

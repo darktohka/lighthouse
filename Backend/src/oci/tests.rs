@@ -641,6 +641,147 @@ mod auth_flow {
         )
     }
 
+    async fn challenge_harness(
+        mode: crate::config::RegistryAuthChallenge,
+    ) -> (tempfile::TempDir, AppState, Router) {
+        let (dir, state) = crate::auth::test_support::test_state_with(|config| {
+            config.registry_auth_challenge = mode;
+        })
+        .await;
+        create_user(&state, USER).await;
+        let app = crate::routes::build(state.clone());
+        (dir, state, app)
+    }
+
+    #[tokio::test]
+    async fn offline_login_issues_a_reusable_refresh_token() {
+        let (_dir, _state, app) = harness().await;
+
+        let offline = send(
+            &app,
+            Method::GET,
+            "/api/auth/token?service=registry.local&scope=repository:darktohka/public:pull\
+             &offline_token=true&client_id=docker",
+            Some(USER),
+            &[],
+            &[],
+        )
+        .await;
+        assert_eq!(offline.status(), StatusCode::OK);
+        let refresh = body_json(offline).await["refresh_token"]
+            .as_str()
+            .expect("offline login returns a refresh_token")
+            .to_string();
+
+        // The Docker daemon reuses the same identitytoken on every refresh, so
+        // two consecutive exchanges with it must both succeed and the secret
+        // must not change.
+        for _ in 0..2 {
+            let exchanged = send(
+                &app,
+                Method::POST,
+                "/api/auth/token",
+                None,
+                &[("content-type", "application/x-www-form-urlencoded")],
+                format!(
+                    "grant_type=refresh_token&refresh_token={refresh}&service=registry.local\
+                     &scope=repository:darktohka/public:pull&client_id=docker"
+                )
+                .as_bytes(),
+            )
+            .await;
+            assert_eq!(exchanged.status(), StatusCode::OK);
+            let body = body_json(exchanged).await;
+            assert!(body["token"].as_str().is_some());
+            assert!(
+                body.get("refresh_token").is_none(),
+                "the secret is stable, so no replacement is returned"
+            );
+        }
+
+        let rejected = send(
+            &app,
+            Method::POST,
+            "/api/auth/token",
+            None,
+            &[("content-type", "application/x-www-form-urlencoded")],
+            b"grant_type=refresh_token&refresh_token=not-a-token&service=registry.local",
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert!(header_str(&rejected, "www-authenticate").starts_with("Basic "));
+        assert_eq!(body_json(rejected).await["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn password_grant_accepts_form_credentials() {
+        let (_dir, _state, app) = harness().await;
+
+        let response = send(
+            &app,
+            Method::POST,
+            "/api/auth/token",
+            None,
+            &[("content-type", "application/x-www-form-urlencoded")],
+            format!(
+                "grant_type=password&username={USER}&password={PASSWORD}&service=registry.local\
+                 &scope=repository:darktohka/public:pull&access_type=offline"
+            )
+            .as_bytes(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert!(body["token"].as_str().is_some());
+        assert!(
+            body["refresh_token"].as_str().is_some(),
+            "access_type=offline must return a refresh token"
+        );
+
+        let bad = send(
+            &app,
+            Method::POST,
+            "/api/auth/token",
+            None,
+            &[("content-type", "application/x-www-form-urlencoded")],
+            b"grant_type=password&username=darktohka&password=wrong&service=registry.local",
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(bad).await["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn challenge_mode_controls_the_advertised_scheme() {
+        use crate::config::RegistryAuthChallenge;
+
+        let (_dir, _state, app) = challenge_harness(RegistryAuthChallenge::Basic).await;
+        let response = send(&app, Method::GET, "/v2/", None, &[], &[]).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(header_str(&response, "www-authenticate").starts_with("Basic "));
+
+        let (_dir, _state, app) = challenge_harness(RegistryAuthChallenge::Both).await;
+        let response = send(&app, Method::GET, "/v2/", None, &[], &[]).await;
+        let values: Vec<String> = response
+            .headers()
+            .get_all("www-authenticate")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(values.len(), 2, "both schemes are advertised separately");
+        assert!(values[0].starts_with("Bearer "));
+        assert!(values[1].starts_with("Basic "));
+
+        let (_dir, _state, app) = harness().await;
+        let response = send(&app, Method::GET, "/v2/", None, &[], &[]).await;
+        assert!(header_str(&response, "www-authenticate").starts_with("Bearer "));
+        assert_eq!(
+            response.headers().get_all("www-authenticate").iter().count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn anonymous_token_pulls_public_and_is_denied_on_private() {
         let (_dir, state, app) = harness().await;

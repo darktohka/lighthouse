@@ -106,6 +106,7 @@ async fn user_from_access_token(state: &AppState, token: &str) -> Option<AuthCon
         user_id: Some(claims.sub),
         username: Some(claims.username),
         service_account_id: None,
+        app_password_id: None,
         is_admin,
         credential: CredentialSource::AccessToken,
         session_id: Some(claims.jti),
@@ -117,6 +118,7 @@ fn from_registry_token(claims: tokens::RegistryClaims) -> AuthContext {
         user_id: (claims.sub != 0).then_some(claims.sub),
         username: claims.username,
         service_account_id: claims.sid,
+        app_password_id: None,
         is_admin: false,
         credential: CredentialSource::RegistryToken,
         session_id: None,
@@ -129,20 +131,40 @@ async fn from_basic(
     audit: &Audit,
     announce: bool,
 ) -> AuthContext {
-    if let Ok(Some(account)) =
-        service_accounts::authenticate(state, &basic.username, &basic.password).await
-    {
+    authenticate_basic(
+        state,
+        &basic.username,
+        &basic.password,
+        audit.ip.as_deref(),
+        audit.agent.as_deref(),
+        announce,
+    )
+    .await
+}
+
+/// Verifies a username/password pair against service accounts, app passwords and
+/// account passwords, in that order. Shared by the request middleware and the
+/// token endpoint's `password` grant, which receives credentials in the body.
+pub async fn authenticate_basic(
+    state: &AppState,
+    username: &str,
+    password: &str,
+    ip: Option<&str>,
+    user_agent: Option<&str>,
+    announce: bool,
+) -> AuthContext {
+    if let Ok(Some(account)) = service_accounts::authenticate(state, username, password).await {
         if announce {
             record_login_event(
                 &state.db,
                 LoginAttempt {
                     user_id: None,
                     service_account_id: Some(account.id),
-                    username: Some(&basic.username),
+                    username: Some(username),
                     success: true,
                     kind: "service_token",
-                    ip: audit.ip.as_deref(),
-                    user_agent: audit.agent.as_deref(),
+                    ip,
+                    user_agent,
                 },
             )
             .await;
@@ -151,6 +173,7 @@ async fn from_basic(
             user_id: None,
             username: Some(account.username),
             service_account_id: Some(account.id),
+            app_password_id: None,
             is_admin: false,
             credential: CredentialSource::ServiceAccount,
             session_id: None,
@@ -159,7 +182,7 @@ async fn from_basic(
 
     let user =
         sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ? COLLATE NOCASE LIMIT 1")
-            .bind(&basic.username)
+            .bind(username)
             .fetch_optional(&state.db)
             .await
             .ok()
@@ -167,25 +190,22 @@ async fn from_basic(
 
     if let Some(user) = user {
         if user.email_verified {
-            if let Ok(Some(account)) =
-                app_passwords::authenticate(state, user.id, &basic.password).await
-            {
+            if let Ok(Some(account)) = app_passwords::authenticate(state, user.id, password).await {
                 if announce {
                     record_login_event(
                         &state.db,
                         LoginAttempt {
                             user_id: Some(user.id),
                             service_account_id: None,
-                            username: Some(&basic.username),
+                            username: Some(username),
                             success: true,
                             kind: "app_password",
-                            ip: audit.ip.as_deref(),
-                            user_agent: audit.agent.as_deref(),
+                            ip,
+                            user_agent,
                         },
                     )
                     .await;
                 }
-                let _ = account;
                 return AuthContext {
                     is_admin: user.is_admin,
                     user_id: Some(user.id),
@@ -193,10 +213,11 @@ async fn from_basic(
                     service_account_id: None,
                     credential: CredentialSource::AppPassword,
                     session_id: None,
+                    app_password_id: Some(account.id),
                 };
             }
 
-            if password::verify_password(&user.password_hash, &basic.password) {
+            if password::verify_password(&user.password_hash, password) {
                 let totp_enabled: bool =
                     sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = ?")
                         .bind(user.id)
@@ -211,11 +232,11 @@ async fn from_basic(
                             LoginAttempt {
                                 user_id: Some(user.id),
                                 service_account_id: None,
-                                username: Some(&basic.username),
+                                username: Some(username),
                                 success: true,
                                 kind: "password",
-                                ip: audit.ip.as_deref(),
-                                user_agent: audit.agent.as_deref(),
+                                ip,
+                                user_agent,
                             },
                         )
                         .await;
@@ -227,6 +248,7 @@ async fn from_basic(
                         service_account_id: None,
                         credential: CredentialSource::Password,
                         session_id: None,
+                        app_password_id: None,
                     };
                 }
             }
@@ -239,11 +261,11 @@ async fn from_basic(
             LoginAttempt {
                 user_id: None,
                 service_account_id: None,
-                username: Some(&basic.username),
+                username: Some(username),
                 success: false,
                 kind: "password",
-                ip: audit.ip.as_deref(),
-                user_agent: audit.agent.as_deref(),
+                ip,
+                user_agent,
             },
         )
         .await;

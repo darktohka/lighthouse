@@ -337,3 +337,69 @@ When 2FA is enabled, `POST /api/auth/login` without a `code` returns
 |---|---|---|---|
 | GET | `/healthz` | none | liveness |
 | GET | `/api/health` | none | liveness (JSON) |
+
+---
+
+## 12. Registry token endpoint
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET, POST | `/auth/token` | optional (Basic) | registry bearer-token service |
+
+Public. `GET` reads the query string; `POST` reads a form-encoded body and any
+query string. The access-token cookie is ignored. Credentials come from an
+`Authorization: Basic` header or, for `grant_type=password`, from the body.
+`grant_type=refresh_token` must be sent in a POST body; a GET carrying it is
+rejected with `invalid_request`.
+
+Parameters:
+
+| Name | Meaning |
+|---|---|
+| `service` | service name from the registry challenge; accepted, not validated |
+| `scope` | repeatable and space-joined; `repository:<name>:pull[,push]` or `registry:catalog:*` |
+| `client_id` | client identifier recorded with an issued refresh token |
+| `account` | account name supplied by the client; accepted |
+| `offline_token` | request a refresh token; empty, `1`, `true` or `yes` |
+| `access_type` | `offline` requests a refresh token when `offline_token` is absent |
+| `grant_type` | `password` or `refresh_token` |
+| `refresh_token` | required with `grant_type=refresh_token`, which must be a POST |
+| `username`, `password` | required with `grant_type=password` when no Basic header is sent |
+
+Response:
+
+```json
+{
+  "token": "<jwt>",
+  "access_token": "<jwt>",
+  "expires_in": 300,
+  "issued_at": "<rfc3339>"
+}
+```
+
+`token` and `access_token` are the same HS256 registry bearer JWT. `expires_in`
+is `REGISTRY_TOKEN_TTL_SECS` (default 300). `issued_at` is an RFC 3339
+timestamp. A `refresh_token` field is added only on an authenticated offline
+issuance; it is the stable value `docker login` stores as `identitytoken`. A
+`grant_type=refresh_token` response never contains `refresh_token`, because the
+secret does not rotate. No credentials yields an anonymous token. See
+`docs/AUTH.md` §9 and §10 for the token claims and the offline-token model.
+
+Request-validation failures return HTTP `400` with
+`{"error": "...", "error_description": "..."}`:
+
+| `error` | Trigger |
+|---|---|
+| `invalid_request` | `grant_type=refresh_token` without `refresh_token`, or sent as a GET; `grant_type=password` without `username`/`password` |
+| `invalid_grant` | wrong `username`/`password` under `grant_type=password` |
+| `unsupported_grant_type` | `grant_type` other than `password` or `refresh_token` |
+
+A rejected refresh redemption (unknown, expired or revoked refresh token) is
+answered `401` with the OAuth2 body `{"error":"invalid_grant",...}` and a
+`WWW-Authenticate: Basic realm="Lighthouse Registry"` header, so the client
+prompts for credentials again.
+
+A request carrying Basic credentials that do not authenticate is also answered
+`401` with a `WWW-Authenticate: Basic realm="Lighthouse Registry"` header, but
+with the control-plane envelope
+`{"error":{"code":"unauthorized","message":"authentication required"}}`.

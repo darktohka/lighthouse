@@ -229,6 +229,7 @@ pub async fn enable(
     }
 
     sessions::revoke_all_except(state, user_id, keep_session).await?;
+    crate::auth::registry_refresh::revoke_for_user(state, user_id).await?;
     Ok(())
 }
 
@@ -269,6 +270,7 @@ pub async fn disable(
     tx.commit().await?;
 
     sessions::revoke_all_except(state, user.id, keep_session).await?;
+    crate::auth::registry_refresh::revoke_for_user(state, user.id).await?;
     Ok(())
 }
 

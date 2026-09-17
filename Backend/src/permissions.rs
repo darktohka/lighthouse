@@ -520,6 +520,7 @@ mod tests {
             user_id: None,
             username: Some(account.username.clone()),
             service_account_id: Some(account.id),
+            app_password_id: None,
             is_admin: false,
             credential: crate::state::CredentialSource::ServiceAccount,
             session_id: None,

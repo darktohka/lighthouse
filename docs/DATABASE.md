@@ -72,6 +72,37 @@ backoff for operations that can still collide.
 | `pull_stats` | daily per-repository/per-tag pull rollups |
 | `follows` | social graph |
 
+### Registry refresh tokens
+| Table | Purpose |
+|---|---|
+| `registry_refresh_tokens` | offline registry tokens (`identitytoken`); one stable token per login |
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | primary key, autoincrement |
+| `token_hash` | TEXT | SHA-256 of the presented secret; the plaintext is never stored |
+| `credential_source` | TEXT | `password`, `app_password` or `service_account` |
+| `user_id` | INTEGER | FK `users(id)`, `ON DELETE CASCADE` |
+| `app_password_id` | INTEGER | FK `app_passwords(id)`, `ON DELETE CASCADE` |
+| `service_account_id` | INTEGER | FK `service_accounts(id)`, `ON DELETE CASCADE` |
+| `subject` | INTEGER | identity copied into the bearer token (`0` for a service account) |
+| `username` | TEXT | username copied into the bearer token |
+| `scope` | TEXT | original scope strings, space-joined; empty when issued without one |
+| `client_id` | TEXT | client identifier recorded at issuance |
+| `created_at` | TEXT | issuance time |
+| `expires_at` | TEXT | end of life (`REGISTRY_REFRESH_TOKEN_TTL_SECS`) |
+| `last_used_at` | TEXT | last redemption |
+| `revoked_at` | TEXT | set on revocation; checked on every redemption |
+
+Indexes:
+
+| Index | Columns | Kind |
+|---|---|---|
+| `idx_registry_refresh_tokens_hash` | `token_hash` | unique |
+| `idx_registry_refresh_tokens_user` | `user_id` | |
+| `idx_registry_refresh_tokens_app_password` | `app_password_id` | |
+| `idx_registry_refresh_tokens_service_account` | `service_account_id` | |
+
 ## Reference graph
 
 ```
@@ -93,6 +124,9 @@ Migrations run in filename order at startup.
   CHECK to include `app_password`, `two_factor` and `registry_token`. Because
   `login_events` is a leaf child table, the migration rebuilds it inside the
   migration transaction.
+- `0003_registry_refresh_tokens.sql` creates `registry_refresh_tokens` for
+  offline registry tokens, with a unique hash index plus user, app-password and
+  service-account lookup indexes.
 
 ## Maintenance
 

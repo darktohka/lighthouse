@@ -30,6 +30,9 @@ pub struct AuthContext {
     pub user_id: Option<i64>,
     pub username: Option<String>,
     pub service_account_id: Option<i64>,
+    /// Set when the caller authenticated with an app password, so registry
+    /// refresh tokens can be revoked together with the credential.
+    pub app_password_id: Option<i64>,
     pub is_admin: bool,
     pub credential: CredentialSource,
     /// Access-token `jti` when the caller presented a web session, so 2FA

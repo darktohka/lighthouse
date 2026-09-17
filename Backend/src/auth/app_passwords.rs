@@ -150,6 +150,7 @@ pub async fn rotate(
     let account = find_for_user(&state.db, user_id, id)
         .await?
         .ok_or_else(|| ApiError::not_found("app password not found"))?;
+    crate::auth::registry_refresh::revoke_for_app_password(state, id).await?;
     Ok(Some((account, plaintext)))
 }
 
@@ -161,6 +162,9 @@ pub async fn delete(state: &AppState, user_id: i64, id: i64) -> ApiResult<bool> 
         .bind(user_id)
         .execute(&state.db)
         .await?;
+    if result.rows_affected() > 0 {
+        crate::auth::registry_refresh::revoke_for_app_password(state, id).await?;
+    }
     Ok(result.rows_affected() > 0)
 }
 

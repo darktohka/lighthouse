@@ -21,6 +21,7 @@ formats and the HTTP surface under `/api/auth`.
 | Backup code | `totp_backup_codes` | single-use Argon2id hashes, 8 per enrolment |
 | App password | `app_passwords` | per-account registry credential, SHA-256 at rest |
 | Registry token | JWT | stateless HS256 bearer token for `/v2` |
+| Registry refresh token | `registry_refresh_tokens` | offline token stored by `docker login` as `identitytoken`; reused unchanged until it expires or is revoked |
 | MFA token | JWT | short-lived `kind:"mfa"` token for the login second step |
 | Login history | `login_events` | password, service-token, app-password, two-factor and refresh use |
 
@@ -38,6 +39,10 @@ formats and the HTTP surface under `/api/auth`.
   SHA-256 hash plus the first 3 and last 3 characters are stored, indexed by
   `(user_id, token_hash)`. The 192-bit random secret is looked up as a fast
   indexed hash and is never passed through Argon2.
+- **Registry refresh token**: 32 random bytes as URL-safe base64 (unpadded),
+  the same shape as a web refresh token. Only `sha256(token)` is persisted; the
+  plaintext is returned once, stored by the client as `identitytoken`, and
+  reused unchanged for the life of the login.
 
 ### Password hashing
 
@@ -152,7 +157,7 @@ All responses are JSON. Errors use the control-plane envelope
 | GET | `/sessions` | required | `200 {sessions:[…]}` | no token hashes are exposed |
 | DELETE | `/sessions/{id}` | required | `204` | only the caller's own sessions |
 | GET | `/login-history` | required | `200 {events,limit,offset}` | newest first; `?limit=` (≤200) `&offset=` |
-| GET, POST | `/token` | no | `200 {token, access_token, expires_in, issued_at}` | registry bearer-token service; see §9 |
+| GET, POST | `/token` | no | `200 {token, access_token, expires_in, issued_at, refresh_token?}` | registry bearer-token service; OAuth2 error bodies on failure; see §9 and §10 |
 | GET | `/2fa` | required | `200 {enabled, backup_codes_remaining}` | status for the caller's account |
 | POST | `/2fa/setup` | required | `200 {secret, otpauth_uri, backup_codes:[…8]}` | writes an unconfirmed secret (`totp_enabled=0`), replacing any pending enrolment; `secret` is returned only here |
 | POST | `/2fa/enable` | required | `200 {enabled:true}` | verifies a live code, sets `totp_enabled=1`, revokes every other session |
@@ -313,18 +318,20 @@ recorded in `login_events.kind='app_password'`.
 ## 9. Registry token authentication
 
 Registry clients discover the token service from the `401` challenge returned
-under `/v2`:
+under `/v2`. By default the challenge is Bearer:
 
 ```
 WWW-Authenticate: Bearer realm="<base_url>/api/auth/token",service="<public_host>"
 ```
 
 Where a repository is known the challenge also carries
-`scope="repository:<name>:pull"` (`pull,push` for push methods). Basic auth is
-still accepted on the wire for compatibility.
+`scope="repository:<name>:pull"` (`pull,push` for push methods). The advertised
+scheme is configurable with `REGISTRY_AUTH_CHALLENGE` (see §11); Basic
+credentials are accepted server-side in every mode.
 
 `GET|POST /api/auth/token` is public. It takes `service`, a repeatable and
-space-joined `scope`, `client_id`, `account` and `offline_token`, passed as a
+space-joined `scope`, `client_id`, `account`, `offline_token`, and the OAuth2
+`grant_type` / `refresh_token` / `username` / `password` parameters, passed as a
 query string for `GET` and form-encoded for `POST`. Credentials are optional:
 
 - No credentials yields an anonymous token.
@@ -333,8 +340,9 @@ query string for `GET` and form-encoded for `POST`. Credentials are optional:
 - Present but invalid Basic yields `401` with a Basic challenge.
 
 A cookie is deliberately ignored. The response is
-`{ token, access_token, expires_in, issued_at }` and never includes
-`identity_token`.
+`{ token, access_token, expires_in, issued_at }`, plus a `refresh_token` on an
+authenticated offline issuance (§10); it never includes `identity_token`. The
+`password` and `refresh_token` grants are documented in §10.
 
 The token is an HS256 JWT signed with a key derived from `JWT_SECRET`
 (domain-separated), carrying `kind:"registry"`, `sub` set to the user id or `0`
@@ -352,3 +360,77 @@ cannot act as a web session.
 
 Anonymous tokens can pull public repositories and tags; private repositories
 return `403 DENIED`.
+
+---
+
+## 10. Registry refresh tokens ("offline tokens")
+
+`docker login` asks for an offline token and stores the returned
+`refresh_token` as `identitytoken` in the client config. The daemon then trades
+that secret for short-lived bearer tokens instead of resending the account
+password. The secret is stable: it is issued once per login and reused for the
+life of that login, and it is never rotated.
+
+**Issuance.** An authenticated request to `/api/auth/token` returns a
+`refresh_token` when it asks for an offline token, using `offline_token`
+(empty, `1`, `true` or `yes`) or `access_type=offline`; `offline_token` takes
+precedence when both are present. The token is bound to the credential that
+authenticated the request (account password, app password or service account)
+and to the scope strings the request was granted at that moment (usually none
+for the `docker login` probe). It lives for `REGISTRY_REFRESH_TOKEN_TTL_SECS`,
+which defaults to 30 days (`2592000` seconds).
+
+**Redemption.** `grant_type=refresh_token` with `refresh_token=<secret>` trades
+the secret for a new bearer token. The request must be a POST; a GET carrying
+`grant_type=refresh_token` is rejected with `invalid_request`. Redemption
+returns only the bearer token and no `refresh_token` field, because the client
+keeps using the stable secret it already holds.
+
+Access is re-derived on every redemption from the scope supplied in that
+request:
+
+- If the token was issued with scopes, the requested scope may narrow that
+  grant but never widen it (the type and name must match an issued scope).
+- If the token was issued with no scope, which is the usual `docker login`
+  probe, access is derived entirely from the scope supplied at redemption time.
+- The current permission state is re-resolved each time, so a revoked grant
+  stops working at the next refresh.
+
+A revoked or expired refresh token is rejected with an OAuth2 `invalid_grant`
+error.
+
+**Revocation triggers.** A refresh token stops working when the credential it
+speaks for changes or is removed:
+
+| Event | Revoked |
+|---|---|
+| Password change or reset | every refresh token for the user |
+| 2FA enabled or disabled | every refresh token for the user |
+| App password deleted or rotated | refresh tokens issued for that app password |
+| Service account deleted or rotated | refresh tokens issued for that service account |
+
+Revocation disables future redemptions only; an already-issued bearer token
+stays valid until its own `exp`.
+
+---
+
+## 11. Registry challenge mode
+
+`REGISTRY_AUTH_CHALLENGE` selects the `WWW-Authenticate` scheme the registry
+advertises on a `401`:
+
+| Value | Behaviour |
+|---|---|
+| `bearer` (default) | `WWW-Authenticate: Bearer realm="<base_url>/api/auth/token",service="<public_host>"`, plus `scope` where a repository is known |
+| `basic` | `WWW-Authenticate: Basic realm="Lighthouse Registry"` |
+| `both` | both of the above, as two separate `WWW-Authenticate` header values with Bearer first |
+
+Any other value fails configuration at startup. The setting only controls what
+is advertised: Basic credentials are accepted server-side in every mode, so a
+client may authenticate without following the Bearer flow. `both` emits two
+separate header values rather than one comma-joined value, because Bearer's own
+parameters are comma-separated and joining them would be ambiguous to parse.
+
+The token endpoint's own challenge is not affected: a request that carries
+Basic credentials which do not authenticate is answered `401` with a Basic
+challenge.

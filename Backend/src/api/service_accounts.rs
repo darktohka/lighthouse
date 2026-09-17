@@ -276,6 +276,7 @@ async fn remove(
         .bind(id)
         .execute(&state.db)
         .await?;
+    crate::auth::registry_refresh::revoke_for_service_account(&state, id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -297,6 +298,8 @@ async fn rotate(
     .bind(account.id)
     .execute(&state.db)
     .await?;
+
+    crate::auth::registry_refresh::revoke_for_service_account(&state, id).await?;
 
     let account = sqlx::query_as::<_, ServiceAccount>(
         "SELECT * FROM service_accounts WHERE id = ? LIMIT 1",

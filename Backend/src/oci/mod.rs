@@ -303,8 +303,9 @@ pub fn error_response(config: &Config, err: RegistryError, scope: Option<&str>) 
     let unauthenticated = permissions::is_unauthenticated(&err);
     let mut response = err.into_response();
     if unauthenticated {
-        let (name, value) = registry::bearer_challenge(config, scope);
-        response.headers_mut().insert(name, value);
+        for (name, value) in registry::challenge(config, scope) {
+            response.headers_mut().append(name, value);
+        }
     }
     response
 }

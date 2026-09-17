@@ -9,22 +9,28 @@
 //! empty `access` list — the registry then answers `DENIED`, which is what gives
 //! `docker` its clean "pull access denied … may require 'docker login'" message.
 //!
-//! Only Basic is honoured here. A cookie is deliberately ignored so a browser
-//! session cannot be turned into a bearer token (a CSRF mint surface), and the
-//! response never carries `identity_token`, which would make the CLI store a
-//! token instead of the credentials needed to refresh it.
+//! Beyond the Basic probe the endpoint implements the OAuth2 grants a registry
+//! client uses for long-lived logins: `offline_token=true` (GET) or
+//! `access_type=offline` (POST) returns a `refresh_token`, and
+//! `grant_type=refresh_token` trades it for a new bearer token — see
+//! [`crate::auth::registry_refresh`]. `grant_type=password` accepts credentials
+//! in the form body.
+//!
+//! Only Basic is honoured for the probe. A cookie is deliberately ignored so a
+//! browser session cannot be turned into a bearer token (a CSRF mint surface).
 
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use chrono::Utc;
 
-use crate::auth::middleware::Auth;
+use crate::auth::middleware::{self, Auth};
 use crate::auth::registry;
+use crate::auth::registry_refresh::{self, Principal};
 use crate::auth::tokens::{self, RegistryAccess};
 use crate::error::ApiError;
 use crate::state::{AppState, AuthContext, CredentialSource};
@@ -39,6 +45,7 @@ pub fn router() -> Router<AppState> {
 async fn token(
     State(state): State<AppState>,
     auth: Auth,
+    method: Method,
     headers: HeaderMap,
     RawQuery(raw): RawQuery,
     body: Bytes,
@@ -46,6 +53,16 @@ async fn token(
     let mut params = query_pairs(raw.as_deref());
     if !body.is_empty() {
         params.extend(query_pairs(std::str::from_utf8(&body).ok()));
+    }
+    if method == Method::GET
+        && params
+            .iter()
+            .any(|(key, value)| key == "grant_type" && value == "refresh_token")
+    {
+        return oauth_error(
+            "invalid_request",
+            "grant_type=refresh_token must be sent in a POST body",
+        );
     }
     issue(&state, &auth.0, &headers, &params).await
 }
@@ -56,24 +73,67 @@ async fn issue(
     headers: &HeaderMap,
     params: &[(String, String)],
 ) -> Response {
-    let has_basic = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("Basic ") || value.starts_with("basic "));
+    let has_basic = has_basic_credentials(headers);
+    let requested = scope_parameters(params);
+    let scopes = registry::parse_scopes(&requested);
+    let client_id = param(params, "client_id");
+    let grant_type = param(params, "grant_type");
 
-    let authenticated = has_basic
-        && actor.is_authenticated()
-        && actor.credential != CredentialSource::RegistryToken;
+    if grant_type == Some("refresh_token") {
+        let Some(presented) = param(params, "refresh_token") else {
+            return oauth_error("invalid_request", "refresh_token is required");
+        };
+        return match registry_refresh::redeem(state, presented, &requested).await {
+            Ok(redeemed) => mint(
+                state,
+                redeemed.subject,
+                Some(&redeemed.username),
+                redeemed.service_account_id,
+                redeemed.access,
+                None,
+            ),
+            Err(err) if err.code == registry_refresh::INVALID_GRANT => {
+                oauth_challenge_error("invalid_grant", &err.message)
+            }
+            Err(err) => err.into_response(),
+        };
+    }
 
-    if has_basic && !authenticated {
+    if matches!(grant_type, Some(other) if other != "password") {
+        return oauth_error(
+            "unsupported_grant_type",
+            "only password and refresh_token are supported",
+        );
+    }
+
+    let (resolved, authenticated) = if grant_type == Some("password") && !has_basic {
+        let (Some(username), Some(password)) =
+            (param(params, "username"), param(params, "password"))
+        else {
+            return oauth_error("invalid_request", "username and password are required");
+        };
+        let resolved =
+            middleware::authenticate_basic(state, username, password, None, None, false).await;
+        let authenticated = resolved.is_authenticated();
+        (resolved, authenticated)
+    } else {
+        let authenticated = has_basic
+            && actor.is_authenticated()
+            && actor.credential != CredentialSource::RegistryToken;
+        (actor.clone(), authenticated)
+    };
+
+    if grant_type == Some("password") && !authenticated {
+        return oauth_error("invalid_grant", "invalid credentials");
+    }
+    if has_basic && !authenticated && grant_type.is_none() {
         return unauthorized_with_basic();
     }
 
-    let scopes = registry::parse_scopes(&scope_parameters(params));
     let mut access: Vec<RegistryAccess> = Vec::new();
     if authenticated {
         for scope in &scopes {
-            let actions = registry::granted_actions(state, actor, scope).await;
+            let actions = registry::granted_actions(state, &resolved, scope).await;
             if !actions.is_empty() {
                 access.push(RegistryAccess {
                     kind: scope.kind.clone(),
@@ -84,16 +144,51 @@ async fn issue(
         }
     }
 
+    let refresh_token = if authenticated && offline_requested(params) {
+        match Principal::from_auth_context(&resolved) {
+            Some(principal) => {
+                match registry_refresh::issue(state, &principal, &requested, client_id).await {
+                    Ok(token) => Some(token),
+                    Err(err) => {
+                        tracing::error!(error = %err, "failed to issue registry refresh token");
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let sub = if authenticated {
-        actor.user_id.unwrap_or(0)
+        resolved.user_id.unwrap_or(0)
     } else {
         0
     };
+    mint(
+        state,
+        sub,
+        resolved.username.as_deref(),
+        resolved.service_account_id,
+        access,
+        refresh_token.as_deref(),
+    )
+}
+
+fn mint(
+    state: &AppState,
+    sub: i64,
+    username: Option<&str>,
+    service_account_id: Option<i64>,
+    access: Vec<RegistryAccess>,
+    refresh_token: Option<&str>,
+) -> Response {
     let token = match tokens::issue_registry_token(
         &state.config,
         sub,
-        actor.username.as_deref(),
-        actor.service_account_id,
+        username,
+        service_account_id,
         access,
     ) {
         Ok(token) => token,
@@ -103,13 +198,23 @@ async fn issue(
         }
     };
 
-    Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "token": token,
         "access_token": token,
         "expires_in": state.config.registry_token_ttl_secs,
         "issued_at": Utc::now().to_rfc3339(),
-    }))
-    .into_response()
+    });
+    if let Some(refresh_token) = refresh_token {
+        body["refresh_token"] = serde_json::Value::String(refresh_token.to_string());
+    }
+    Json(body).into_response()
+}
+
+fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
 }
 
 fn scope_parameters(params: &[(String, String)]) -> Vec<String> {
@@ -120,6 +225,28 @@ fn scope_parameters(params: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
+fn has_basic_credentials(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Basic ") || value.starts_with("basic "))
+}
+
+fn offline_requested(params: &[(String, String)]) -> bool {
+    match param(params, "offline_token") {
+        Some(value) => value.is_empty() || is_truthy(value),
+        None => param(params, "access_type")
+            .is_some_and(|value| value.eq_ignore_ascii_case("offline")),
+    }
+}
+
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
 fn query_pairs(raw: Option<&str>) -> Vec<(String, String)> {
     match raw {
         Some(raw) => url::form_urlencoded::parse(raw.as_bytes())
@@ -127,6 +254,34 @@ fn query_pairs(raw: Option<&str>) -> Vec<(String, String)> {
             .collect(),
         None => Vec::new(),
     }
+}
+
+fn oauth_error(error: &str, description: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": error,
+            "error_description": description,
+        })),
+    )
+        .into_response()
+}
+
+/// A rejected refresh token: `401` with a Basic challenge, so a client prompts
+/// for credentials again rather than printing a body-parse error, carrying the
+/// OAuth2 error body.
+fn oauth_challenge_error(error: &str, description: &str) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "error": error,
+            "error_description": description,
+        })),
+    )
+        .into_response();
+    let (name, value) = registry::basic_challenge();
+    response.headers_mut().insert(name, value);
+    response
 }
 
 fn unauthorized_with_basic() -> Response {
@@ -163,5 +318,22 @@ mod tests {
         let pairs = query_pairs(Some("service=x&scope=repository:a:pull&client_id=docker"));
         assert_eq!(pairs.len(), 3);
         assert_eq!(pairs[1].1, "repository:a:pull");
+    }
+
+    #[test]
+    fn detects_offline_requests() {
+        assert!(offline_requested(&[(
+            "offline_token".to_string(),
+            "true".to_string(),
+        )]));
+        assert!(offline_requested(&[(
+            "access_type".to_string(),
+            "offline".to_string(),
+        )]));
+        assert!(!offline_requested(&[(
+            "offline_token".to_string(),
+            "false".to_string(),
+        )]));
+        assert!(!offline_requested(&[]));
     }
 }

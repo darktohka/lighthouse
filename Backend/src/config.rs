@@ -30,6 +30,11 @@ pub struct Config {
     /// Lifetime of the half-authenticated token minted after a correct password
     /// when the account has TOTP enabled.
     pub mfa_token_ttl_secs: i64,
+    /// Lifetime of a registry refresh token — the `identitytoken` `docker login`
+    /// stores and later trades for fresh bearer tokens.
+    pub registry_refresh_token_ttl_secs: i64,
+    /// Which `WWW-Authenticate` challenge `/v2` advertises on a `401`.
+    pub registry_auth_challenge: RegistryAuthChallenge,
 
     pub cookie_name: String,
     pub cookie_domain: Option<String>,
@@ -60,6 +65,35 @@ pub struct Config {
 
     pub libravatar_base_url: String,
     pub title: String,
+}
+
+/// Which authentication challenge the registry advertises on `401` responses.
+///
+/// `Bearer` is the Docker token flow and the default. `Basic` is for clients
+/// that speak the registry API but not the token dance; `Both` sends both
+/// challenges, Bearer first, so either kind of client can proceed. Basic
+/// credentials are accepted server-side regardless of this setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RegistryAuthChallenge {
+    #[default]
+    Bearer,
+    Basic,
+    Both,
+}
+
+impl std::str::FromStr for RegistryAuthChallenge {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "bearer" => Ok(Self::Bearer),
+            "basic" => Ok(Self::Basic),
+            "both" => Ok(Self::Both),
+            other => Err(anyhow::anyhow!(
+                "invalid registry auth challenge {other:?} (expected bearer, basic or both)"
+            )),
+        }
+    }
 }
 
 impl Config {
@@ -102,6 +136,14 @@ impl Config {
             upload_session_ttl_secs: env_parse("UPLOAD_SESSION_TTL_SECS", 60 * 60 * 24)?,
             registry_token_ttl_secs: env_parse("REGISTRY_TOKEN_TTL_SECS", 300)?,
             mfa_token_ttl_secs: env_parse("MFA_TOKEN_TTL_SECS", 300)?,
+            registry_refresh_token_ttl_secs: env_parse(
+                "REGISTRY_REFRESH_TOKEN_TTL_SECS",
+                60 * 60 * 24 * 30,
+            )?,
+            registry_auth_challenge: env_parse(
+                "REGISTRY_AUTH_CHALLENGE",
+                RegistryAuthChallenge::Bearer,
+            )?,
 
             cookie_name: env_or("COOKIE_NAME", "lighthouse_token"),
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),

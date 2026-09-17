@@ -13,7 +13,7 @@ including errors and the router fallback.
 
 | Method | Path | Success | Notes |
 |---|---|---|---|
-| any | `/v2/` | 200 `{}` | returns **401 + `WWW-Authenticate: Basic realm="Lighthouse Registry"`** when anonymous, so `docker login` can validate credentials |
+| any | `/v2/` | 200 `{}` | returns **401 + the configured `WWW-Authenticate` challenge** when anonymous (Bearer realm=`<base_url>/api/auth/token` by default, or Basic with `REGISTRY_AUTH_CHALLENGE`), so `docker login` can validate credentials |
 | GET | `/v2/<name>/tags/list` | 200 | `?n`/`?last`, `Link: rel="next"` |
 | GET/HEAD | `/v2/<name>/manifests/<reference>` | 200 | `Content-Type`, `Content-Length`, `Docker-Content-Digest`, `ETag`, `304` on `If-None-Match` |
 | PUT | `/v2/<name>/manifests/<reference>` | 201 | `Location` (canonical digest URL), `Docker-Content-Digest` |
@@ -53,9 +53,10 @@ Errors use the OCI envelope:
 | `RANGE_INVALID` | 416 | `PAGINATION_NUMBER_INVALID` | 400 |
 | `NAME_INVALID` / `TAG_INVALID` | 400 | | |
 
-Authorization: anonymous → `401` with the Basic challenge; authenticated but
-unauthorized → `403 DENIED`. Private resources are hidden as `404` on the
-control-plane API so they are not enumerable.
+Authorization: anonymous → `401` with the configured challenge
+(`REGISTRY_AUTH_CHALLENGE`, Bearer by default); authenticated but unauthorized
+→ `403 DENIED`. Private resources are hidden as `404` on the control-plane API
+so they are not enumerable.
 
 ---
 
@@ -148,7 +149,10 @@ routing.
   `POST …/uploads/?digest=` with `201`; Lighthouse implements it as the
   specification documents it, and also supports the POST → PUT flow.
 - Where the reference returns `401` for an insufficient scope with a Bearer
-  challenge, Lighthouse uses Basic auth and returns `403 DENIED` for
-  authenticated-but-forbidden requests. Docker clients handle both.
+  challenge, Lighthouse returns `403 DENIED` for authenticated-but-forbidden
+  requests. The advertised `401` challenge is configurable via
+  `REGISTRY_AUTH_CHALLENGE` (`bearer`, `basic` or `both`); Docker clients handle
+  both schemes.
 - The reference supports redirect-to-storage and token-server auth; Lighthouse
-  streams blobs directly and uses Basic credentials.
+  streams blobs directly and implements the token-server flow at
+  `/api/auth/token`. Basic credentials are accepted in every challenge mode.

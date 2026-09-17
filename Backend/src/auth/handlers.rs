@@ -846,6 +846,7 @@ async fn reset_password(
         .execute(&state.db)
         .await?;
     sessions::revoke_all_for_user(&state, user_id).await?;
+    crate::auth::registry_refresh::revoke_for_user(&state, user_id).await?;
     Ok(Json(json!({ "reset": true })).into_response())
 }
 
@@ -874,6 +875,7 @@ async fn change_password(
         .execute(&state.db)
         .await?;
     sessions::revoke_all_for_user(&state, user_id).await?;
+    crate::auth::registry_refresh::revoke_for_user(&state, user_id).await?;
     Ok(Json(json!({ "changed": true })).into_response())
 }
 
