@@ -7,6 +7,7 @@
 use axum::Router;
 use chrono::Utc;
 
+use crate::auth::ip_ranges;
 use crate::auth::tokens;
 use crate::db::{self, Db};
 use crate::error::{ApiError, ApiResult};
@@ -25,15 +26,23 @@ pub async fn find_by_username(db: &Db, username: &str) -> ApiResult<Option<Servi
 }
 
 /// Verifies a plaintext token against a service account and records its use.
+///
+/// A token whose account has an IP allowlist that does not contain `ip` is
+/// treated exactly like a wrong token: `Ok(None)`, and `last_used_at` is not
+/// touched.
 pub async fn authenticate(
     state: &AppState,
     username: &str,
     candidate: &str,
+    ip: Option<&str>,
 ) -> ApiResult<Option<ServiceAccount>> {
     let Some(account) = find_by_username(&state.db, username).await? else {
         return Ok(None);
     };
     if !tokens::verify_service_token(&account.token_hash, candidate) {
+        return Ok(None);
+    }
+    if !ip_ranges::allowed(&state.db, account.id, ip).await {
         return Ok(None);
     }
 
@@ -108,6 +117,7 @@ pub fn router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::ip_ranges;
     use crate::auth::test_support::{create_user, test_state};
 
     #[tokio::test]
@@ -129,23 +139,93 @@ mod tests {
         assert_eq!(account.token_prefix.len(), 3);
         assert_eq!(account.token_suffix.len(), 3);
 
-        let authenticated = authenticate(&state, "owner-ci", &token)
+        let authenticated = authenticate(&state, "owner-ci", &token, None)
             .await
             .expect("authenticate")
             .expect("found");
         assert_eq!(authenticated.id, account.id);
 
         assert!(
-            authenticate(&state, "owner-ci", "lhr_wrong")
+            authenticate(&state, "owner-ci", "lhr_wrong", None)
                 .await
                 .expect("authenticate")
                 .is_none()
         );
         assert!(
-            authenticate(&state, "missing", &token)
+            authenticate(&state, "missing", &token, None)
                 .await
                 .expect("authenticate")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn denies_out_of_range_and_allows_in_range() {
+        let (_dir, state) = test_state().await;
+        let user = create_user(&state, "owner").await;
+        let (account, token) = create(
+            &state,
+            NewServiceAccount {
+                owner_user_id: user.id,
+                name: "ci",
+                username: "owner-ci",
+                description: None,
+            },
+        )
+        .await
+        .expect("create");
+
+        ip_ranges::add(&state.db, account.id, "10.0.0.0/8")
+            .await
+            .expect("add range");
+
+        assert!(
+            authenticate(&state, "owner-ci", &token, Some("10.1.2.3"))
+                .await
+                .expect("authenticate")
+                .is_some(),
+            "an in-range IP authenticates"
+        );
+        assert!(
+            authenticate(&state, "owner-ci", &token, Some("192.168.1.1"))
+                .await
+                .expect("authenticate")
+                .is_none(),
+            "an out-of-range IP is indistinguishable from bad credentials"
+        );
+        let last_used: Option<String> =
+            sqlx::query_scalar("SELECT last_used_at FROM service_accounts WHERE id = ?")
+                .bind(account.id)
+                .fetch_one(&state.db)
+                .await
+                .expect("last_used");
+        assert!(
+            last_used.is_some(),
+            "the in-range success bumped last_used_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_ranges_means_unrestricted() {
+        let (_dir, state) = test_state().await;
+        let user = create_user(&state, "owner").await;
+        let (_account, token) = create(
+            &state,
+            NewServiceAccount {
+                owner_user_id: user.id,
+                name: "ci",
+                username: "owner-ci",
+                description: None,
+            },
+        )
+        .await
+        .expect("create");
+
+        assert!(
+            authenticate(&state, "owner-ci", &token, Some("203.0.113.9"))
+                .await
+                .expect("authenticate")
+                .is_some()
         );
     }
 }

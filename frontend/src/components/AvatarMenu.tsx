@@ -102,7 +102,7 @@ export function AvatarMenu() {
           </Link>
           <Link
             role="menuitem"
-            to="/service-accounts"
+            to="/settings?tab=service-accounts"
             onClick={() => setOpen(false)}
             className={menuItemClass}
           >
@@ -110,7 +110,7 @@ export function AvatarMenu() {
           </Link>
           <Link
             role="menuitem"
-            to="/app-passwords"
+            to="/settings?tab=app-passwords"
             onClick={() => setOpen(false)}
             className={menuItemClass}
           >

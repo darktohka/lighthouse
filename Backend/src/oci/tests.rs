@@ -598,6 +598,198 @@ async fn manifest_referencing_missing_blob_is_rejected() {
     assert_eq!(json["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
 }
 
+async fn restricted_service_account(state: &AppState, owner: &crate::models::User) -> (i64, String) {
+    let (account, token) = crate::auth::service_accounts::create(
+        state,
+        crate::auth::service_accounts::NewServiceAccount {
+            owner_user_id: owner.id,
+            name: "ci",
+            username: "owner-ci",
+            description: None,
+        },
+    )
+    .await
+    .expect("service account");
+    crate::auth::ip_ranges::add(&state.db, account.id, "10.0.0.0/8")
+        .await
+        .expect("range");
+    (account.id, token)
+}
+
+#[tokio::test]
+async fn password_grant_checks_the_service_account_ip_allowlist() {
+    let (_dir, state, app) = harness().await;
+    let user = create_user(&state, "owner").await;
+    let (_account_id, token) = restricted_service_account(&state, &user).await;
+
+    let denied = send(
+        &app,
+        Method::POST,
+        "/api/auth/token",
+        None,
+        &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("x-forwarded-for", "192.168.1.1"),
+        ],
+        format!("grant_type=password&username=owner-ci&password={token}&service=registry.local")
+            .as_bytes(),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(denied).await["error"],
+        "invalid_grant",
+        "a form password grant from outside the allowlist is rejected like a bad password"
+    );
+
+    let allowed = send(
+        &app,
+        Method::POST,
+        "/api/auth/token",
+        None,
+        &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("x-forwarded-for", "10.1.2.3"),
+        ],
+        format!("grant_type=password&username=owner-ci&password={token}&service=registry.local")
+            .as_bytes(),
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+    assert!(body_json(allowed).await["token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn refresh_redemption_checks_the_service_account_ip_allowlist() {
+    let (_dir, state, app) = harness().await;
+    let user = create_user(&state, "owner").await;
+    let (_account_id, token) = restricted_service_account(&state, &user).await;
+
+    let granted = send(
+        &app,
+        Method::POST,
+        "/api/auth/token",
+        None,
+        &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("x-forwarded-for", "10.1.2.3"),
+        ],
+        format!(
+            "grant_type=password&username=owner-ci&password={token}&service=registry.local\
+             &access_type=offline"
+        )
+        .as_bytes(),
+    )
+    .await;
+    assert_eq!(granted.status(), StatusCode::OK);
+    let refresh = body_json(granted).await["refresh_token"]
+        .as_str()
+        .expect("access_type=offline returns a refresh_token")
+        .to_string();
+
+    let denied = send(
+        &app,
+        Method::POST,
+        "/api/auth/token",
+        None,
+        &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("x-forwarded-for", "192.168.1.1"),
+        ],
+        format!("grant_type=refresh_token&refresh_token={refresh}&service=registry.local")
+            .as_bytes(),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        header_str(&denied, "www-authenticate").starts_with("Basic "),
+        "a redemption rejected by the IP allowlist re-challenges with Basic"
+    );
+    assert_eq!(body_json(denied).await["error"], "invalid_grant");
+
+    let allowed = send(
+        &app,
+        Method::POST,
+        "/api/auth/token",
+        None,
+        &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("x-forwarded-for", "10.1.2.3"),
+        ],
+        format!("grant_type=refresh_token&refresh_token={refresh}&service=registry.local")
+            .as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        allowed.status(),
+        StatusCode::OK,
+        "the denied redemption neither consumes nor rotates the secret"
+    );
+    assert!(body_json(allowed).await["token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn registry_token_from_a_denied_ip_is_demoted_to_anonymous() {
+    let (_dir, state, app) = harness().await;
+    let user = create_user(&state, "owner").await;
+    let (_account_id, token) = restricted_service_account(&state, &user).await;
+
+    let granted = send(
+        &app,
+        Method::POST,
+        "/api/auth/token",
+        None,
+        &[
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("x-forwarded-for", "10.1.2.3"),
+        ],
+        format!("grant_type=password&username=owner-ci&password={token}&service=registry.local")
+            .as_bytes(),
+    )
+    .await;
+    assert_eq!(granted.status(), StatusCode::OK);
+    let bearer = body_json(granted).await["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    let allowed = send(
+        &app,
+        Method::GET,
+        "/v2/_catalog",
+        None,
+        &[
+            ("authorization", &format!("Bearer {bearer}")),
+            ("x-forwarded-for", "10.1.2.3"),
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    let demoted = send(
+        &app,
+        Method::GET,
+        "/v2/_catalog",
+        None,
+        &[
+            ("authorization", &format!("Bearer {bearer}")),
+            ("x-forwarded-for", "192.168.1.1"),
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(
+        demoted.status(),
+        StatusCode::FORBIDDEN,
+        "an out-of-range registry bearer token is demoted to an anonymous registry token"
+    );
+    assert!(
+        demoted.headers().get("www-authenticate").is_none(),
+        "a presented registry token is denied, not re-challenged"
+    );
+}
+
 #[cfg(test)]
 mod auth_flow {
     use super::*;
@@ -629,7 +821,10 @@ mod auth_flow {
             &bytes,
             chrono::Utc::now().timestamp(),
         ));
-        crate::auth::two_factor::enable(state, user_id, &code, None, chrono::Utc::now())
+        crate::auth::two_factor::verify_setup(state, user_id, &code, chrono::Utc::now())
+            .await
+            .expect("verify");
+        crate::auth::two_factor::confirm_enable(state, user_id, None, chrono::Utc::now())
             .await
             .expect("enable");
     }

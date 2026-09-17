@@ -3,6 +3,7 @@
 
 pub mod app_passwords;
 pub mod handlers;
+pub mod ip_ranges;
 pub mod middleware;
 pub mod password;
 pub mod registry;
@@ -111,6 +112,7 @@ pub(crate) mod test_support {
             cookie_domain: None,
             cookie_secure: false,
             trust_proxy: true,
+            trusted_proxy_cidrs: Vec::new(),
             registration_enabled: true,
             email_enabled: false,
             brevo_api_key: None,

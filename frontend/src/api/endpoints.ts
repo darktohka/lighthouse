@@ -33,6 +33,7 @@ import {
   repositoryDetailSchema,
   repositorySummarySchema,
   resetPasswordResponseSchema,
+  serviceAccountIpRangeSchema,
   serviceAccountSchema,
   tagDetailSchema,
   tagSizeEntrySchema,
@@ -40,6 +41,7 @@ import {
   twoFactorEnabledSchema,
   twoFactorSetupSchema,
   twoFactorStatusSchema,
+  twoFactorVerifiedSchema,
   userProfileSchema,
   userSummarySchema,
   verifyEmailResponseSchema,
@@ -48,6 +50,7 @@ import {
   type CreateNamespace,
   type CreateServiceAccount,
   type CreateServiceAccountGrant,
+  type CreateServiceAccountIpRange,
   type ForgotPasswordRequest,
   type LoginRequest,
   type RegisterRequest,
@@ -167,8 +170,12 @@ export const auth = {
     return api.post('/auth/2fa/setup', twoFactorSetupSchema)
   },
 
-  twoFactorEnable(code: string) {
-    return api.post('/auth/2fa/enable', twoFactorEnabledSchema, { code })
+  twoFactorVerify(code: string) {
+    return api.post('/auth/2fa/verify', twoFactorVerifiedSchema, { code })
+  },
+
+  twoFactorEnable() {
+    return api.post('/auth/2fa/enable', twoFactorEnabledSchema)
   },
 
   twoFactorDisable(password: string, code: string) {
@@ -551,6 +558,14 @@ export const serviceAccounts = {
 
   removeGrant(id: number, grantId: number) {
     return api.deleteVoid(`/service-accounts/${id}/grants/${grantId}`)
+  },
+
+  addIpRange(id: number, body: CreateServiceAccountIpRange) {
+    return api.post(`/service-accounts/${id}/ip-ranges`, serviceAccountIpRangeSchema, body)
+  },
+
+  removeIpRange(id: number, rangeId: number) {
+    return api.deleteVoid(`/service-accounts/${id}/ip-ranges/${rangeId}`)
   },
 }
 

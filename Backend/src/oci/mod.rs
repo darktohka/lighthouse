@@ -162,7 +162,7 @@ async fn dispatch(
 ) -> Response {
     let actor = auth.0;
     let info = EventInfo {
-        ip: logging::client_ip(&req, state.config.trust_proxy),
+        ip: logging::client_ip(&req, &state.config),
         user_agent: logging::user_agent(&req),
     };
     let method = req.method().clone();

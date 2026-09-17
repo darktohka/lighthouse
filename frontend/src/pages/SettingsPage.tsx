@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import { users as usersApi } from '../api/endpoints'
+import { AppPasswordsPanel } from '../components/AppPasswordsPanel'
 import { AvatarSettingsPanel } from '../components/AvatarSettingsPanel'
 import { LoginHistoryPanel } from '../components/LoginHistoryPanel'
 import { PageHeader } from '../components/PageHeader'
 import { PasswordSettingsForm } from '../components/PasswordSettingsForm'
 import { ProfileSettingsForm } from '../components/ProfileSettingsForm'
+import { ServiceAccountsPanel } from '../components/ServiceAccountsPanel'
 import { SessionsPanel } from '../components/SessionsPanel'
 import { TabNav, TabPanel } from '../components/Tabs'
 import { TwoFactorPanel } from '../components/TwoFactorPanel'
@@ -24,6 +26,8 @@ type SettingsTab =
   | 'logins'
   | 'password'
   | 'security'
+  | 'service-accounts'
+  | 'app-passwords'
 
 const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'profile', label: 'Profile' },
@@ -32,6 +36,8 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'logins', label: 'Login history' },
   { id: 'password', label: 'Password' },
   { id: 'security', label: 'Security' },
+  { id: 'service-accounts', label: 'Service accounts' },
+  { id: 'app-passwords', label: 'App passwords' },
 ]
 
 function isSettingsTab(value: string): value is SettingsTab {
@@ -40,7 +46,16 @@ function isSettingsTab(value: string): value is SettingsTab {
 
 export function SettingsPage() {
   const { user } = useAuth()
-  const [tab, setTab] = useState<SettingsTab>('profile')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedTab = searchParams.get('tab')
+  const tab: SettingsTab =
+    requestedTab && isSettingsTab(requestedTab) ? requestedTab : 'profile'
+
+  const selectTab = (next: SettingsTab) => {
+    const params = new URLSearchParams(searchParams)
+    params.set('tab', next)
+    setSearchParams(params, { replace: true })
+  }
 
   const profileState = useAsync(
     (signal) =>
@@ -62,7 +77,7 @@ export function SettingsPage() {
         tabs={TABS.map((item) => ({ id: item.id, label: item.label }))}
         active={tab}
         onChange={(id) => {
-          if (isSettingsTab(id)) setTab(id)
+          if (isSettingsTab(id)) selectTab(id)
         }}
       />
 
@@ -105,6 +120,14 @@ export function SettingsPage() {
 
       <TabPanel id="security" active={tab}>
         <TwoFactorPanel />
+      </TabPanel>
+
+      <TabPanel id="service-accounts" active={tab}>
+        <ServiceAccountsPanel />
+      </TabPanel>
+
+      <TabPanel id="app-passwords" active={tab}>
+        <AppPasswordsPanel />
       </TabPanel>
     </div>
   )

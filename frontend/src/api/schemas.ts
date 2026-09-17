@@ -298,6 +298,12 @@ export const serviceAccountGrantSchema = v.object({
 })
 export type ServiceAccountGrant = v.InferOutput<typeof serviceAccountGrantSchema>
 
+export const serviceAccountIpRangeSchema = v.object({
+  id: v.number(),
+  cidr: v.string(),
+})
+export type ServiceAccountIpRange = v.InferOutput<typeof serviceAccountIpRangeSchema>
+
 export const serviceAccountSchema = v.object({
   id: v.number(),
   name: v.string(),
@@ -308,6 +314,7 @@ export const serviceAccountSchema = v.object({
   created_at: timestampSchema,
   last_used_at: v.nullable(timestampSchema),
   grants: v.array(serviceAccountGrantSchema),
+  ip_ranges: v.array(serviceAccountIpRangeSchema),
 })
 export type ServiceAccount = v.InferOutput<typeof serviceAccountSchema>
 
@@ -322,6 +329,7 @@ export type CreatedServiceAccount = v.InferOutput<
 export const createServiceAccountSchema = v.object({
   name: v.string(),
   description: v.optional(v.string()),
+  ip_ranges: v.optional(v.array(v.string())),
 })
 export type CreateServiceAccount = v.InferOutput<
   typeof createServiceAccountSchema
@@ -334,6 +342,11 @@ export const createServiceAccountGrantSchema = v.object({
 })
 export type CreateServiceAccountGrant = v.InferOutput<
   typeof createServiceAccountGrantSchema
+>
+
+export const createServiceAccountIpRangeSchema = v.object({ cidr: v.string() })
+export type CreateServiceAccountIpRange = v.InferOutput<
+  typeof createServiceAccountIpRangeSchema
 >
 
 // ---------------------------------------------------------------------------
@@ -747,6 +760,11 @@ export const twoFactorEnabledSchema = v.object({
   enabled: v.boolean(),
 })
 export type TwoFactorEnabled = v.InferOutput<typeof twoFactorEnabledSchema>
+
+export const twoFactorVerifiedSchema = v.object({
+  verified: v.boolean(),
+})
+export type TwoFactorVerified = v.InferOutput<typeof twoFactorVerifiedSchema>
 
 export const backupCodesResponseSchema = v.object({
   backup_codes: v.array(v.string()),

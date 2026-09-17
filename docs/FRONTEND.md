@@ -266,11 +266,15 @@ navigation and account menu gained entries, and new widgets live under
 | `/analytics` | `AnalyticsPage` | `recharts` disk usage, largest tags, pulls over time and top repositories; headline counters; namespace filter |
 | `/tags` | `TagCleanupPage` | sortable total/unique size, shared-storage bar, multi-select batch delete |
 | `/users/:username` | `ProfilePage` | follow/unfollow, paginated followers/following, public repositories, yearly contribution heatmap |
-| `/settings` | `SettingsPage` | profile, profile picture (Libravatar), sessions, login history, password |
-| `/service-accounts` | `ServiceAccountsPage` | create/rotate with a one-time token, namespace/repository grants, delete |
+| `/settings` | `SettingsPage` | profile, profile picture (Libravatar), sessions, login history, password, security (2FA), service accounts, app passwords |
 | `/new` | `WorkspaceCreatePage` | live reserved/taken workspace-name validation |
 | `/namespaces/:name/settings` | `NamespaceSettingsPage` | general settings, members, delegations |
 | `/repositories/:namespace/*` | `RepositorySettingsRouteView` | repository `…/settings`: description/visibility, image delegations, delete image |
+
+Service accounts (`ServiceAccountsPanel`) and app passwords
+(`AppPasswordsPanel`) are tabs on `/settings`, not standalone routes; the active
+tab is deep-linked through the `tab` query parameter (for example
+`/settings?tab=service-accounts`).
 
 Supporting components: `AnalyticsCharts`, `Heatmap`, `DelegationsPanel`,
 `UserAutocomplete`, `MembersPanel`, `ServiceAccountCard`, `TagSizeTable`,

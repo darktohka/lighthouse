@@ -28,6 +28,14 @@ function describeError(error: unknown, fallback: string): string {
   return isApiError(error) ? error.message : fallback
 }
 
+/**
+ * Not-enabled setup runs in two stages: `scan` verifies the authenticator app,
+ * `codes` shows the one-time backup codes and confirms activation. Activation
+ * is only reachable from `codes`, so it can never happen without a successful
+ * verify in this session.
+ */
+type SetupStage = 'scan' | 'codes'
+
 function BackupCodes({
   codes,
   onDone,
@@ -78,10 +86,11 @@ export function TwoFactorPanel() {
   const [notice, setNotice] = useState<string | null>(null)
 
   const [setup, setSetup] = useState<TwoFactorSetup | null>(null)
+  const [stage, setStage] = useState<SetupStage | null>(null)
   const [startingSetup, setStartingSetup] = useState(false)
-  const [codesSaved, setCodesSaved] = useState(false)
-  const [enableCode, setEnableCode] = useState('')
-  const [enableErrors, setEnableErrors] = useState<FieldErrors>({})
+  const [verifyCode, setVerifyCode] = useState('')
+  const [verifyErrors, setVerifyErrors] = useState<FieldErrors>({})
+  const [verifying, setVerifying] = useState(false)
   const [enabling, setEnabling] = useState(false)
 
   const [regenerateOpen, setRegenerateOpen] = useState(false)
@@ -106,9 +115,9 @@ export function TwoFactorPanel() {
       (result) => {
         setStartingSetup(false)
         setSetup(result)
-        setCodesSaved(false)
-        setEnableCode('')
-        setEnableErrors({})
+        setStage('scan')
+        setVerifyCode('')
+        setVerifyErrors({})
       },
       (error: unknown) => {
         setStartingSetup(false)
@@ -121,38 +130,62 @@ export function TwoFactorPanel() {
 
   const cancelSetup = () => {
     setSetup(null)
-    setCodesSaved(false)
-    setEnableCode('')
-    setEnableErrors({})
+    setStage(null)
+    setVerifyCode('')
+    setVerifyErrors({})
     setActionError(null)
   }
 
-  const onEnable = (event: FormEvent<HTMLFormElement>) => {
+  const onVerify = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setActionError(null)
     setNotice(null)
 
-    const validation = validateForm(verifyCodeFormSchema, { code: enableCode })
+    const validation = validateForm(verifyCodeFormSchema, { code: verifyCode })
     if (!validation.ok) {
-      setEnableErrors(validation.errors)
+      setVerifyErrors(validation.errors)
       return
     }
-    setEnableErrors({})
+    setVerifyErrors({})
 
+    setVerifying(true)
+    void auth.twoFactorVerify(validation.value.code).then(
+      () => {
+        setVerifying(false)
+        setStage('codes')
+      },
+      (error: unknown) => {
+        setVerifying(false)
+        setActionError(
+          describeError(error, 'That code could not be verified. Try again.'),
+        )
+      },
+    )
+  }
+
+  const onEnable = () => {
+    if (stage !== 'codes' || !setup) return
+
+    setActionError(null)
+    setNotice(null)
     setEnabling(true)
-    void auth.twoFactorEnable(validation.value.code).then(
+    void auth.twoFactorEnable().then(
       () => {
         setEnabling(false)
         setSetup(null)
-        setCodesSaved(false)
-        setEnableCode('')
+        setStage(null)
+        setVerifyCode('')
+        setVerifyErrors({})
         setNotice('Two-factor authentication is now enabled.')
         state.reload()
       },
       (error: unknown) => {
         setEnabling(false)
         setActionError(
-          describeError(error, 'That code could not be verified. Try again.'),
+          describeError(
+            error,
+            'Two-factor authentication could not be enabled.',
+          ),
         )
       },
     )
@@ -290,8 +323,9 @@ export function TwoFactorPanel() {
           </div>
         ) : null}
 
-        {status && !status.enabled && setup ? (
-          <form className="space-y-4" onSubmit={onEnable} noValidate>
+        {status && !status.enabled && setup && stage === 'scan' ? (
+          <div className="space-y-4">
+            <p className="text-xs font-medium text-muted">Step 1 of 2</p>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-3">
                 <div className="flex justify-center rounded-md border border-border bg-white p-4">
@@ -316,22 +350,17 @@ export function TwoFactorPanel() {
                 </div>
               </div>
 
-              <div className="space-y-3">
-                <BackupCodes codes={setup.backup_codes} />
-                <label className="flex items-start gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={codesSaved}
-                    onChange={(event) => setCodesSaved(event.target.checked)}
-                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-accent"
-                  />
-                  <span>I have saved my backup codes somewhere safe.</span>
-                </label>
+              <form className="space-y-3" onSubmit={onVerify} noValidate>
+                <p className="text-sm">
+                  Scan the QR code with your authenticator app, then enter the
+                  6-digit code it shows to confirm the app is set up. You&apos;ll
+                  get your backup codes in the next step.
+                </p>
                 <TextInput
                   label="Verification code"
-                  value={enableCode}
-                  onChange={(event) => setEnableCode(event.target.value)}
-                  error={enableErrors.code}
+                  value={verifyCode}
+                  onChange={(event) => setVerifyCode(event.target.value)}
+                  error={verifyErrors.code}
                   hint="Enter the 6-digit code your authenticator app shows."
                   inputMode="numeric"
                   autoComplete="one-time-code"
@@ -339,20 +368,33 @@ export function TwoFactorPanel() {
                   required
                 />
                 <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    disabled={!codesSaved || enabling}
-                  >
-                    {enabling ? 'Enabling…' : 'Enable two-factor authentication'}
+                  <Button type="submit" variant="primary" disabled={verifying}>
+                    {verifying ? 'Verifying…' : 'Verify code'}
                   </Button>
-                  <Button onClick={cancelSetup} disabled={enabling}>
+                  <Button onClick={cancelSetup} disabled={verifying}>
                     Cancel
                   </Button>
                 </div>
-              </div>
+              </form>
             </div>
-          </form>
+          </div>
+        ) : null}
+
+        {status && !status.enabled && setup && stage === 'codes' ? (
+          <div className="space-y-3">
+            <p className="text-xs font-medium text-muted">Step 2 of 2</p>
+            <p className="text-sm">
+              Save these backup codes somewhere safe, then confirm to turn on
+              two-factor authentication. You can take as long as you need — no
+              code is required to finish.
+            </p>
+            <BackupCodes codes={setup.backup_codes} onDone={onEnable} />
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={cancelSetup} disabled={enabling}>
+                Cancel
+              </Button>
+            </div>
+          </div>
         ) : null}
 
         {status && status.enabled ? (

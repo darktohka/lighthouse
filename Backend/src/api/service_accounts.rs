@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::auth::middleware::Authenticated;
-use crate::auth::{service_accounts as registry_accounts, tokens};
+use crate::auth::{ip_ranges, service_accounts as registry_accounts, tokens};
 use crate::error::{ApiError, ApiResult};
-use crate::models::ServiceAccount;
+use crate::models::{ServiceAccount, ServiceAccountIpRange};
 use crate::state::AppState;
 
 use super::{is_namespace_admin, load_namespace, namespace_by_id};
@@ -29,6 +29,13 @@ struct CreateServiceAccount {
     username: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    ip_ranges: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateServiceAccountIpRange {
+    cidr: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +58,12 @@ struct ServiceAccountGrantView {
 }
 
 #[derive(Debug, Serialize)]
+struct ServiceAccountIpRangeView {
+    id: i64,
+    cidr: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ServiceAccountView {
     id: i64,
     name: String,
@@ -61,6 +74,7 @@ struct ServiceAccountView {
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
     grants: Vec<ServiceAccountGrantView>,
+    ip_ranges: Vec<ServiceAccountIpRangeView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,15 +86,17 @@ struct CreatedServiceAccount {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/service-accounts", get(list).post(create))
-        .route(
-            "/api/service-accounts/{id}",
-            get(detail).delete(remove),
-        )
+        .route("/api/service-accounts/{id}", get(detail).delete(remove))
         .route("/api/service-accounts/{id}/token", post(rotate))
         .route("/api/service-accounts/{id}/grants", post(add_grant))
         .route(
             "/api/service-accounts/{id}/grants/{grant_id}",
             axum::routing::delete(remove_grant),
+        )
+        .route("/api/service-accounts/{id}/ip-ranges", post(add_ip_range))
+        .route(
+            "/api/service-accounts/{id}/ip-ranges/{range_id}",
+            axum::routing::delete(remove_ip_range),
         )
 }
 
@@ -90,13 +106,12 @@ fn actor_user_id(ctx: &crate::state::AuthContext) -> ApiResult<i64> {
 }
 
 async fn account_for_owner(state: &AppState, user_id: i64, id: i64) -> ApiResult<ServiceAccount> {
-    let account = sqlx::query_as::<_, ServiceAccount>(
-        "SELECT * FROM service_accounts WHERE id = ? LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::not_found("service account not found"))?;
+    let account =
+        sqlx::query_as::<_, ServiceAccount>("SELECT * FROM service_accounts WHERE id = ? LIMIT 1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::not_found("service account not found"))?;
     if account.owner_user_id != user_id {
         return Err(ApiError::not_found("service account not found"));
     }
@@ -112,7 +127,10 @@ struct GrantRow {
     can_push: bool,
 }
 
-async fn account_grants(state: &AppState, account_id: i64) -> ApiResult<Vec<ServiceAccountGrantView>> {
+async fn account_grants(
+    state: &AppState,
+    account_id: i64,
+) -> ApiResult<Vec<ServiceAccountGrantView>> {
     let rows = sqlx::query_as::<_, GrantRow>(
         "SELECT g.id AS id, n.name AS namespace_name, r.name AS repository_name, \
                 g.can_pull AS can_pull, g.can_push AS can_push \
@@ -136,6 +154,25 @@ async fn account_grants(state: &AppState, account_id: i64) -> ApiResult<Vec<Serv
         .collect())
 }
 
+async fn account_ip_ranges(
+    state: &AppState,
+    account_id: i64,
+) -> ApiResult<Vec<ServiceAccountIpRangeView>> {
+    let rows = sqlx::query_as::<_, ServiceAccountIpRange>(
+        "SELECT * FROM service_account_ip_ranges WHERE service_account_id = ? ORDER BY id",
+    )
+    .bind(account_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ServiceAccountIpRangeView {
+            id: row.id,
+            cidr: row.cidr,
+        })
+        .collect())
+}
+
 async fn account_view(state: &AppState, account: &ServiceAccount) -> ApiResult<ServiceAccountView> {
     Ok(ServiceAccountView {
         id: account.id,
@@ -147,6 +184,7 @@ async fn account_view(state: &AppState, account: &ServiceAccount) -> ApiResult<S
         created_at: account.created_at,
         last_used_at: account.last_used_at,
         grants: account_grants(state, account.id).await?,
+        ip_ranges: account_ip_ranges(state, account.id).await?,
     })
 }
 
@@ -188,15 +226,18 @@ async fn create(
     Json(request): Json<CreateServiceAccount>,
 ) -> ApiResult<Response> {
     let user_id = actor_user_id(&ctx)?;
+    let normalized_ranges =
+        ip_ranges::normalize_list(&request.ip_ranges).map_err(ApiError::bad_request)?;
     let name = request.name.trim().to_string();
     if name.is_empty() {
         return Err(ApiError::bad_request("name is required"));
     }
 
-    let owner = sqlx::query_as::<_, crate::models::User>("SELECT * FROM users WHERE id = ? LIMIT 1")
-        .bind(user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let owner =
+        sqlx::query_as::<_, crate::models::User>("SELECT * FROM users WHERE id = ? LIMIT 1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await?;
 
     let username = match request.username {
         Some(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
@@ -238,6 +279,16 @@ async fn create(
     )
     .await?;
 
+    // The account must never be left unrestricted when the caller asked for
+    // ranges, so a failed range write rolls the whole creation back.
+    if let Err(err) = ip_ranges::replace_all(&state.db, account.id, &normalized_ranges).await {
+        let _ = sqlx::query("DELETE FROM service_accounts WHERE id = ?")
+            .bind(account.id)
+            .execute(&state.db)
+            .await;
+        return Err(err);
+    }
+
     super::record_activity(
         &state.db,
         Some(user_id),
@@ -251,7 +302,14 @@ async fn create(
     .await;
 
     let view = account_view(&state, &account).await?;
-    Ok((StatusCode::CREATED, Json(CreatedServiceAccount { account: view, token })).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedServiceAccount {
+            account: view,
+            token,
+        }),
+    )
+        .into_response())
 }
 
 async fn detail(
@@ -301,12 +359,11 @@ async fn rotate(
 
     crate::auth::registry_refresh::revoke_for_service_account(&state, id).await?;
 
-    let account = sqlx::query_as::<_, ServiceAccount>(
-        "SELECT * FROM service_accounts WHERE id = ? LIMIT 1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+    let account =
+        sqlx::query_as::<_, ServiceAccount>("SELECT * FROM service_accounts WHERE id = ? LIMIT 1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
     let view = account_view(&state, &account).await?;
     Ok(Json(CreatedServiceAccount {
         account: view,
@@ -366,7 +423,9 @@ async fn add_grant(
             (None, Some(repository.id))
         }
         (None, None) => {
-            return Err(ApiError::bad_request("a namespace or repository is required"));
+            return Err(ApiError::bad_request(
+                "a namespace or repository is required",
+            ));
         }
     };
 
@@ -418,15 +477,43 @@ async fn remove_grant(
 ) -> ApiResult<Response> {
     let user_id = actor_user_id(&ctx)?;
     let account = account_for_owner(&state, user_id, id).await?;
-    let result = sqlx::query(
-        "DELETE FROM service_account_grants WHERE id = ? AND service_account_id = ?",
-    )
-    .bind(grant_id)
-    .bind(account.id)
-    .execute(&state.db)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM service_account_grants WHERE id = ? AND service_account_id = ?")
+            .bind(grant_id)
+            .bind(account.id)
+            .execute(&state.db)
+            .await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("grant not found"));
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn add_ip_range(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Path(id): Path<i64>,
+    Json(request): Json<CreateServiceAccountIpRange>,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let account = account_for_owner(&state, user_id, id).await?;
+    let range = ip_ranges::add(&state.db, account.id, &request.cidr).await?;
+    let view = ServiceAccountIpRangeView {
+        id: range.id,
+        cidr: range.cidr,
+    };
+    Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+async fn remove_ip_range(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Path((id, range_id)): Path<(i64, i64)>,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let account = account_for_owner(&state, user_id, id).await?;
+    if !ip_ranges::remove(&state.db, account.id, range_id).await? {
+        return Err(ApiError::not_found("IP range not found"));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }

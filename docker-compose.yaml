@@ -53,6 +53,10 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       # Trust X-Forwarded-For / X-Real-IP from a reverse proxy (keep true behind Caddy).
       TRUST_PROXY: ${TRUST_PROXY:-true}
+      # Comma-separated IPs/CIDRs allowed to set forwarded headers. Empty trusts
+      # any peer; set it to the proxy's address (e.g. 127.0.0.1) so a directly
+      # reachable port cannot spoof the client IP.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
       # --- transactional e-mail (Brevo) -------------------------------------
       EMAIL_ENABLED: ${EMAIL_ENABLED:-false}

@@ -17,6 +17,7 @@ formats and the HTTP surface under `/api/auth`.
 | Refresh token | `sessions.refresh_token_hash` | opaque 32-byte URL-safe value, SHA-256 at rest |
 | E-mail token | `email_tokens` | opaque 32-byte hex, single-use, kind `verify_email` / `reset_password` |
 | Service account | `service_accounts` | Basic credentials for registry clients |
+| Service-account IP range | `service_account_ip_ranges` | optional per-account CIDR allowlist entry |
 | Second factor | `users.totp_secret`, `users.totp_enabled` | RFC 6238 TOTP; `totp_confirmed_at` / `totp_last_used_step` |
 | Backup code | `totp_backup_codes` | single-use Argon2id hashes, 8 per enrolment |
 | App password | `app_passwords` | per-account registry credential, SHA-256 at rest |
@@ -159,8 +160,9 @@ All responses are JSON. Errors use the control-plane envelope
 | GET | `/login-history` | required | `200 {events,limit,offset}` | newest first; `?limit=` (≤200) `&offset=` |
 | GET, POST | `/token` | no | `200 {token, access_token, expires_in, issued_at, refresh_token?}` | registry bearer-token service; OAuth2 error bodies on failure; see §9 and §10 |
 | GET | `/2fa` | required | `200 {enabled, backup_codes_remaining}` | status for the caller's account |
-| POST | `/2fa/setup` | required | `200 {secret, otpauth_uri, backup_codes:[…8]}` | writes an unconfirmed secret (`totp_enabled=0`), replacing any pending enrolment; `secret` is returned only here |
-| POST | `/2fa/enable` | required | `200 {enabled:true}` | verifies a live code, sets `totp_enabled=1`, revokes every other session |
+| POST | `/2fa/setup` | required | `200 {secret, otpauth_uri, backup_codes:[…8]}` | writes an unconfirmed secret (`totp_enabled=0`), replacing any pending enrolment including its verification; `secret` is returned only here |
+| POST | `/2fa/verify` | required | `200 {verified:true}` | validates a live code, records `totp_verified_at`; TOTP is still disabled |
+| POST | `/2fa/enable` | required | `200 {enabled:true}` | activates a verified enrolment with **no code**, sets `totp_enabled=1`, revokes every other session; `400` until step 2 has succeeded |
 | POST | `/2fa/disable` | required | `200 {enabled:false}` | requires the account password plus a live TOTP or backup code; clears the secret, deletes the backup codes, revokes other sessions |
 | POST | `/2fa/backup-codes` | required | `200 {backup_codes:[…8]}` | requires a live TOTP code, never a backup code; invalidates the old set |
 
@@ -204,7 +206,13 @@ under `/api/auth/captcha` (`POST /challenge`, `/redeem`, `/consume`). `GET
 `/api/auth/login/2fa` is charged to the `login` bucket.
 
 The client IP honours `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` and
-`X-Client-IP` when `TRUST_PROXY=true`.
+`X-Client-IP` when `TRUST_PROXY=true`. For `X-Forwarded-For` the **rightmost**
+non-empty entry is used, which is the value the last proxy (Caddy) appended;
+leftmost entries can be attacker-supplied when proxies are chained.
+`TRUSTED_PROXY_CIDRS` (a comma-separated list of IPs/CIDRs) restricts which peer
+addresses may set forwarded headers: empty means any peer (backward compatible),
+and when set an unverifiable peer fails closed. The application port must not be
+directly reachable by clients.
 
 ---
 
@@ -241,7 +249,8 @@ TOTP is opt-in per account and state lives on `users`:
 | Column | Meaning |
 |---|---|
 | `totp_secret` | base32 secret, `NULL` until enrolment |
-| `totp_enabled` | `0`/`1`; set to `1` only after a live code is confirmed |
+| `totp_enabled` | `0`/`1`; set to `1` only after a verified enrolment is confirmed |
+| `totp_verified_at` | when the pending enrolment last passed a live-code check; `NULL` once enabled, restarted or disabled |
 | `totp_confirmed_at` | when the factor was enabled |
 | `totp_last_used_step` | last accepted time step, for replay rejection |
 
@@ -258,14 +267,20 @@ Enrolment and management, all requiring a web session:
 
 1. `POST /api/auth/2fa/setup` returns `{ secret, otpauth_uri, backup_codes }`
    and writes the secret with `totp_enabled=0`. It replaces any previous
-   unconfirmed enrolment and its backup codes. The secret is returned only
-   here.
-2. `POST /api/auth/2fa/enable { code }` verifies a live code, sets
-   `totp_enabled=1` and revokes every other session.
-3. `POST /api/auth/2fa/disable { password, code }` requires the account
+   pending enrolment — including its verification — and its backup codes. The
+   secret is returned only here.
+2. `POST /api/auth/2fa/verify { code }` validates a live code and records
+   `totp_verified_at`, but leaves TOTP disabled.
+3. `POST /api/auth/2fa/enable` (no body) activates the verified enrolment, sets
+   `totp_enabled=1` and revokes every other session. Activation is deferred
+   until after the user confirms the backup codes are saved, so no code is
+   needed at this step and the user may take as long as they need — the live
+   code from step 2 may well have expired. Until step 2 has succeeded this
+   endpoint returns `400 verify the authentication code first`.
+4. `POST /api/auth/2fa/disable { password, code }` requires the account
    password plus a live TOTP or backup code, then clears the secret, deletes
    the backup codes and revokes other sessions.
-4. `POST /api/auth/2fa/backup-codes { code }` issues a fresh set and invalidates
+5. `POST /api/auth/2fa/backup-codes { code }` issues a fresh set and invalidates
    the old one. It requires a live TOTP code, never a backup code.
 
 `GET /api/auth/2fa` reports `{ enabled, backup_codes_remaining }`.
@@ -360,6 +375,38 @@ cannot act as a web session.
 
 Anonymous tokens can pull public repositories and tags; private repositories
 return `403 DENIED`.
+
+### Service-account IP allowlists
+
+A service account may carry zero or more IP allowlist entries. Each entry is an
+IP address or CIDR range; a bare address becomes a host route (`/32` for IPv4,
+`/128` for IPv6) and a network is truncated to its base (`10.1.2.3/24` is stored
+as `10.1.2.0/24`). IPv4-mapped IPv6 ranges (`::ffff:0:0/96`) are rejected and a
+duplicate returns `409`. An account holds at most 64 ranges. **No** ranges means
+unrestricted; there is no "deny all" representation.
+
+The allowlist is a precondition to authentication. When an account has ranges
+and the request's client IP is not inside any of them, the account is treated
+exactly like a failed authentication: the response is indistinguishable from a
+wrong token or app password and `last_used_at` is not updated.
+
+| Credential surface | Response on denial |
+|---|---|
+| Basic auth, and `/api/auth/token` including the form `password` grant | `401` |
+| Registry refresh-token redemption | `401 invalid_grant` |
+| Registry bearer token already presented to `/v2` | `403 DENIED`; the token is demoted to an anonymous registry token, matching the existing no-challenge behaviour that stops Docker from looping |
+
+Public repositories remain anonymously pullable by design, so a restricted
+account's request for public content is equivalent to anonymous access rather
+than a hard failure.
+
+Ranges are managed through the control plane (`docs/API.md` §6). `ServiceAccount`
+gains `ip_ranges`, `POST /api/service-accounts` accepts an optional
+`ip_ranges: string[]`, and two routes add and remove entries:
+`POST /api/service-accounts/{id}/ip-ranges` with `{ cidr }` returns
+`201 { id, cidr }` (invalid CIDR `400`, duplicate `409`, non-owner `404`,
+cap exceeded `400`), while `DELETE /api/service-accounts/{id}/ip-ranges/{range_id}`
+returns `204` (unknown `404`).
 
 ---
 

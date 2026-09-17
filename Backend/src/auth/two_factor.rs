@@ -1,7 +1,11 @@
 //! TOTP two-factor authentication: enrolment, verification and recovery.
 //!
-//! The secret is written by [`begin_setup`] but stays inert (`totp_enabled = 0`)
-//! until [`enable`] verifies a live code, so an abandoned enrolment can never
+//! Enrolment is a two-step flow. [`begin_setup`] writes a fresh but inert secret
+//! and set of backup codes (`totp_enabled = 0`). [`verify_setup`] validates a
+//! live code and records `totp_verified_at`, still leaving the factor disabled.
+//! [`confirm_enable`] then activates TOTP with no code at all, so the user may
+//! take arbitrarily long to store the backup codes without needing a fresh
+//! (possibly expired) code at the confirm step. An abandoned enrolment can never
 //! lock an account out. Backup codes are single-use and stored only as Argon2id
 //! hashes; the plaintext exists solely in the setup response.
 
@@ -74,7 +78,8 @@ async fn load_username(db: &Db, user_id: i64) -> ApiResult<String> {
 }
 
 /// Starts (or restarts) enrolment: a fresh secret plus a fresh set of backup
-/// codes, replacing any previous unconfirmed state. TOTP stays disabled.
+/// codes, replacing any previous pending state including its verification. TOTP
+/// stays disabled.
 pub async fn begin_setup(
     state: &AppState,
     user_id: i64,
@@ -88,7 +93,7 @@ pub async fn begin_setup(
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE users SET totp_secret = ?, totp_enabled = 0, totp_confirmed_at = NULL, \
-         totp_last_used_step = NULL, updated_at = ? WHERE id = ?",
+         totp_verified_at = NULL, totp_last_used_step = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(&secret)
     .bind(now)
@@ -195,17 +200,16 @@ pub async fn verify_login_code(
     consume_backup_code(state, user_id, code).await
 }
 
-/// Confirms enrolment with a live code and enables TOTP. Other sessions are
-/// revoked so a previously stolen cookie cannot outlive the new factor.
-pub async fn enable(
+/// Validates a live code and records `totp_verified_at`, leaving TOTP disabled.
+/// The actual activation is [`confirm_enable`], so the user may take arbitrarily
+/// long to store the backup codes and no fresh code is needed to confirm.
+pub async fn verify_setup(
     state: &AppState,
     user_id: i64,
     code: &str,
-    keep_session: Option<&str>,
     now: DateTime<Utc>,
 ) -> ApiResult<()> {
-    let enabled = is_enabled(&state.db, user_id).await?;
-    if enabled {
+    if is_enabled(&state.db, user_id).await? {
         return Err(ApiError::conflict("two-factor authentication is already enabled"));
     }
     let Some(secret) = load_secret(&state.db, user_id).await? else {
@@ -215,9 +219,45 @@ pub async fn enable(
         return Err(ApiError::bad_request("invalid authentication code"));
     }
 
-    let updated = sqlx::query(
-        "UPDATE users SET totp_enabled = 1, totp_confirmed_at = ?, updated_at = ? \
+    sqlx::query(
+        "UPDATE users SET totp_verified_at = ?, updated_at = ? \
          WHERE id = ? AND totp_enabled = 0",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+/// Activates a previously verified enrolment with no code. Other sessions are
+/// revoked so a previously stolen cookie cannot outlive the new factor.
+pub async fn confirm_enable(
+    state: &AppState,
+    user_id: i64,
+    keep_session: Option<&str>,
+    now: DateTime<Utc>,
+) -> ApiResult<()> {
+    if is_enabled(&state.db, user_id).await? {
+        return Err(ApiError::conflict("two-factor authentication is already enabled"));
+    }
+    if load_secret(&state.db, user_id).await?.is_none() {
+        return Err(ApiError::bad_request("start two-factor setup first"));
+    }
+    let verified: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT totp_verified_at FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+    if verified.is_none() {
+        return Err(ApiError::bad_request("verify the authentication code first"));
+    }
+
+    let updated = sqlx::query(
+        "UPDATE users SET totp_enabled = 1, totp_confirmed_at = ?, totp_verified_at = NULL, \
+         updated_at = ? WHERE id = ? AND totp_enabled = 0 AND totp_verified_at IS NOT NULL",
     )
     .bind(now)
     .bind(now)
@@ -257,7 +297,7 @@ pub async fn disable(
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_confirmed_at = NULL, \
-         totp_last_used_step = NULL, updated_at = ? WHERE id = ?",
+         totp_verified_at = NULL, totp_last_used_step = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(now)
     .bind(user.id)
@@ -331,6 +371,14 @@ mod tests {
         totp::format_code(totp::totp(&bytes, at.timestamp()))
     }
 
+    async fn verified_at(state: &AppState, user_id: i64) -> Option<String> {
+        sqlx::query_scalar("SELECT totp_verified_at FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("totp_verified_at")
+    }
+
     #[tokio::test]
     async fn setup_then_enable_flow() {
         let (_dir, state) = test_state().await;
@@ -343,7 +391,8 @@ mod tests {
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
 
         let code = current_code(&state, user.id).await;
-        enable(&state, user.id, &code, None, Utc::now()).await.expect("enable");
+        verify_setup(&state, user.id, &code, Utc::now()).await.expect("verify");
+        confirm_enable(&state, user.id, None, Utc::now()).await.expect("enable");
         assert!(is_enabled(&state.db, user.id).await.expect("enabled"));
 
         let status = status(&state.db, user.id).await.expect("status");
@@ -357,10 +406,12 @@ mod tests {
         let user = create_user(&state, "alice").await;
         begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
 
-        assert!(enable(&state, user.id, "000000", None, Utc::now()).await.is_err());
+        assert!(verify_setup(&state, user.id, "000000", Utc::now()).await.is_err());
+        assert!(verified_at(&state, user.id).await.is_none());
         let code = current_code(&state, user.id).await;
-        enable(&state, user.id, &code, None, Utc::now()).await.expect("enable");
-        assert!(enable(&state, user.id, &code, None, Utc::now()).await.is_err());
+        verify_setup(&state, user.id, &code, Utc::now()).await.expect("verify");
+        confirm_enable(&state, user.id, None, Utc::now()).await.expect("enable");
+        assert!(confirm_enable(&state, user.id, None, Utc::now()).await.is_err());
     }
 
     #[tokio::test]
@@ -370,7 +421,8 @@ mod tests {
         let now = Utc::now();
         begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
         let enable_code = code_at(&state, user.id, now).await;
-        enable(&state, user.id, &enable_code, None, now).await.expect("enable");
+        verify_setup(&state, user.id, &enable_code, now).await.expect("verify");
+        confirm_enable(&state, user.id, None, now).await.expect("enable");
 
         let later = now + Duration::seconds(totp::PERIOD as i64);
         let login_code = code_at(&state, user.id, later).await;
@@ -394,7 +446,8 @@ mod tests {
         let user = create_user(&state, "alice").await;
         let setup = begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
         let code = current_code(&state, user.id).await;
-        enable(&state, user.id, &code, None, Utc::now()).await.expect("enable");
+        verify_setup(&state, user.id, &code, Utc::now()).await.expect("verify");
+        confirm_enable(&state, user.id, None, Utc::now()).await.expect("enable");
 
         let backup = &setup.backup_codes[0];
         assert!(verify_login_code(&state, user.id, backup, Utc::now()).await.expect("verify"));
@@ -410,7 +463,8 @@ mod tests {
         let now = Utc::now();
         begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
         let enable_code = code_at(&state, user.id, now).await;
-        enable(&state, user.id, &enable_code, None, now).await.expect("enable");
+        verify_setup(&state, user.id, &enable_code, now).await.expect("verify");
+        confirm_enable(&state, user.id, None, now).await.expect("enable");
 
         let fresh = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
             .bind(user.id)
@@ -440,5 +494,55 @@ mod tests {
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
         assert!(load_secret(&state.db, user.id).await.expect("secret").is_none());
         assert_eq!(status(&state.db, user.id).await.expect("status").backup_codes_remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn verify_setup_does_not_enable_but_marks_verified() {
+        let (_dir, state) = test_state().await;
+        let user = create_user(&state, "alice").await;
+        let now = Utc::now();
+        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        let code = code_at(&state, user.id, now).await;
+
+        verify_setup(&state, user.id, &code, now).await.expect("verify");
+
+        assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
+        assert!(verified_at(&state, user.id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn confirm_enable_before_verify_is_rejected() {
+        let (_dir, state) = test_state().await;
+        let user = create_user(&state, "alice").await;
+        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+
+        assert!(confirm_enable(&state, user.id, None, Utc::now()).await.is_err());
+        assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
+        assert!(verified_at(&state, user.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn verify_setup_rejects_bad_code_and_leaves_unverified() {
+        let (_dir, state) = test_state().await;
+        let user = create_user(&state, "alice").await;
+        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+
+        assert!(verify_setup(&state, user.id, "000000", Utc::now()).await.is_err());
+        assert!(verified_at(&state, user.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirm_enable_clears_verified_and_enables() {
+        let (_dir, state) = test_state().await;
+        let user = create_user(&state, "alice").await;
+        let now = Utc::now();
+        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        let code = code_at(&state, user.id, now).await;
+        verify_setup(&state, user.id, &code, now).await.expect("verify");
+
+        confirm_enable(&state, user.id, None, now).await.expect("enable");
+
+        assert!(is_enabled(&state.db, user.id).await.expect("enabled"));
+        assert!(verified_at(&state, user.id).await.is_none());
     }
 }

@@ -183,6 +183,14 @@ pub struct ServiceAccountGrant {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct ServiceAccountIpRange {
+    pub id: i64,
+    pub service_account_id: i64,
+    pub cidr: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct AppPassword {
     pub id: i64,
     pub user_id: i64,

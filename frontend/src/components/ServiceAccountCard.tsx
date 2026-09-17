@@ -33,6 +33,7 @@ export function ServiceAccountCard({
   const [canPush, setCanPush] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [newRange, setNewRange] = useState('')
 
   const fail = (error: unknown, fallback: string) => {
     setBusy(null)
@@ -103,6 +104,37 @@ export function ServiceAccountCard({
         onChanged()
       },
       (error: unknown) => fail(error, 'The grant could not be removed.'),
+    )
+  }
+
+  const addIpRange = () => {
+    setActionError(null)
+    if (newRange.trim().length === 0) {
+      setActionError('Enter an IP address or range.')
+      return
+    }
+    setBusy('ip-range')
+    void serviceAccountsApi
+      .addIpRange(account.id, { cidr: newRange.trim() })
+      .then(
+        () => {
+          setBusy(null)
+          setNewRange('')
+          onChanged()
+        },
+        (error: unknown) => fail(error, 'The IP range could not be added.'),
+      )
+  }
+
+  const removeIpRange = (rangeId: number) => {
+    setActionError(null)
+    setBusy(`ip-range-${rangeId}`)
+    void serviceAccountsApi.removeIpRange(account.id, rangeId).then(
+      () => {
+        setBusy(null)
+        onChanged()
+      },
+      (error: unknown) => fail(error, 'The IP range could not be removed.'),
     )
   }
 
@@ -178,6 +210,56 @@ export function ServiceAccountCard({
               ))}
             </ul>
           )}
+        </div>
+
+        <div>
+          <p className="mb-1 text-sm font-medium">IP allowlist</p>
+          {account.ip_ranges.length === 0 ? (
+            <p className="text-xs text-muted">
+              No IP restriction — this account can authenticate from any address.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border rounded-md border border-border">
+              {account.ip_ranges.map((range) => (
+                <li
+                  key={range.id}
+                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5"
+                >
+                  <span className="font-mono text-xs">{range.cidr}</span>
+                  <ConfirmAction
+                    label="Remove"
+                    confirmLabel="Remove range"
+                    resourceName={`range ${range.cidr}`}
+                    pending={busy === `ip-range-${range.id}`}
+                    onConfirm={() => removeIpRange(range.id)}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="grid gap-2 rounded-md border border-border bg-canvas-subtle p-3 sm:grid-cols-2">
+          <TextInput
+            label="IP address or range"
+            value={newRange}
+            onChange={(event) => setNewRange(event.target.value)}
+            placeholder="203.0.113.4 or 10.0.0.0/8"
+          />
+          <div className="sm:col-span-2">
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={busy === 'ip-range' || newRange.trim().length === 0}
+              onClick={addIpRange}
+            >
+              {busy === 'ip-range' ? 'Adding…' : 'Add range'}
+            </Button>
+          </div>
+          <p className="text-xs text-muted sm:col-span-2">
+            Single addresses are treated as /32 (IPv4) or /128 (IPv6). The client
+            IP is taken from the reverse proxy&apos;s X-Forwarded-For header.
+          </p>
         </div>
 
         <div className="grid gap-2 rounded-md border border-border bg-canvas-subtle p-3 sm:grid-cols-2">

@@ -32,11 +32,13 @@ statistics, storage analytics and an in-browser layer filesystem viewer.
   blobs when tags or images are deleted.
 - **Identity** — Argon2id passwords, TOTP two-factor authentication with
   single-use backup codes, per-account app passwords, e-mail verification
-  through Brevo, stateless access cookie + refresh tokens, service accounts,
+  through Brevo, stateless access cookie + refresh tokens, registry refresh
+  tokens (offline tokens), service accounts with per-account IP allowlists,
   login history.
 - **Authorization** — personal namespaces, workspaces, per-namespace and
   per-repository delegations (including anonymous), registry bearer tokens for
-  `/v2` (anonymous pull included), push implies pull.
+  `/v2` (anonymous pull included), a configurable `WWW-Authenticate` challenge
+  (`Bearer`, `Basic` or both), push implies pull.
 - **Control plane** — dashboard and activity timeline, image and tag detail with
   compressed/uncompressed sizes and platforms, JSON manifest/config browsing,
   in-browser layer filesystem, storage analytics, profile pages with a yearly
@@ -114,7 +116,7 @@ cd frontend && pnpm install && pnpm dev
 ```
 
 Open <http://localhost:5173>. Tests: `cargo test --manifest-path Backend/Cargo.toml`
-(145 tests) and `pnpm build` in `frontend/`.
+(220 tests) and `pnpm build` in `frontend/`.
 
 ## License
 

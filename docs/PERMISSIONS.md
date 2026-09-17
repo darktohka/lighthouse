@@ -52,6 +52,9 @@ Notes:
 - Service accounts resolve through `service_account_grants` at rules 2 and 3.
   They do **not** inherit their owner's ownership or membership — explicit
   grants are the whole model.
+- A service account outside its IP allowlist is not authenticated at all: the
+  credential is rejected before any rule runs, so the rules above never apply.
+  An empty allowlist is unrestricted; see `docs/AUTH.md` for enforcement.
 - Anonymous actors match only `subject_type='anonymous'` grants and public
   visibility.
 

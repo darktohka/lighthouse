@@ -208,18 +208,35 @@ required only when `subject_type == "user"`.
 | POST | `/service-accounts/{id}/token` | required | rotate; new token returned once |
 | POST | `/service-accounts/{id}/grants` | required | add a grant |
 | DELETE | `/service-accounts/{id}/grants/{grant_id}` | required | remove a grant |
+| POST | `/service-accounts/{id}/ip-ranges` | required | add an IP allowlist entry `{cidr}` |
+| DELETE | `/service-accounts/{id}/ip-ranges/{range_id}` | required | remove an IP allowlist entry |
 
 ```
 ServiceAccount { id, name, username, description, token_prefix, token_suffix,
-                 created_at, last_used_at, grants: ServiceAccountGrant[] }
+                 created_at, last_used_at, grants: ServiceAccountGrant[],
+                 ip_ranges: ServiceAccountIpRange[] }
 CreatedServiceAccount { account: ServiceAccount, token: string }
 ServiceAccountGrant { id, namespace: string|null, repository: string|null,
                       can_pull, can_push }
+ServiceAccountIpRange { id, cidr }
+CreateServiceAccount { name, description?, ip_ranges?: string[] }
 CreateServiceAccountGrant { namespace?: string, repository?: string, can_push: bool }
+CreateServiceAccountIpRange { cidr: string }
 ```
 
 The plaintext token (`lhr_…`) is present only in the create/rotate response.
 Thereafter only `token_prefix` + `token_suffix` are exposed for identification.
+
+`ip_ranges` holds normalized CIDRs: a bare address is stored as a host route
+(`/32` for IPv4, `/128` for IPv6) and a network is truncated to its base
+(`10.1.2.3/24` becomes `10.1.2.0/24`). An empty list means unrestricted. At most
+64 ranges are allowed per account. `POST .../ip-ranges` returns
+`201 { id, cidr }` and rejects an invalid CIDR or an IPv4-mapped IPv6 range with
+`400 bad_request`, a duplicate (after normalization) with `409 conflict`, an
+account not owned by the caller with `404 not_found`, and a list that exceeds the
+cap with `400 bad_request`. `DELETE .../ip-ranges/{range_id}` returns `204`, or
+`404 not_found` for an unknown range. See `docs/AUTH.md` for how the allowlist is
+enforced during authentication.
 
 ---
 

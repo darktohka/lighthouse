@@ -19,15 +19,16 @@
 //! Only Basic is honoured for the probe. A cookie is deliberately ignored so a
 //! browser session cannot be turned into a bearer token (a CSRF mint surface).
 
+use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Json;
 use chrono::Utc;
 
+use crate::auth::ip_ranges;
 use crate::auth::middleware::{self, Auth};
 use crate::auth::registry;
 use crate::auth::registry_refresh::{self, Principal};
@@ -48,6 +49,7 @@ async fn token(
     method: Method,
     headers: HeaderMap,
     RawQuery(raw): RawQuery,
+    client_ip: crate::logging::ClientIp,
     body: Bytes,
 ) -> Response {
     let mut params = query_pairs(raw.as_deref());
@@ -64,7 +66,7 @@ async fn token(
             "grant_type=refresh_token must be sent in a POST body",
         );
     }
-    issue(&state, &auth.0, &headers, &params).await
+    issue(&state, &auth.0, &headers, &params, client_ip.0.as_deref()).await
 }
 
 async fn issue(
@@ -72,6 +74,7 @@ async fn issue(
     actor: &AuthContext,
     headers: &HeaderMap,
     params: &[(String, String)],
+    client_ip: Option<&str>,
 ) -> Response {
     let has_basic = has_basic_credentials(headers);
     let requested = scope_parameters(params);
@@ -84,14 +87,24 @@ async fn issue(
             return oauth_error("invalid_request", "refresh_token is required");
         };
         return match registry_refresh::redeem(state, presented, &requested).await {
-            Ok(redeemed) => mint(
-                state,
-                redeemed.subject,
-                Some(&redeemed.username),
-                redeemed.service_account_id,
-                redeemed.access,
-                None,
-            ),
+            Ok(redeemed) => {
+                if let Some(service_account_id) = redeemed.service_account_id
+                    && !ip_ranges::allowed(&state.db, service_account_id, client_ip).await
+                {
+                    return oauth_challenge_error(
+                        registry_refresh::INVALID_GRANT,
+                        "refresh token is invalid, expired or revoked",
+                    );
+                }
+                mint(
+                    state,
+                    redeemed.subject,
+                    Some(&redeemed.username),
+                    redeemed.service_account_id,
+                    redeemed.access,
+                    None,
+                )
+            }
             Err(err) if err.code == registry_refresh::INVALID_GRANT => {
                 oauth_challenge_error("invalid_grant", &err.message)
             }
@@ -113,7 +126,7 @@ async fn issue(
             return oauth_error("invalid_request", "username and password are required");
         };
         let resolved =
-            middleware::authenticate_basic(state, username, password, None, None, false).await;
+            middleware::authenticate_basic(state, username, password, client_ip, None, false).await;
         let authenticated = resolved.is_authenticated();
         (resolved, authenticated)
     } else {
@@ -235,8 +248,9 @@ fn has_basic_credentials(headers: &HeaderMap) -> bool {
 fn offline_requested(params: &[(String, String)]) -> bool {
     match param(params, "offline_token") {
         Some(value) => value.is_empty() || is_truthy(value),
-        None => param(params, "access_type")
-            .is_some_and(|value| value.eq_ignore_ascii_case("offline")),
+        None => {
+            param(params, "access_type").is_some_and(|value| value.eq_ignore_ascii_case("offline"))
+        }
     }
 }
 

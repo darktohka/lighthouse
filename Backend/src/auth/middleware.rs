@@ -19,7 +19,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 
 use crate::auth::{
-    LoginAttempt, app_passwords, password, record_login_event, service_accounts, sessions, tokens,
+    LoginAttempt, app_passwords, ip_ranges, password, record_login_event, service_accounts,
+    sessions, tokens,
 };
 use crate::error::ApiError;
 use crate::logging;
@@ -49,6 +50,8 @@ pub async fn resolve_identity(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let ip = logging::client_ip(&req, &state.config);
+
     if req.extensions().get::<AuthContext>().is_none() {
         let announce = req.uri().path() != crate::auth::token_endpoint::TOKEN_PATH;
         let credentials = Credentials {
@@ -57,12 +60,33 @@ pub async fn resolve_identity(
             bearer: bearer_token(req.headers()),
         };
         let audit = Audit {
-            ip: logging::client_ip(&req, state.config.trust_proxy),
+            ip: ip.clone(),
             agent: logging::user_agent(&req),
         };
-        let ctx = resolve(&state, credentials, audit, announce).await;
+        let mut ctx = resolve(&state, credentials, audit, announce).await;
+
+        // A registry bearer token carrying a service-account id is checked
+        // against that account's IP allowlist here, at the single point where a
+        // `/v2` credential becomes an identity. The context is demoted to an
+        // anonymous registry token (identity cleared, `credential` kept) so `/v2`
+        // answers `403 DENIED` rather than re-issuing a `401` challenge the
+        // daemon would loop on. Public repositories remain anonymously pullable
+        // by design: demotion denies only the *identified* push/pull actions a
+        // restricted account would otherwise receive.
+        if ctx.credential == CredentialSource::RegistryToken {
+            if let Some(service_account_id) = ctx.service_account_id
+                && !ip_ranges::allowed(&state.db, service_account_id, ip.as_deref()).await
+            {
+                ctx.user_id = None;
+                ctx.username = None;
+                ctx.service_account_id = None;
+            }
+        }
+
         req.extensions_mut().insert(ctx);
     }
+
+    req.extensions_mut().insert(logging::ClientIp(ip));
     next.run(req).await
 }
 
@@ -153,7 +177,7 @@ pub async fn authenticate_basic(
     user_agent: Option<&str>,
     announce: bool,
 ) -> AuthContext {
-    if let Ok(Some(account)) = service_accounts::authenticate(state, username, password).await {
+    if let Ok(Some(account)) = service_accounts::authenticate(state, username, password, ip).await {
         if announce {
             record_login_event(
                 &state.db,

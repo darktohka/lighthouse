@@ -4,23 +4,23 @@ import { useState, type FormEvent } from 'react'
 import { isApiError } from '../api/client'
 import { serviceAccountList, serviceAccounts as serviceAccountsApi } from '../api/endpoints'
 import type { ServiceAccount } from '../api/schemas'
-import { OneTimeToken } from '../components/OneTimeToken'
-import { PageHeader } from '../components/PageHeader'
-import { ServiceAccountCard } from '../components/ServiceAccountCard'
-import { Box, BoxBody, BoxHeader } from '../components/primitives/Box'
-import { Button } from '../components/primitives/Button'
-import { Flash } from '../components/primitives/Flash'
-import { TextInput } from '../components/primitives/TextInput'
-import { EmptyState, ErrorState, LoadingState } from '../components/primitives/StateViews'
+import { OneTimeToken } from './OneTimeToken'
+import { ServiceAccountCard } from './ServiceAccountCard'
+import { Box, BoxBody, BoxHeader } from './primitives/Box'
+import { Button } from './primitives/Button'
+import { Flash } from './primitives/Flash'
+import { TextInput } from './primitives/TextInput'
+import { EmptyState, ErrorState, LoadingState } from './primitives/StateViews'
 import { useAsync } from '../lib/useAsync'
 
-export function ServiceAccountsPage() {
+export function ServiceAccountsPanel() {
   const state = useAsync(
     (signal) => serviceAccountList.list({ signal }),
     'service-accounts',
   )
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [ipRanges, setIpRanges] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [issued, setIssued] = useState<{ token: string; label: string } | null>(null)
@@ -33,16 +33,22 @@ export function ServiceAccountsPage() {
       return
     }
     setCreating(true)
+    const ranges = ipRanges
+      .split(/[\s,]+/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0)
     void serviceAccountsApi
       .create({
         name: name.trim(),
         ...(description.trim() ? { description: description.trim() } : {}),
+        ...(ranges.length > 0 ? { ip_ranges: ranges } : {}),
       })
       .then(
         (response) => {
           setCreating(false)
           setName('')
           setDescription('')
+          setIpRanges('')
           setIssued({ token: response.token, label: response.account.name })
           state.reload()
         },
@@ -61,11 +67,6 @@ export function ServiceAccountsPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="Service accounts"
-        description="Machine credentials for CI and registry clients, scoped by grants you choose."
-      />
-
       {issued ? (
         <OneTimeToken
           token={issued.token}
@@ -102,6 +103,15 @@ export function ServiceAccountsPage() {
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="Deploys production from GitHub Actions"
               />
+              <div className="sm:col-span-2">
+                <TextInput
+                  label="Allowed IP ranges"
+                  value={ipRanges}
+                  onChange={(event) => setIpRanges(event.target.value)}
+                  placeholder="203.0.113.4, 10.0.0.0/8"
+                  hint="Optional. Comma- or space-separated addresses/CIDRs; leave empty to allow any address."
+                />
+              </div>
             </div>
             <Button type="submit" variant="primary" disabled={creating}>
               {creating ? 'Creating…' : 'Create service account'}

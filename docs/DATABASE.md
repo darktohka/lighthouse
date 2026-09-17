@@ -62,6 +62,7 @@ backoff for operations that can still collide.
 | `repository_permissions` | grants on a single image |
 | `service_accounts` | Basic-auth machine credentials (hash + prefix/suffix) |
 | `service_account_grants` | namespace- or repository-scoped grants |
+| `service_account_ip_ranges` | per-account CIDR allowlist entries; empty means unrestricted |
 
 ### Observability
 | Table | Purpose |
@@ -103,6 +104,24 @@ Indexes:
 | `idx_registry_refresh_tokens_app_password` | `app_password_id` | |
 | `idx_registry_refresh_tokens_service_account` | `service_account_id` | |
 
+### Service-account IP ranges
+| Table | Purpose |
+|---|---|
+| `service_account_ip_ranges` | normalized CIDRs a service account may authenticate from |
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | primary key, autoincrement |
+| `service_account_id` | INTEGER | FK `service_accounts(id)`, `ON DELETE CASCADE` |
+| `cidr` | TEXT | normalized CIDR; bare addresses become host routes (`/32`, `/128`) |
+| `created_at` | TEXT | insertion time |
+
+Indexes:
+
+| Index | Columns | Kind |
+|---|---|---|
+| `idx_service_account_ip_ranges_unique` | `service_account_id`, `cidr` | unique |
+
 ## Reference graph
 
 ```
@@ -127,6 +146,9 @@ Migrations run in filename order at startup.
 - `0003_registry_refresh_tokens.sql` creates `registry_refresh_tokens` for
   offline registry tokens, with a unique hash index plus user, app-password and
   service-account lookup indexes.
+- `0004_service_account_ip_ranges.sql` creates `service_account_ip_ranges` for
+  per-service-account IP allowlists, with a unique `(service_account_id, cidr)`
+  index.
 
 ## Maintenance
 

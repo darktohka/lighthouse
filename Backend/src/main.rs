@@ -11,12 +11,13 @@ mod error;
 mod layer_cache;
 mod logging;
 mod models;
+mod net;
 mod oci;
 mod permissions;
 mod ratelimit;
 mod routes;
-mod static_files;
 mod state;
+mod static_files;
 mod storage;
 
 use std::net::SocketAddr;

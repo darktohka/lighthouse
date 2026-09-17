@@ -151,9 +151,23 @@ docker compose start lighthouse
 ## Reverse proxy (Caddy)
 
 Terminate TLS in front of Lighthouse and forward the real client information.
-The application trusts `X-Forwarded-For` (first value), `X-Real-IP`,
-`CF-Connecting-IP` and `X-Client-IP` only when `TRUST_PROXY=true`. The client IP
-is used for rate limiting and the login audit log, so it must be set correctly.
+The application trusts `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` and
+`X-Client-IP` only when `TRUST_PROXY=true`. For `X-Forwarded-For` the
+**rightmost** non-empty entry is used, the value the last proxy (Caddy)
+appended; leftmost entries can be attacker-supplied when proxies are chained.
+The client IP drives rate limiting, the login audit log and service-account IP
+allowlists, so it must be set correctly.
+
+`TRUSTED_PROXY_CIDRS` narrows which peer addresses may set those headers: a
+comma-separated list of IPs/CIDRs, empty by default. When set, a request whose
+connecting peer is not inside the list ignores the forwarded headers and falls
+back to the peer address, and a peer that cannot be verified fails closed. Leave
+it empty when Lighthouse is reachable only from the proxy, or set it to the
+proxy's address (for example `127.0.0.1` for a host-local Caddy).
+
+The application port must not be directly reachable by clients, otherwise a
+client can bypass the proxy and spoof forwarding headers. Keep `LIGHTHOUSE_PORT`
+on a private interface or firewall it, and expose only the proxy.
 
 `/etc/caddy/Caddyfile`:
 
@@ -162,7 +176,8 @@ registry.example.com {
     encode zstd gzip
 
     reverse_proxy 127.0.0.1:8080 {
-        # Caddy sets these by default; shown explicitly for clarity.
+        # Overwrite (not append to) the client-supplied value so the last
+        # X-Forwarded-For entry is unambiguously the address Caddy observed.
         header_up X-Forwarded-For   {remote_host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Real-IP         {remote_host}
@@ -178,8 +193,14 @@ PUBLIC_HOST=registry.example.com
 PUBLIC_SCHEME=https
 BASE_URL=https://registry.example.com
 TRUST_PROXY=true
+TRUSTED_PROXY_CIDRS=127.0.0.1
 COOKIE_SECURE=true
 ```
+
+When a CDN sits in front of Caddy, list its ranges in Caddy's global
+`servers { trusted_proxies … }` block so `{remote_host}` resolves to the real
+client instead of the CDN edge, and point `TRUSTED_PROXY_CIDRS` at Caddy's own
+address.
 
 `X-Forwarded-Proto` is what tells the application the original request was
 HTTPS; it is used when deciding how links and redirects are built. Make sure the

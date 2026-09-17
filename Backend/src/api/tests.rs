@@ -498,7 +498,14 @@ async fn private_repository_is_404_for_strangers() {
     .await;
     assert_eq!(stranger.status(), StatusCode::NOT_FOUND);
 
-    let anonymous = call(&app, Method::GET, "/api/repositories/alice/secret", None, None).await;
+    let anonymous = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/secret",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(anonymous.status(), StatusCode::NOT_FOUND);
 }
 
@@ -518,7 +525,14 @@ async fn namespace_list_only_includes_visible_workspaces() {
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let response = call(&app, Method::GET, "/api/namespaces", Some(actor(&alice)), None).await;
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/namespaces",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
     let mine = body_json(response).await;
     assert!(
         mine["items"]
@@ -528,7 +542,14 @@ async fn namespace_list_only_includes_visible_workspaces() {
             .any(|item| item["name"] == "team-alice")
     );
 
-    let response = call(&app, Method::GET, "/api/namespaces", Some(actor(&bob)), None).await;
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/namespaces",
+        Some(actor(&bob)),
+        None,
+    )
+    .await;
     let theirs = body_json(response).await;
     assert!(
         !theirs["items"]
@@ -548,8 +569,7 @@ async fn layer_tree_file_and_path_traversal_safety() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
     let layer = layer_archive();
-    let (_, layer_digest) =
-        seed_image(&state, "alice/img", "latest", b"config", &layer).await;
+    let (_, layer_digest) = seed_image(&state, "alice/img", "latest", b"config", &layer).await;
     let digest = layer_digest.to_string();
     let tree_uri = format!("/api/repositories/alice/img/layers/{digest}/tree");
     let file_uri = format!("/api/repositories/alice/img/layers/{digest}/file");
@@ -565,7 +585,10 @@ async fn layer_tree_file_and_path_traversal_safety() {
         .collect();
     assert!(names.contains(&"etc".to_string()));
     assert!(names.contains(&"usr".to_string()));
-    assert!(!names.contains(&"top.txt".to_string()), "whiteout must hide top.txt");
+    assert!(
+        !names.contains(&"top.txt".to_string()),
+        "whiteout must hide top.txt"
+    );
 
     let size_of = |entries: &serde_json::Value, name: &str| -> i64 {
         entries
@@ -587,7 +610,11 @@ async fn layer_tree_file_and_path_traversal_safety() {
     };
     assert_eq!(size_of(&tree, "etc"), 12, "directory rolls up its file");
     assert_eq!(size_of(&tree, "usr"), 10, "nested directory total");
-    assert_eq!(size_of(&tree, "var"), 4, "opaque dir keeps only surviving file");
+    assert_eq!(
+        size_of(&tree, "var"),
+        4,
+        "opaque dir keeps only surviving file"
+    );
 
     let root_link = entry_of(&tree, "root-link");
     assert_eq!(root_link["kind"], "symlink");
@@ -624,7 +651,11 @@ async fn layer_tree_file_and_path_traversal_safety() {
         .iter()
         .map(|entry| entry["name"].as_str().unwrap_or_default().to_string())
         .collect();
-    assert_eq!(var_names, vec!["b.txt".to_string()], "opaque dir hides a.txt");
+    assert_eq!(
+        var_names,
+        vec!["b.txt".to_string()],
+        "opaque dir hides a.txt"
+    );
 
     let response = call(
         &app,
@@ -839,7 +870,10 @@ async fn permission_crud_and_user_autocomplete() {
     let results = body_json(response).await;
     let first = &results.as_array().expect("search")[0];
     assert_eq!(first["username"], "bob");
-    assert!(first.get("email").is_none(), "search must never expose e-mail");
+    assert!(
+        first.get("email").is_none(),
+        "search must never expose e-mail"
+    );
 
     let response = call(
         &app,
@@ -881,7 +915,10 @@ async fn service_account_create_rotate_and_grants() {
     let token = created["token"].as_str().expect("token").to_string();
     assert!(token.starts_with("lhr_"));
     let account_id = created["account"]["id"].as_i64().expect("account id");
-    assert_eq!(created["account"]["token_prefix"].as_str().unwrap().len(), 3);
+    assert_eq!(
+        created["account"]["token_prefix"].as_str().unwrap().len(),
+        3
+    );
 
     let response = call(
         &app,
@@ -893,7 +930,10 @@ async fn service_account_create_rotate_and_grants() {
     .await;
     let list = body_json(response).await;
     let rendered = list.to_string();
-    assert!(!rendered.contains(&token), "listing must not expose the token");
+    assert!(
+        !rendered.contains(&token),
+        "listing must not expose the token"
+    );
     assert!(!rendered.contains("token_hash"));
     assert_eq!(list.as_array().expect("list").len(), 1);
 
@@ -961,6 +1001,135 @@ async fn service_account_create_rotate_and_grants() {
     assert_eq!(grants, 0, "deleting an account cascades its grants");
 }
 
+#[tokio::test]
+async fn service_account_ip_ranges_are_normalized_and_managed() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({
+            "name": "ci",
+            "username": "alice-ci",
+            "ip_ranges": ["203.0.113.4", "10.1.2.3/24"],
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    let account_id = created["account"]["id"].as_i64().expect("account id");
+    let ranges = created["account"]["ip_ranges"]
+        .as_array()
+        .expect("ip_ranges");
+    assert_eq!(ranges.len(), 2);
+    let rendered = serde_json::Value::Array(ranges.clone()).to_string();
+    assert!(rendered.contains("203.0.113.4/32"));
+    assert!(rendered.contains("10.1.2.0/24"));
+
+    let response = call(
+        &app,
+        Method::POST,
+        &format!("/api/service-accounts/{account_id}/ip-ranges"),
+        Some(actor(&alice)),
+        Some(json!({ "cidr": "192.168.0.0/16" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let added = body_json(response).await;
+    assert_eq!(added["cidr"], "192.168.0.0/16");
+    let range_id = added["id"].as_i64().expect("range id");
+
+    let response = call(
+        &app,
+        Method::POST,
+        &format!("/api/service-accounts/{account_id}/ip-ranges"),
+        Some(actor(&alice)),
+        Some(json!({ "cidr": "192.168.0.0/16" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = call(
+        &app,
+        Method::POST,
+        &format!("/api/service-accounts/{account_id}/ip-ranges"),
+        Some(actor(&alice)),
+        Some(json!({ "cidr": "not-a-cidr" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let detail = body_json(response).await;
+    assert_eq!(detail["ip_ranges"].as_array().expect("ip_ranges").len(), 3);
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let listed = body_json(response).await;
+    assert_eq!(
+        listed[0]["ip_ranges"].as_array().expect("ip_ranges").len(),
+        3
+    );
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/service-accounts/{account_id}/ip-ranges/{range_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/service-accounts/{account_id}/ip-ranges/{range_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn service_account_create_with_invalid_range_is_rejected() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci", "ip_ranges": ["::ffff:1.2.3.0/120"] })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_accounts")
+        .fetch_one(&state.db)
+        .await
+        .expect("accounts counted");
+    assert_eq!(accounts, 0, "a rejected creation leaves no account behind");
+}
+
 // ---------------------------------------------------------------------------
 // Analytics, activity and dashboard
 // ---------------------------------------------------------------------------
@@ -979,12 +1148,14 @@ async fn analytics_overview_aggregates_expected_totals() {
         .expect("find")
         .expect("repository")
         .id;
-    sqlx::query("INSERT INTO pull_stats (repository_id, tag_name, day, pulls) VALUES (?, 'a', ?, 7)")
-        .bind(repo_id)
-        .bind(chrono::Utc::now().format("%Y-%m-%d").to_string())
-        .execute(&state.db)
-        .await
-        .expect("pull stat");
+    sqlx::query(
+        "INSERT INTO pull_stats (repository_id, tag_name, day, pulls) VALUES (?, 'a', ?, 7)",
+    )
+    .bind(repo_id)
+    .bind(chrono::Utc::now().format("%Y-%m-%d").to_string())
+    .execute(&state.db)
+    .await
+    .expect("pull stat");
 
     let response = call(
         &app,
@@ -1003,11 +1174,18 @@ async fn analytics_overview_aggregates_expected_totals() {
     assert!(overview["blob_count"].as_i64().unwrap_or(0) >= 4);
     assert_eq!(overview["pull_count"], 7);
     assert_eq!(overview["pull_count_30d"], 7);
-    assert!(!overview["largest_tags"].as_array().expect("largest").is_empty());
-    assert!(!overview["disk_usage_by_repository"]
-        .as_array()
-        .expect("disk")
-        .is_empty());
+    assert!(
+        !overview["largest_tags"]
+            .as_array()
+            .expect("largest")
+            .is_empty()
+    );
+    assert!(
+        !overview["disk_usage_by_repository"]
+            .as_array()
+            .expect("disk")
+            .is_empty()
+    );
     let shared = overview["shared_size"].as_i64().unwrap_or(0);
     let total = overview["total_size"].as_i64().unwrap_or(1);
     let percentage = overview["shared_percentage"].as_f64().unwrap_or(-1.0);
@@ -1059,13 +1237,22 @@ async fn activity_and_dashboard_for_seeded_user() {
             .any(|item| item["repository"] == "alice/app")
     );
 
-    let response = call(&app, Method::GET, "/api/dashboard", Some(actor(&alice)), None).await;
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/dashboard",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     let dashboard = body_json(response).await;
-    assert!(!dashboard["repositories"]
-        .as_array()
-        .expect("repositories")
-        .is_empty());
+    assert!(
+        !dashboard["repositories"]
+            .as_array()
+            .expect("repositories")
+            .is_empty()
+    );
     assert_eq!(dashboard["stats"]["repository_count"], 1);
     assert_eq!(dashboard["stats"]["tag_count"], 1);
     assert!(dashboard["stats"]["total_size"].as_i64().unwrap_or(0) > 0);
@@ -1183,7 +1370,10 @@ async fn user_profile_and_heatmap() {
     let profile = body_json(response).await;
     assert_eq!(profile["username"], "alice");
     assert_eq!(profile["is_self"], true);
-    assert!(profile.get("email").is_none(), "profiles never expose e-mail");
+    assert!(
+        profile.get("email").is_none(),
+        "profiles never expose e-mail"
+    );
     assert!(profile.get("password_hash").is_none());
 
     let year = chrono::Utc::now().format("%Y").to_string();

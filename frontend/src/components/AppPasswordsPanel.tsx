@@ -4,18 +4,17 @@ import { useState, type FormEvent } from 'react'
 import { isApiError } from '../api/client'
 import { appPasswords } from '../api/endpoints'
 import { createAppPasswordSchema, type AppPassword } from '../api/schemas'
-import { AppPasswordCard } from '../components/AppPasswordCard'
-import { OneTimeToken } from '../components/OneTimeToken'
-import { PageHeader } from '../components/PageHeader'
-import { Box, BoxBody, BoxHeader } from '../components/primitives/Box'
-import { Button } from '../components/primitives/Button'
-import { Flash } from '../components/primitives/Flash'
-import { TextInput } from '../components/primitives/TextInput'
-import { EmptyState, ErrorState, LoadingState } from '../components/primitives/StateViews'
+import { AppPasswordCard } from './AppPasswordCard'
+import { OneTimeToken } from './OneTimeToken'
+import { Box, BoxBody, BoxHeader } from './primitives/Box'
+import { Button } from './primitives/Button'
+import { Flash } from './primitives/Flash'
+import { TextInput } from './primitives/TextInput'
+import { EmptyState, ErrorState, LoadingState } from './primitives/StateViews'
 import { validateForm } from '../lib/forms'
 import { useAsync } from '../lib/useAsync'
 
-export function AppPasswordsPage() {
+export function AppPasswordsPanel() {
   const state = useAsync(
     (signal) => appPasswords.list({ signal }),
     'app-passwords',
@@ -58,11 +57,6 @@ export function AppPasswordsPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="App passwords"
-        description="Registry credentials for the Docker CLI and CI. Each one signs in without your password or two-factor code."
-      />
-
       {issued ? (
         <OneTimeToken
           token={issued.token}

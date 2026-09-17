@@ -16,6 +16,7 @@ use crate::captcha;
 use crate::db::Db;
 use crate::email;
 use crate::error::{ApiError, ApiResult};
+use crate::logging;
 use crate::models::{LoginEvent, Namespace, Session, User};
 use crate::oci::reference::parse_name_and_namespace;
 use crate::ratelimit::Limiters;
@@ -197,6 +198,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/login/2fa", post(login_two_factor))
         .route("/api/auth/2fa", get(two_factor_status))
         .route("/api/auth/2fa/setup", post(two_factor_setup))
+        .route("/api/auth/2fa/verify", post(two_factor_verify))
         .route("/api/auth/2fa/enable", post(two_factor_enable))
         .route("/api/auth/2fa/disable", post(two_factor_disable))
         .route("/api/auth/2fa/backup-codes", post(two_factor_backup_codes))
@@ -219,6 +221,7 @@ pub fn router() -> Router<AppState> {
 async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client_ip: logging::ClientIp,
     Json(request): Json<RegisterRequest>,
 ) -> ApiResult<Response> {
     if !state.config.registration_enabled {
@@ -239,7 +242,7 @@ async fn register(
     )
     .await?;
 
-    let ip = request_ip(&state, &headers);
+    let ip = client_ip.0;
     enforce_limit(
         state
             .limiters
@@ -335,6 +338,7 @@ async fn register(
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client_ip: logging::ClientIp,
     Json(request): Json<LoginRequest>,
 ) -> ApiResult<Response> {
     let identifier = request.identifier.trim().to_string();
@@ -345,7 +349,7 @@ async fn login(
     )
     .await?;
 
-    let ip = request_ip(&state, &headers);
+    let ip = client_ip.0;
     let user_agent = header_user_agent(&headers);
     enforce_limit(
         state
@@ -415,12 +419,12 @@ async fn login(
         .await?;
 
     if !totp_enabled {
-        return complete_login(&state, &headers, &user, "password").await;
+        return complete_login(&state, &headers, &user, ip.as_deref(), "password").await;
     }
 
     if let Some(code) = request.code.as_deref() {
         if two_factor::verify_login_code(&state, user.id, code, Utc::now()).await? {
-            return complete_login(&state, &headers, &user, "two_factor").await;
+            return complete_login(&state, &headers, &user, ip.as_deref(), "two_factor").await;
         }
         crate::auth::record_login_event(
             &state.db,
@@ -446,9 +450,9 @@ async fn complete_login(
     state: &AppState,
     headers: &HeaderMap,
     user: &User,
+    ip: Option<&str>,
     kind: &str,
 ) -> ApiResult<Response> {
-    let ip = request_ip(state, headers);
     let user_agent = header_user_agent(headers);
     let (session, refresh_token) = sessions::create(
         state,
@@ -487,13 +491,14 @@ async fn complete_login(
 async fn login_two_factor(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client_ip: logging::ClientIp,
     Json(request): Json<TwoFactorLoginRequest>,
 ) -> ApiResult<Response> {
     let claims = tokens::verify_mfa_token(&state.config, &request.mfa_token)
         .map_err(|_| ApiError::unauthorized("two-factor challenge is invalid or expired"))?;
     let user = load_user(&state.db, claims.sub).await?;
 
-    let ip = request_ip(&state, &headers);
+    let ip = client_ip.0;
     enforce_limit(
         state
             .limiters
@@ -525,7 +530,7 @@ async fn login_two_factor(
         return Err(invalid_two_factor_code());
     }
 
-    complete_login(&state, &headers, &user, "two_factor").await
+    complete_login(&state, &headers, &user, ip.as_deref(), "two_factor").await
 }
 
 async fn two_factor_status(
@@ -551,7 +556,7 @@ async fn two_factor_setup(
     Ok(Json(setup).into_response())
 }
 
-async fn two_factor_enable(
+async fn two_factor_verify(
     State(state): State<AppState>,
     Authenticated(ctx): Authenticated,
     Json(request): Json<TwoFactorCodeRequest>,
@@ -559,14 +564,18 @@ async fn two_factor_enable(
     let user_id = ctx
         .user_id
         .ok_or_else(|| ApiError::unauthorized("user session required"))?;
-    two_factor::enable(
-        &state,
-        user_id,
-        &request.code,
-        ctx.session_id.as_deref(),
-        Utc::now(),
-    )
-    .await?;
+    two_factor::verify_setup(&state, user_id, &request.code, Utc::now()).await?;
+    Ok(Json(json!({ "verified": true })).into_response())
+}
+
+async fn two_factor_enable(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+) -> ApiResult<Response> {
+    let user_id = ctx
+        .user_id
+        .ok_or_else(|| ApiError::unauthorized("user session required"))?;
+    two_factor::confirm_enable(&state, user_id, ctx.session_id.as_deref(), Utc::now()).await?;
     Ok(Json(json!({ "enabled": true })).into_response())
 }
 
@@ -773,9 +782,10 @@ async fn verify_email_token(db: &Db, token: &str) -> ApiResult<()> {
 async fn resend_verification(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client_ip: logging::ClientIp,
     Json(request): Json<EmailRequest>,
 ) -> ApiResult<Response> {
-    let ip = request_ip(&state, &headers);
+    let ip = client_ip.0;
     enforce_limit(
         state
             .limiters
@@ -802,6 +812,7 @@ async fn resend_verification(
 async fn forgot_password(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client_ip: logging::ClientIp,
     Json(request): Json<EmailRequest>,
 ) -> ApiResult<Response> {
     captcha::verify(
@@ -811,7 +822,7 @@ async fn forgot_password(
     )
     .await?;
 
-    let ip = request_ip(&state, &headers);
+    let ip = client_ip.0;
     enforce_limit(
         state
             .limiters
@@ -980,27 +991,6 @@ fn enforce_limit(outcome: crate::ratelimit::LimitOutcome) -> ApiResult<()> {
             "too many requests; try again later",
         )),
     }
-}
-
-/// Resolves the client IP from proxy headers, mirroring `logging::client_ip`.
-pub(crate) fn request_ip(state: &AppState, headers: &HeaderMap) -> Option<String> {
-    if state.config.trust_proxy {
-        if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = value.split(',').map(str::trim).find(|s| !s.is_empty()) {
-                return Some(first.to_string());
-            }
-        }
-        for name in ["x-real-ip", "cf-connecting-ip", "x-client-ip"] {
-            if let Some(value) = headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .filter(|v| !v.is_empty())
-            {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn header_user_agent(headers: &HeaderMap) -> Option<String> {
@@ -1730,7 +1720,10 @@ mod tests {
         let enabled_at = Utc::now() - Duration::seconds(30);
         let enable_code =
             crate::auth::totp::format_code(crate::auth::totp::totp(&bytes, enabled_at.timestamp()));
-        two_factor::enable(&state, alice.id, &enable_code, None, enabled_at)
+        two_factor::verify_setup(&state, alice.id, &enable_code, enabled_at)
+            .await
+            .expect("verify");
+        two_factor::confirm_enable(&state, alice.id, None, enabled_at)
             .await
             .expect("enable");
 

@@ -42,6 +42,9 @@ pub struct Config {
 
     /// When true, `X-Forwarded-For` / `X-Real-IP` are trusted for client IPs.
     pub trust_proxy: bool,
+    /// CIDRs whose forwarded headers are trusted when `trust_proxy` is set.
+    /// Empty means every peer is trusted (backward compatible).
+    pub trusted_proxy_cidrs: Vec<ipnet::IpNet>,
 
     pub registration_enabled: bool,
 
@@ -115,9 +118,8 @@ impl Config {
         let default_db = format!("sqlite://{}/lighthouse.db?mode=rwc", database_dir.display());
         let database_url = env_or("DATABASE_URL", &default_db);
 
-        let jwt_secret = env::var("JWT_SECRET").context(
-            "JWT_SECRET must be set — generate one with `openssl rand -hex 32`",
-        )?;
+        let jwt_secret = env::var("JWT_SECRET")
+            .context("JWT_SECRET must be set — generate one with `openssl rand -hex 32`")?;
 
         Ok(Self {
             bind_addr,
@@ -150,6 +152,8 @@ impl Config {
             cookie_secure: env_parse("COOKIE_SECURE", true)?,
 
             trust_proxy: env_parse("TRUST_PROXY", true)?,
+            trusted_proxy_cidrs: crate::net::parse_cidr_list(&env_or("TRUSTED_PROXY_CIDRS", ""))
+                .map_err(|err| anyhow::anyhow!("invalid TRUSTED_PROXY_CIDRS: {err}"))?,
             registration_enabled: env_parse("REGISTRATION_ENABLED", true)?,
 
             email_enabled: env_parse("EMAIL_ENABLED", false)?,
