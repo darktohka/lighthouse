@@ -66,7 +66,7 @@ frontend/
 │   │   ├── primitives/     Box, Button, Label, Table, Timeline, …
 │   │   ├── AppShell.tsx    Header + main + footer layout route
 │   │   ├── Header.tsx      Top navigation, search, avatar menu
-│   │   ├── JsonViewer.tsx  Recursive collapsible JSON viewer
+│   │   ├── json-viewer/    Recursive collapsible JSON viewer
 │   │   ├── CaptchaField.tsx
 │   │   ├── ActivityTimeline.tsx
 │   │   └── …
