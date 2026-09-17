@@ -20,7 +20,7 @@ pub mod uploads;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use chrono::Utc;
@@ -28,7 +28,9 @@ use serde_json::Value;
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::auth::middleware::{Auth, BASIC_REALM, challenge_headers};
+use crate::auth::middleware::Auth;
+use crate::auth::registry;
+use crate::config::Config;
 use crate::db::Db;
 use crate::error::{ErrorCode, RegistryError};
 use crate::logging;
@@ -66,23 +68,20 @@ pub fn router() -> Router<AppState> {
 }
 
 /// `GET /v2/` — the API version check and the credential probe used by
-/// `docker login`. Anonymous callers receive `401` with the Basic challenge so
-/// the client knows to send credentials; authenticated callers receive `200 {}`.
-async fn base(auth: Auth) -> Response {
-    if !auth.0.is_authenticated() {
-        let mut response = error_response(RegistryError::code(ErrorCode::Unauthorized));
-        for (name, value) in challenge_headers() {
-            response.headers_mut().insert(name, value);
-        }
-        return response;
+/// `docker login`. Anonymous callers receive `401` with the Bearer challenge so
+/// the client knows to fetch a token; a caller that already presented a valid
+/// token (even an anonymous one) receives `200 {}`.
+async fn base(State(state): State<AppState>, auth: Auth) -> Response {
+    if !auth.0.is_authenticated() && !auth.0.is_registry_token() {
+        return error_response(&state.config, RegistryError::code(ErrorCode::Unauthorized), None);
     }
 
     json_response(StatusCode::OK, serde_json::json!({}))
 }
 
 /// Unmatched `/v2/*` paths never reach the SPA; they render the OCI envelope.
-async fn oci_not_found() -> Response {
-    error_response(RegistryError::code(ErrorCode::NameUnknown))
+async fn oci_not_found(State(state): State<AppState>) -> Response {
+    error_response(&state.config, RegistryError::code(ErrorCode::NameUnknown), None)
 }
 
 /// Per-request audit metadata, resolved before the body is consumed.
@@ -172,8 +171,16 @@ async fn dispatch(
 
     let endpoint = match parse_endpoint(&rest) {
         Some(endpoint) => endpoint,
-        None => return error_response(RegistryError::code(ErrorCode::NameUnknown)),
+        None => {
+            return error_response(
+                &state.config,
+                RegistryError::code(ErrorCode::NameUnknown),
+                None,
+            );
+        }
     };
+
+    let challenge_scope = challenge_scope(&endpoint, &method);
 
     let manifest_put = matches!(endpoint, Endpoint::Manifest { .. }) && method == Method::PUT;
     let limit = if manifest_put {
@@ -188,11 +195,15 @@ async fn dispatch(
     let body = match axum::body::to_bytes(req.into_body(), limit).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return error_response(if manifest_put {
-                RegistryError::manifest_invalid("manifest body exceeds the 4 MiB limit")
-            } else {
-                RegistryError::size_invalid("request body exceeds the maximum allowed size")
-            });
+            return error_response(
+                &state.config,
+                if manifest_put {
+                    RegistryError::manifest_invalid("manifest body exceeds the 4 MiB limit")
+                } else {
+                    RegistryError::size_invalid("request body exceeds the maximum allowed size")
+                },
+                challenge_scope.as_deref(),
+            );
         }
     };
 
@@ -242,7 +253,21 @@ async fn dispatch(
         _ => Err(RegistryError::unsupported("method not allowed for this resource")),
     };
 
-    result.unwrap_or_else(error_response)
+    result.unwrap_or_else(|err| error_response(&state.config, err, challenge_scope.as_deref()))
+}
+
+/// The `repository:<name>:<actions>` scope advertised for a request. Push
+/// methods and upload sessions request `pull,push`; reads request `pull`.
+fn challenge_scope(endpoint: &Endpoint, method: &Method) -> Option<String> {
+    let (name, push) = match endpoint {
+        Endpoint::TagsList { name }
+        | Endpoint::Manifest { name, .. }
+        | Endpoint::Blob { name, .. } => {
+            (name, *method != Method::GET && *method != Method::HEAD)
+        }
+        Endpoint::UploadStart { name } | Endpoint::UploadSession { name, .. } => (name, true),
+    };
+    Some(registry::repository_scope(name, push))
 }
 
 // ---- responses --------------------------------------------------------------
@@ -272,15 +297,14 @@ pub fn set_header(response: Response, name: &'static str, value: impl AsRef<str>
     response
 }
 
-/// Renders a [`RegistryError`], attaching the Basic challenge on `401`s.
-pub fn error_response(err: RegistryError) -> Response {
+/// Renders a [`RegistryError`], attaching the Bearer challenge on `401`s so the
+/// client knows where to fetch a token and which scope to request.
+pub fn error_response(config: &Config, err: RegistryError, scope: Option<&str>) -> Response {
     let unauthenticated = permissions::is_unauthenticated(&err);
     let mut response = err.into_response();
     if unauthenticated {
-        response.headers_mut().insert(
-            header::WWW_AUTHENTICATE,
-            HeaderValue::from_static(BASIC_REALM),
-        );
+        let (name, value) = registry::bearer_challenge(config, scope);
+        response.headers_mut().insert(name, value);
     }
     response
 }

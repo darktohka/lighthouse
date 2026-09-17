@@ -11,8 +11,11 @@ import { api, refreshSession, type RequestOptions } from './client'
 import {
   activityEntrySchema,
   analyticsOverviewSchema,
+  appPasswordSchema,
+  backupCodesResponseSchema,
   batchDeleteResultSchema,
   captchaChallengeSchema,
+  createdAppPasswordSchema,
   createdServiceAccountSchema,
   dashboardSchema,
   heatmapSchema,
@@ -20,6 +23,7 @@ import {
   layerReferenceSchema,
   layerTreeSchema,
   loginResponseSchema,
+  loginResultSchema,
   meResponseSchema,
   namespaceMemberSchema,
   namespaceSchema,
@@ -33,9 +37,13 @@ import {
   tagDetailSchema,
   tagSizeEntrySchema,
   tagSummarySchema,
+  twoFactorEnabledSchema,
+  twoFactorSetupSchema,
+  twoFactorStatusSchema,
   userProfileSchema,
   userSummarySchema,
   verifyEmailResponseSchema,
+  type CreateAppPassword,
   type CreateGrant,
   type CreateNamespace,
   type CreateServiceAccount,
@@ -70,10 +78,19 @@ const permissionPageSchema = pageSchema(publicPermissionSchema)
 
 export const auth = {
   login(body: LoginRequest, options?: RequestOptions) {
-    return api.post('/auth/login', loginResponseSchema, body, {
+    return api.post('/auth/login', loginResultSchema, body, {
       ...options,
       retry: false,
     })
+  },
+
+  loginTwoFactor(mfaToken: string, code: string, options?: RequestOptions) {
+    return api.post(
+      '/auth/login/2fa',
+      loginResponseSchema,
+      { mfa_token: mfaToken, code },
+      { ...options, retry: false },
+    )
   },
 
   register(body: RegisterRequest, options?: RequestOptions) {
@@ -140,6 +157,58 @@ export const auth = {
       current_password: currentPassword,
       new_password: newPassword,
     })
+  },
+
+  twoFactorStatus(options?: RequestOptions) {
+    return api.get('/auth/2fa', twoFactorStatusSchema, options)
+  },
+
+  twoFactorSetup() {
+    return api.post('/auth/2fa/setup', twoFactorSetupSchema)
+  },
+
+  twoFactorEnable(code: string) {
+    return api.post('/auth/2fa/enable', twoFactorEnabledSchema, { code })
+  },
+
+  twoFactorDisable(password: string, code: string) {
+    return api.post(
+      '/auth/2fa/disable',
+      twoFactorEnabledSchema,
+      { password, code },
+      { retry: false },
+    )
+  },
+
+  twoFactorBackupCodes(code: string) {
+    return api.post(
+      '/auth/2fa/backup-codes',
+      backupCodesResponseSchema,
+      { code },
+      { retry: false },
+    )
+  },
+}
+
+// ---------------------------------------------------------------------------
+// App passwords (AUTH.md §4)
+// ---------------------------------------------------------------------------
+
+export const appPasswords = {
+  list(options?: RequestOptions) {
+    return api.get('/app-passwords', v.array(appPasswordSchema), options)
+  },
+
+  create(body: CreateAppPassword) {
+    return api.post('/app-passwords', createdAppPasswordSchema, body)
+  },
+
+  rotate(id: number) {
+    return api.post(`/app-passwords/${id}/token`, createdAppPasswordSchema)
+  },
+
+  remove(id: number) {
+    return api.deleteVoid(`/app-passwords/${id}`)
   },
 }
 

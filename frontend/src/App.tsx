@@ -4,6 +4,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { RequireAuth } from './components/RequireAuth'
 import { LoadingState } from './components/primitives/StateViews'
+import { AppPasswordsPage } from './pages/AppPasswordsPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { ExplorePage } from './pages/ExplorePage'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
@@ -71,6 +72,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <ServiceAccountsPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="app-passwords"
+            element={
+              <RequireAuth>
+                <AppPasswordsPage />
               </RequireAuth>
             }
           />

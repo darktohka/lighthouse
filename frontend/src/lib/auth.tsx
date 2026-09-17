@@ -24,11 +24,12 @@ import type {
   AuthUser,
   ForgotPasswordRequest,
   LoginRequest,
+  LoginResponse,
   Namespace,
   RegisterRequest,
   ResetPasswordRequest,
 } from '../api/schemas'
-import { AuthContext, type AuthStatus } from './auth-context'
+import { AuthContext, type AuthStatus, type LoginOutcome } from './auth-context'
 import { useTheme } from './theme-context'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -77,9 +78,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [applyServerTheme])
 
-  const login = useCallback(
-    async (body: LoginRequest) => {
-      const response = await auth.login(body)
+  const finishLogin = useCallback(
+    async (response: LoginResponse) => {
       setRefreshToken(response.refresh_token)
       setUser(response.user)
       setStatus('authenticated')
@@ -92,6 +92,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     },
     [applyServerTheme],
+  )
+
+  const login = useCallback(
+    async (body: LoginRequest): Promise<LoginOutcome> => {
+      const response = await auth.login(body)
+      if ('two_factor_required' in response) {
+        return { status: 'two_factor_required', mfaToken: response.mfa_token }
+      }
+      await finishLogin(response)
+      return { status: 'ok' }
+    },
+    [finishLogin],
+  )
+
+  const verifyTwoFactor = useCallback(
+    async (mfaToken: string, code: string) => {
+      const response = await auth.loginTwoFactor(mfaToken, code)
+      await finishLogin(response)
+    },
+    [finishLogin],
   )
 
   const register = useCallback(async (body: RegisterRequest) => {
@@ -133,6 +153,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       namespaces,
       login,
+      verifyTwoFactor,
       register,
       verifyEmail,
       resendVerification,
@@ -146,6 +167,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       namespaces,
       login,
+      verifyTwoFactor,
       register,
       verifyEmail,
       resendVerification,

@@ -281,7 +281,57 @@ Activity kinds include `user.registered`, `namespace.created`,
 
 ---
 
-## 9. Health
+## 9. App passwords
+
+Per-account registry credentials for human users. The plaintext token
+(`lhp_…`) is returned once; only a SHA-256 hash plus the first and last three
+characters are stored. See `docs/AUTH.md` for the full model.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/app-passwords` | required | caller's app passwords |
+| POST | `/app-passwords` | required | create `{name}`; token returned **once** |
+| POST | `/app-passwords/{id}/token` | required | rotate; new token returned once |
+| DELETE | `/app-passwords/{id}` | required | delete |
+
+```
+AppPassword        { id, name, token_prefix, token_suffix, created_at, last_used_at }
+CreatedAppPassword { app_password: AppPassword, token: string }
+```
+
+Names are unique per user. An app password authenticates over Basic auth and
+bypasses TOTP, so it is the credential to use for `docker login` once 2FA is
+enabled.
+
+---
+
+## 10. Two-factor authentication
+
+All endpoints require a web session and live under `/api/auth`. Full behaviour
+is in `docs/AUTH.md`.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/auth/2fa` | required | `{enabled, backup_codes_remaining}` |
+| POST | `/auth/2fa/setup` | required | returns `{secret, otpauth_uri, backup_codes:[…8]}` |
+| POST | `/auth/2fa/enable` | required | confirm `{code}`; revokes other sessions |
+| POST | `/auth/2fa/disable` | required | `{password, code}`; clears the factor |
+| POST | `/auth/2fa/backup-codes` | required | reissue `{code}` → `{backup_codes:[…8]}` |
+| POST | `/auth/login/2fa` | none | `{mfa_token, code}` → `{user, refresh_token}` + cookie |
+
+```
+TwoFactorStatus { enabled, backup_codes_remaining }
+TwoFactorSetup  { secret, otpauth_uri, backup_codes: string[] }
+AuthResponse    { user, refresh_token }
+```
+
+When 2FA is enabled, `POST /api/auth/login` without a `code` returns
+`{ two_factor_required: true, mfa_token }` and no cookie; the client then calls
+`/auth/login/2fa`.
+
+---
+
+## 11. Health
 
 | Method | Path | Auth | Description |
 |---|---|---|---|

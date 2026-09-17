@@ -554,6 +554,7 @@ export const loginRequestSchema = v.object({
   identifier: v.string(),
   password: v.string(),
   captcha: v.optional(v.string()),
+  code: v.optional(v.string()),
 })
 export type LoginRequest = v.InferOutput<typeof loginRequestSchema>
 
@@ -699,4 +700,111 @@ export const createWorkspaceFormSchema = v.object({
 })
 export type CreateWorkspaceForm = v.InferOutput<
   typeof createWorkspaceFormSchema
+>
+
+// ---------------------------------------------------------------------------
+// Two-factor authentication & app passwords (append-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * `/api/auth/login` answers either a completed login or a challenge carrying a
+ * short-lived `mfa_token` that `/api/auth/login/2fa` exchanges for a session.
+ */
+export const twoFactorRequiredSchema = v.object({
+  two_factor_required: v.literal(true),
+  mfa_token: v.string(),
+})
+export type TwoFactorRequired = v.InferOutput<typeof twoFactorRequiredSchema>
+
+export const loginResultSchema = v.union([
+  loginResponseSchema,
+  twoFactorRequiredSchema,
+])
+export type LoginResult = v.InferOutput<typeof loginResultSchema>
+
+export const loginTwoFactorRequestSchema = v.object({
+  mfa_token: v.string(),
+  code: v.string(),
+})
+export type LoginTwoFactorRequest = v.InferOutput<
+  typeof loginTwoFactorRequestSchema
+>
+
+export const twoFactorStatusSchema = v.object({
+  enabled: v.boolean(),
+  backup_codes_remaining: v.number(),
+})
+export type TwoFactorStatus = v.InferOutput<typeof twoFactorStatusSchema>
+
+export const twoFactorSetupSchema = v.object({
+  secret: v.string(),
+  otpauth_uri: v.string(),
+  backup_codes: v.array(v.string()),
+})
+export type TwoFactorSetup = v.InferOutput<typeof twoFactorSetupSchema>
+
+export const twoFactorEnabledSchema = v.object({
+  enabled: v.boolean(),
+})
+export type TwoFactorEnabled = v.InferOutput<typeof twoFactorEnabledSchema>
+
+export const backupCodesResponseSchema = v.object({
+  backup_codes: v.array(v.string()),
+})
+export type BackupCodesResponse = v.InferOutput<
+  typeof backupCodesResponseSchema
+>
+
+export const twoFactorCodeRequestSchema = v.object({ code: v.string() })
+export type TwoFactorCodeRequest = v.InferOutput<
+  typeof twoFactorCodeRequestSchema
+>
+
+export const twoFactorDisableRequestSchema = v.object({
+  password: v.string(),
+  code: v.string(),
+})
+export type TwoFactorDisableRequest = v.InferOutput<
+  typeof twoFactorDisableRequestSchema
+>
+
+export const appPasswordSchema = v.object({
+  id: v.number(),
+  name: v.string(),
+  token_prefix: v.string(),
+  token_suffix: v.string(),
+  created_at: timestampSchema,
+  last_used_at: v.nullable(timestampSchema),
+})
+export type AppPassword = v.InferOutput<typeof appPasswordSchema>
+
+export const createdAppPasswordSchema = v.object({
+  app_password: appPasswordSchema,
+  token: v.string(),
+})
+export type CreatedAppPassword = v.InferOutput<
+  typeof createdAppPasswordSchema
+>
+
+export const createAppPasswordSchema = v.object({
+  name: v.pipe(v.string(), v.nonEmpty('Give the app password a name')),
+})
+export type CreateAppPassword = v.InferOutput<typeof createAppPasswordSchema>
+
+export const verifyCodeFormSchema = v.object({
+  code: v.pipe(v.string(), v.nonEmpty('Enter the 6-digit code')),
+})
+export type VerifyCodeForm = v.InferOutput<typeof verifyCodeFormSchema>
+
+export const appPasswordFormSchema = v.object({
+  name: v.pipe(v.string(), v.nonEmpty('Give the app password a name')),
+})
+export type AppPasswordForm = v.InferOutput<typeof appPasswordFormSchema>
+
+export const twoFactorDisableFormSchema = v.object({
+  password: v.pipe(v.string(), v.nonEmpty('Enter your password')),
+  code: v.pipe(v.string(), v.nonEmpty('Enter a code from your authenticator')),
+})
+export type TwoFactorDisableForm = v.InferOutput<
+  typeof twoFactorDisableFormSchema
 >

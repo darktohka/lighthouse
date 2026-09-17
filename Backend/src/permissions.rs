@@ -287,7 +287,10 @@ pub async fn authorize_oci(
     if access.allows(action) {
         return Ok(access);
     }
-    if !actor.is_authenticated() {
+    // A presented registry token (even an anonymous one) means the client has
+    // already completed the token dance: answering `403` stops it from fetching
+    // a fresh token and retrying forever.
+    if !actor.is_authenticated() && !actor.is_registry_token() {
         Err(RegistryError::unauthorized("authentication required"))
     } else {
         Err(RegistryError::denied(
@@ -313,6 +316,7 @@ mod tests {
             username: Some(user.username.clone()),
             service_account_id: None,
             is_admin: false,
+            ..AuthContext::default()
         }
     }
 
@@ -517,6 +521,8 @@ mod tests {
             username: Some(account.username.clone()),
             service_account_id: Some(account.id),
             is_admin: false,
+            credential: crate::state::CredentialSource::ServiceAccount,
+            session_id: None,
         };
         let access = repository_access(&state, &service_actor, "alice/app")
             .await

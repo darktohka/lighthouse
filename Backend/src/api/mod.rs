@@ -17,6 +17,7 @@
 
 pub mod activity;
 pub mod analytics;
+pub mod app_passwords;
 pub mod layers;
 pub mod namespaces;
 pub mod permissions;
@@ -617,6 +618,7 @@ pub fn router() -> Router<AppState> {
         .merge(repositories::router())
         .merge(permissions::router())
         .merge(service_accounts::router())
+        .merge(app_passwords::router())
         .merge(analytics::router())
         .merge(activity::router())
         .merge(layers::router())

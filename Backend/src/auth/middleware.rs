@@ -13,20 +13,18 @@ use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header;
 use axum::http::request::Parts;
-use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 
-use crate::auth::{LoginAttempt, record_login_event, service_accounts, sessions, tokens};
+use crate::auth::{
+    LoginAttempt, app_passwords, password, record_login_event, service_accounts, sessions, tokens,
+};
 use crate::error::ApiError;
 use crate::logging;
 use crate::models::User;
-use crate::state::{AppState, AuthContext};
-
-/// The challenge advertised to unauthenticated registry clients.
-pub const BASIC_REALM: &str = "Basic realm=\"Lighthouse Registry\"";
+use crate::state::{AppState, AuthContext, CredentialSource};
 
 struct Credentials {
     cookie: Option<String>,
@@ -52,6 +50,7 @@ pub async fn resolve_identity(
     next: Next,
 ) -> Response {
     if req.extensions().get::<AuthContext>().is_none() {
+        let announce = req.uri().path() != crate::auth::token_endpoint::TOKEN_PATH;
         let credentials = Credentials {
             cookie: sessions::access_token_from_headers(req.headers(), &state.config),
             basic: basic_credentials(req.headers()),
@@ -61,13 +60,18 @@ pub async fn resolve_identity(
             ip: logging::client_ip(&req, state.config.trust_proxy),
             agent: logging::user_agent(&req),
         };
-        let ctx = resolve(&state, credentials, audit).await;
+        let ctx = resolve(&state, credentials, audit, announce).await;
         req.extensions_mut().insert(ctx);
     }
     next.run(req).await
 }
 
-async fn resolve(state: &AppState, credentials: Credentials, audit: Audit) -> AuthContext {
+async fn resolve(
+    state: &AppState,
+    credentials: Credentials,
+    audit: Audit,
+    announce: bool,
+) -> AuthContext {
     if let Some(token) = credentials.cookie {
         if let Some(ctx) = user_from_access_token(state, &token).await {
             return ctx;
@@ -75,12 +79,15 @@ async fn resolve(state: &AppState, credentials: Credentials, audit: Audit) -> Au
     }
 
     if let Some(basic) = credentials.basic {
-        return from_basic(state, &basic, &audit).await;
+        return from_basic(state, &basic, &audit, announce).await;
     }
 
     if let Some(token) = credentials.bearer {
         if let Some(ctx) = user_from_access_token(state, &token).await {
             return ctx;
+        }
+        if let Ok(claims) = tokens::verify_registry_token(&state.config, &token) {
+            return from_registry_token(claims);
         }
     }
 
@@ -100,31 +107,53 @@ async fn user_from_access_token(state: &AppState, token: &str) -> Option<AuthCon
         username: Some(claims.username),
         service_account_id: None,
         is_admin,
+        credential: CredentialSource::AccessToken,
+        session_id: Some(claims.jti),
     })
 }
 
-async fn from_basic(state: &AppState, basic: &BasicCredentials, audit: &Audit) -> AuthContext {
+fn from_registry_token(claims: tokens::RegistryClaims) -> AuthContext {
+    AuthContext {
+        user_id: (claims.sub != 0).then_some(claims.sub),
+        username: claims.username,
+        service_account_id: claims.sid,
+        is_admin: false,
+        credential: CredentialSource::RegistryToken,
+        session_id: None,
+    }
+}
+
+async fn from_basic(
+    state: &AppState,
+    basic: &BasicCredentials,
+    audit: &Audit,
+    announce: bool,
+) -> AuthContext {
     if let Ok(Some(account)) =
         service_accounts::authenticate(state, &basic.username, &basic.password).await
     {
-        record_login_event(
-            &state.db,
-            LoginAttempt {
-                user_id: None,
-                service_account_id: Some(account.id),
-                username: Some(&basic.username),
-                success: true,
-                kind: "service_token",
-                ip: audit.ip.as_deref(),
-                user_agent: audit.agent.as_deref(),
-            },
-        )
-        .await;
+        if announce {
+            record_login_event(
+                &state.db,
+                LoginAttempt {
+                    user_id: None,
+                    service_account_id: Some(account.id),
+                    username: Some(&basic.username),
+                    success: true,
+                    kind: "service_token",
+                    ip: audit.ip.as_deref(),
+                    user_agent: audit.agent.as_deref(),
+                },
+            )
+            .await;
+        }
         return AuthContext {
             user_id: None,
             username: Some(account.username),
             service_account_id: Some(account.id),
             is_admin: false,
+            credential: CredentialSource::ServiceAccount,
+            session_id: None,
         };
     }
 
@@ -137,44 +166,88 @@ async fn from_basic(state: &AppState, basic: &BasicCredentials, audit: &Audit) -
             .flatten();
 
     if let Some(user) = user {
-        if user.email_verified
-            && crate::auth::password::verify_password(&user.password_hash, &basic.password)
-        {
-            record_login_event(
-                &state.db,
-                LoginAttempt {
+        if user.email_verified {
+            if let Ok(Some(account)) =
+                app_passwords::authenticate(state, user.id, &basic.password).await
+            {
+                if announce {
+                    record_login_event(
+                        &state.db,
+                        LoginAttempt {
+                            user_id: Some(user.id),
+                            service_account_id: None,
+                            username: Some(&basic.username),
+                            success: true,
+                            kind: "app_password",
+                            ip: audit.ip.as_deref(),
+                            user_agent: audit.agent.as_deref(),
+                        },
+                    )
+                    .await;
+                }
+                let _ = account;
+                return AuthContext {
+                    is_admin: user.is_admin,
                     user_id: Some(user.id),
+                    username: Some(user.username),
                     service_account_id: None,
-                    username: Some(&basic.username),
-                    success: true,
-                    kind: "password",
-                    ip: audit.ip.as_deref(),
-                    user_agent: audit.agent.as_deref(),
-                },
-            )
-            .await;
-            return AuthContext {
-                is_admin: user.is_admin,
-                user_id: Some(user.id),
-                username: Some(user.username),
-                service_account_id: None,
-            };
+                    credential: CredentialSource::AppPassword,
+                    session_id: None,
+                };
+            }
+
+            if password::verify_password(&user.password_hash, &basic.password) {
+                let totp_enabled: bool =
+                    sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = ?")
+                        .bind(user.id)
+                        .fetch_one(&state.db)
+                        .await
+                        .unwrap_or(false);
+
+                if !totp_enabled {
+                    if announce {
+                        record_login_event(
+                            &state.db,
+                            LoginAttempt {
+                                user_id: Some(user.id),
+                                service_account_id: None,
+                                username: Some(&basic.username),
+                                success: true,
+                                kind: "password",
+                                ip: audit.ip.as_deref(),
+                                user_agent: audit.agent.as_deref(),
+                            },
+                        )
+                        .await;
+                    }
+                    return AuthContext {
+                        is_admin: user.is_admin,
+                        user_id: Some(user.id),
+                        username: Some(user.username),
+                        service_account_id: None,
+                        credential: CredentialSource::Password,
+                        session_id: None,
+                    };
+                }
+            }
         }
     }
 
-    record_login_event(
-        &state.db,
-        LoginAttempt {
-            user_id: None,
-            service_account_id: None,
-            username: Some(&basic.username),
-            success: false,
-            kind: "password",
-            ip: audit.ip.as_deref(),
-            user_agent: audit.agent.as_deref(),
-        },
-    )
-    .await;
+    if announce {
+        record_login_event(
+            &state.db,
+            LoginAttempt {
+                user_id: None,
+                service_account_id: None,
+                username: Some(&basic.username),
+                success: false,
+                kind: "password",
+                ip: audit.ip.as_deref(),
+                user_agent: audit.agent.as_deref(),
+            },
+        )
+        .await;
+    }
     AuthContext::anonymous()
 }
 
@@ -241,7 +314,7 @@ impl FromRequestParts<AppState> for Authenticated {
             .get::<AuthContext>()
             .cloned()
             .unwrap_or_default();
-        if ctx.is_authenticated() {
+        if ctx.is_authenticated() && !ctx.is_registry_token() {
             Ok(Authenticated(ctx))
         } else {
             Err(ApiError::unauthorized("authentication required"))
@@ -265,20 +338,12 @@ impl FromRequestParts<AppState> for Admin {
             .get::<AuthContext>()
             .cloned()
             .unwrap_or_default();
-        if ctx.is_admin {
+        if ctx.is_admin && !ctx.is_registry_token() {
             Ok(Admin(ctx))
         } else {
             Err(ApiError::forbidden("administrator access required"))
         }
     }
-}
-
-/// Headers advertised alongside a `401` to prompt HTTP Basic authentication.
-pub fn challenge_headers() -> [(HeaderName, HeaderValue); 1] {
-    [(
-        header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(BASIC_REALM),
-    )]
 }
 
 /// Empty router following the submodule convention.

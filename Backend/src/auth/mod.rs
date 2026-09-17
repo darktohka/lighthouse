@@ -1,12 +1,17 @@
 //! Identity: registration, login, sessions, tokens and service accounts
 //! (`/api/auth/*`).
 
+pub mod app_passwords;
 pub mod handlers;
 pub mod middleware;
 pub mod password;
+pub mod registry;
 pub mod service_accounts;
 pub mod sessions;
+pub mod token_endpoint;
 pub mod tokens;
+pub mod totp;
+pub mod two_factor;
 
 use axum::Router;
 
@@ -60,6 +65,7 @@ pub fn router() -> Router<AppState> {
         .merge(password::router())
         .merge(service_accounts::router())
         .merge(sessions::router())
+        .merge(token_endpoint::router())
         .merge(tokens::router());
 
     if let Some(captcha) = crate::captcha::service() {
@@ -96,6 +102,8 @@ pub(crate) mod test_support {
             email_verification_ttl_secs: 60 * 60 * 24,
             password_reset_ttl_secs: 60 * 60,
             upload_session_ttl_secs: 60 * 60 * 24,
+            registry_token_ttl_secs: 300,
+            mfa_token_ttl_secs: 300,
             cookie_name: "lighthouse_token".to_string(),
             cookie_domain: None,
             cookie_secure: false,

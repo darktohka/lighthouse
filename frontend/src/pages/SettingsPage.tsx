@@ -8,6 +8,7 @@ import { PasswordSettingsForm } from '../components/PasswordSettingsForm'
 import { ProfileSettingsForm } from '../components/ProfileSettingsForm'
 import { SessionsPanel } from '../components/SessionsPanel'
 import { TabNav, TabPanel } from '../components/Tabs'
+import { TwoFactorPanel } from '../components/TwoFactorPanel'
 import {
   EmptyState,
   ErrorState,
@@ -16,7 +17,13 @@ import {
 import { useAuth } from '../lib/auth-context'
 import { useAsync } from '../lib/useAsync'
 
-type SettingsTab = 'profile' | 'picture' | 'sessions' | 'logins' | 'password'
+type SettingsTab =
+  | 'profile'
+  | 'picture'
+  | 'sessions'
+  | 'logins'
+  | 'password'
+  | 'security'
 
 const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'profile', label: 'Profile' },
@@ -24,6 +31,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: 'sessions', label: 'Sessions' },
   { id: 'logins', label: 'Login history' },
   { id: 'password', label: 'Password' },
+  { id: 'security', label: 'Security' },
 ]
 
 function isSettingsTab(value: string): value is SettingsTab {
@@ -93,6 +101,10 @@ export function SettingsPage() {
 
       <TabPanel id="password" active={tab}>
         <PasswordSettingsForm />
+      </TabPanel>
+
+      <TabPanel id="security" active={tab}>
+        <TwoFactorPanel />
       </TabPanel>
     </div>
   )

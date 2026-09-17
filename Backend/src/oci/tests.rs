@@ -165,7 +165,10 @@ async fn base_endpoint_reports_api_version() {
     let anonymous = send(&app, Method::GET, "/v2/", None, &[], &[]).await;
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     assert_api_version(&anonymous);
-    assert!(header_str(&anonymous, "www-authenticate").starts_with("Basic realm="));
+    let challenge = header_str(&anonymous, "www-authenticate");
+    assert!(challenge.starts_with("Bearer realm="), "{challenge}");
+    assert!(challenge.contains("/api/auth/token"), "{challenge}");
+    assert!(challenge.contains("service="), "{challenge}");
 
     let response = send(&app, Method::GET, "/v2/", Some(USER), &[], &[]).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -595,6 +598,241 @@ async fn manifest_referencing_missing_blob_is_rejected() {
     assert_eq!(json["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
 }
 
+#[cfg(test)]
+mod auth_flow {
+    use super::*;
+    use crate::auth::test_support::create_repository;
+
+    async fn anonymous_token(app: &Router, scope: &str) -> String {
+        let uri = format!("/api/auth/token?service=registry.local&scope={scope}");
+        let response = send(app, Method::GET, &uri, None, &[], &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(
+            json.get("identity_token").is_none(),
+            "the CLI must store credentials, not a token"
+        );
+        json["token"].as_str().expect("token").to_string()
+    }
+
+    async fn enable_totp(state: &AppState, user_id: i64) {
+        crate::auth::two_factor::begin_setup(state, user_id, "Lighthouse")
+            .await
+            .expect("setup");
+        let secret: String = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("secret");
+        let bytes = crate::auth::totp::base32_decode(&secret).expect("decode");
+        let code = crate::auth::totp::format_code(crate::auth::totp::totp(
+            &bytes,
+            chrono::Utc::now().timestamp(),
+        ));
+        crate::auth::two_factor::enable(state, user_id, &code, None, chrono::Utc::now())
+            .await
+            .expect("enable");
+    }
+
+    fn basic_with(user: &str, password: &str) -> String {
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+        )
+    }
+
+    #[tokio::test]
+    async fn anonymous_token_pulls_public_and_is_denied_on_private() {
+        let (_dir, state, app) = harness().await;
+        sqlx::query("UPDATE namespaces SET is_public = 1 WHERE name = ? COLLATE NOCASE")
+            .bind(USER)
+            .execute(&state.db)
+            .await
+            .expect("public namespace");
+
+        let bob = create_user(&state, "bob").await;
+        let bob_namespace: i64 =
+            sqlx::query_scalar("SELECT id FROM namespaces WHERE name = 'bob' LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .expect("namespace");
+        create_repository(&state, bob_namespace, "bob/private", false, Some(bob.id)).await;
+
+        let config = b"cfg".to_vec();
+        let layer = b"layer".to_vec();
+        let config_digest = push_blob(&app, "darktohka/public", &config).await;
+        let layer_digest = push_blob(&app, "darktohka/public", &layer).await;
+        let body = oci_manifest(&config_digest, config.len(), &layer_digest, layer.len());
+        push_manifest(
+            &app,
+            "darktohka/public",
+            "latest",
+            media_types::OCI_IMAGE_MANIFEST,
+            &body,
+        )
+        .await;
+
+        let denied = send(
+            &app,
+            Method::GET,
+            "/v2/bob/private/manifests/latest",
+            None,
+            &[("accept", media_types::OCI_IMAGE_MANIFEST)],
+            &[],
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            header_str(&denied, "www-authenticate")
+                .contains("scope=\"repository:bob/private:pull\"")
+        );
+
+        let token = anonymous_token(&app, "repository:darktohka/public:pull").await;
+
+        let ping = send(
+            &app,
+            Method::GET,
+            "/v2/",
+            None,
+            &[("authorization", &format!("Bearer {token}"))],
+            &[],
+        )
+        .await;
+        assert_eq!(ping.status(), StatusCode::OK);
+
+        let pulled = send(
+            &app,
+            Method::GET,
+            "/v2/darktohka/public/manifests/latest",
+            None,
+            &[
+                ("authorization", &format!("Bearer {token}")),
+                ("accept", media_types::OCI_IMAGE_MANIFEST),
+            ],
+            &[],
+        )
+        .await;
+        assert_eq!(pulled.status(), StatusCode::OK);
+        assert_eq!(body_bytes(pulled).await, body);
+
+        let private = anonymous_token(&app, "repository:bob/private:pull").await;
+        let forbidden = send(
+            &app,
+            Method::GET,
+            "/v2/bob/private/manifests/latest",
+            None,
+            &[
+                ("authorization", &format!("Bearer {private}")),
+                ("accept", media_types::OCI_IMAGE_MANIFEST),
+            ],
+            &[],
+        )
+        .await;
+        assert_eq!(
+            forbidden.status(),
+            StatusCode::FORBIDDEN,
+            "a token was presented, so the registry denies instead of re-challenging"
+        );
+        assert!(forbidden.headers().get("www-authenticate").is_none());
+    }
+
+    #[tokio::test]
+    async fn app_password_authenticates_basic_and_bypasses_totp() {
+        let (_dir, state, app) = harness().await;
+        let alice: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
+            .bind(USER)
+            .fetch_one(&state.db)
+            .await
+            .expect("user");
+        enable_totp(&state, alice).await;
+
+        let rejected = send(&app, Method::GET, "/v2/", Some(USER), &[], &[]).await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::UNAUTHORIZED,
+            "password alone cannot satisfy two-factor authentication"
+        );
+
+        let (_, secret) = crate::auth::app_passwords::create(&state, alice, "ci")
+            .await
+            .expect("app password");
+        let credentials = basic_with(USER, &secret);
+        let accepted = send(
+            &app,
+            Method::GET,
+            "/v2/",
+            None,
+            &[("authorization", &credentials)],
+            &[],
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn registry_tokens_cannot_authenticate_web_endpoints() {
+        let (_dir, state, app) = harness().await;
+        let alice: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
+            .bind(USER)
+            .fetch_one(&state.db)
+            .await
+            .expect("user");
+        let (_, secret) = crate::auth::app_passwords::create(&state, alice, "ci")
+            .await
+            .expect("app password");
+
+        let response = send(
+            &app,
+            Method::GET,
+            "/api/auth/token?service=registry.local&scope=repository:darktohka/site:pull,push",
+            None,
+            &[("authorization", &basic_with(USER, &secret))],
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let token = body_json(response).await["token"]
+            .as_str()
+            .expect("token")
+            .to_string();
+
+        let me = send(
+            &app,
+            Method::GET,
+            "/api/auth/me",
+            None,
+            &[("authorization", &format!("Bearer {token}"))],
+            &[],
+        )
+        .await;
+        assert_eq!(
+            me.status(),
+            StatusCode::UNAUTHORIZED,
+            "a registry token must not act as a web session"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_rejects_invalid_basic_credentials() {
+        let (_dir, _state, app) = harness().await;
+        let response = send(
+            &app,
+            Method::GET,
+            "/api/auth/token?service=registry.local&scope=repository:darktohka/site:pull",
+            None,
+            &[("authorization", &basic_with(USER, "not-the-password"))],
+            &[],
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "docker login must not falsely succeed"
+        );
+        assert!(header_str(&response, "www-authenticate").starts_with("Basic realm="));
+    }
+}
+
 #[tokio::test]
 async fn manifest_digest_reference_mismatch_is_rejected() {
     let (_dir, _state, app) = harness().await;
@@ -910,7 +1148,7 @@ async fn catalog_requires_auth_and_paginates() {
 
     let anonymous = send(&app, Method::GET, "/v2/_catalog", None, &[], &[]).await;
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
-    assert!(header_str(&anonymous, "www-authenticate").contains("Basic realm="));
+    assert!(header_str(&anonymous, "www-authenticate").contains("Bearer realm="));
 
     let all = send(&app, Method::GET, "/v2/_catalog", Some(USER), &[], &[]).await;
     assert_eq!(all.status(), StatusCode::OK);
@@ -956,8 +1194,11 @@ async fn private_repository_requires_authentication() {
     )
     .await;
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let challenge = header_str(&anonymous, "www-authenticate");
+    assert!(challenge.contains("Bearer realm="), "{challenge}");
     assert!(
-        header_str(&anonymous, "www-authenticate").contains("Basic realm=\"Lighthouse Registry\"")
+        challenge.contains("scope=\"repository:darktohka/site:pull\""),
+        "{challenge}"
     );
 
     create_user(&state, "bob").await;

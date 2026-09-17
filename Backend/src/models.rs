@@ -183,6 +183,18 @@ pub struct ServiceAccountGrant {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct AppPassword {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub token_prefix: String,
+    pub token_suffix: String,
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct LoginEvent {
     pub id: i64,
     pub user_id: Option<i64>,

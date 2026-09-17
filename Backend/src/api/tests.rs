@@ -21,6 +21,7 @@ fn actor(user: &User) -> AuthContext {
         username: Some(user.username.clone()),
         service_account_id: None,
         is_admin: false,
+        ..AuthContext::default()
     }
 }
 

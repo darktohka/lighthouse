@@ -25,6 +25,11 @@ pub struct Config {
     pub email_verification_ttl_secs: i64,
     pub password_reset_ttl_secs: i64,
     pub upload_session_ttl_secs: i64,
+    /// Lifetime of a registry bearer token handed to `docker`.
+    pub registry_token_ttl_secs: i64,
+    /// Lifetime of the half-authenticated token minted after a correct password
+    /// when the account has TOTP enabled.
+    pub mfa_token_ttl_secs: i64,
 
     pub cookie_name: String,
     pub cookie_domain: Option<String>,
@@ -95,6 +100,8 @@ impl Config {
             email_verification_ttl_secs: env_parse("EMAIL_VERIFICATION_TTL_SECS", 60 * 60 * 24)?,
             password_reset_ttl_secs: env_parse("PASSWORD_RESET_TTL_SECS", 60 * 60)?,
             upload_session_ttl_secs: env_parse("UPLOAD_SESSION_TTL_SECS", 60 * 60 * 24)?,
+            registry_token_ttl_secs: env_parse("REGISTRY_TOKEN_TTL_SECS", 300)?,
+            mfa_token_ttl_secs: env_parse("MFA_TOKEN_TTL_SECS", 300)?,
 
             cookie_name: env_or("COOKIE_NAME", "lighthouse_token"),
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),

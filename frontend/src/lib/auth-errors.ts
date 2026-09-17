@@ -26,6 +26,10 @@ export function authErrorMessage(error: unknown): string {
       return 'Your session has expired. Please sign in again.'
     case 'captcha_required':
       return 'Please solve the captcha before continuing.'
+    case 'two_factor_required':
+      return 'Enter the code from your authenticator app.'
+    case 'invalid_two_factor_code':
+      return 'That authentication code is not valid. Check your authenticator app or use a backup code.'
     default:
       return error.message
   }

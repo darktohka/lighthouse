@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
-import { loginFormSchema } from '../api/schemas'
+import { loginFormSchema, verifyCodeFormSchema } from '../api/schemas'
 import { AuthLayout } from '../components/AuthLayout'
 import { CaptchaGate } from '../components/CaptchaField'
 import { Button } from '../components/primitives/Button'
@@ -12,11 +12,13 @@ import { authErrorMessage, isEmailNotVerified } from '../lib/auth-errors'
 import { validateForm, type FieldErrors } from '../lib/forms'
 
 export function LoginPage() {
-  const { login } = useAuth()
+  const { login, verifyTwoFactor } = useAuth()
   const navigate = useNavigate()
 
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  const [mfaToken, setMfaToken] = useState<string | null>(null)
   const [errors, setErrors] = useState<FieldErrors>({})
   const [formError, setFormError] = useState<string | null>(null)
   const [notVerified, setNotVerified] = useState(false)
@@ -27,7 +29,12 @@ export function LoginPage() {
   const [captchaSolving, setCaptchaSolving] = useState(false)
   const [captchaKey, setCaptchaKey] = useState(0)
 
-  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const resetCaptcha = () => {
+    setCaptchaKey((key) => key + 1)
+    setCaptchaToken(null)
+  }
+
+  const onSubmitCredentials = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setFormError(null)
     setNotVerified(false)
@@ -51,14 +58,90 @@ export function LoginPage() {
       password: validation.value.password,
       ...(captchaToken ? { captcha: captchaToken } : {}),
     }).then(
-      () => navigate('/dashboard'),
+      (outcome) => {
+        if (outcome.status === 'two_factor_required') {
+          setMfaToken(outcome.mfaToken)
+          resetCaptcha()
+          setSubmitting(false)
+          return
+        }
+        navigate('/dashboard')
+      },
       (error: unknown) => {
         setFormError(authErrorMessage(error))
         setNotVerified(isEmailNotVerified(error))
-        setCaptchaKey((key) => key + 1)
-        setCaptchaToken(null)
+        resetCaptcha()
         setSubmitting(false)
       },
+    )
+  }
+
+  const onSubmitCode = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setFormError(null)
+    const validation = validateForm(verifyCodeFormSchema, { code })
+    if (!validation.ok) {
+      setErrors(validation.errors)
+      return
+    }
+    setErrors({})
+    setSubmitting(true)
+    void verifyTwoFactor(mfaToken ?? '', validation.value.code).then(
+      () => navigate('/dashboard'),
+      (error: unknown) => {
+        setFormError(authErrorMessage(error))
+        setSubmitting(false)
+      },
+    )
+  }
+
+  if (mfaToken) {
+    return (
+      <AuthLayout
+        title="Two-factor authentication"
+        subtitle="Enter the 6-digit code from your authenticator app, or one of your backup codes."
+        footer={
+          <button
+            type="button"
+            className="text-accent hover:underline"
+            onClick={() => {
+              setMfaToken(null)
+              setCode('')
+              setFormError(null)
+            }}
+          >
+            Back to sign in
+          </button>
+        }
+      >
+        <form className="space-y-3" onSubmit={onSubmitCode} noValidate>
+          {formError ? (
+            <Flash variant="danger">
+              <p>{formError}</p>
+            </Flash>
+          ) : null}
+
+          <TextInput
+            label="Authentication code"
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
+            error={errors.code}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            autoFocus
+            required
+          />
+
+          <Button
+            type="submit"
+            variant="primary"
+            className="w-full"
+            disabled={submitting}
+          >
+            {submitting ? 'Verifying…' : 'Verify and sign in'}
+          </Button>
+        </form>
+      </AuthLayout>
     )
   }
 
@@ -75,7 +158,7 @@ export function LoginPage() {
         </p>
       }
     >
-      <form className="space-y-3" onSubmit={onSubmit} noValidate>
+      <form className="space-y-3" onSubmit={onSubmitCredentials} noValidate>
         {formError ? (
           <Flash variant="danger">
             <p>{formError}</p>

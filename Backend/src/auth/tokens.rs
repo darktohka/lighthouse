@@ -31,6 +31,12 @@ use crate::state::AppState;
 
 /// Marker written into the `kind` claim of every access token.
 pub const ACCESS_KIND: &str = "access";
+/// `kind` claim of a registry bearer token handed to `docker`.
+pub const REGISTRY_KIND: &str = "registry";
+/// `kind` claim of the half-authenticated token awaiting a TOTP code.
+pub const MFA_KIND: &str = "mfa";
+/// Audience of registry bearer tokens.
+pub const REGISTRY_AUDIENCE: &str = "lighthouse-registry";
 /// `email_tokens.kind` for e-mail verification.
 pub const EMAIL_KIND_VERIFY: &str = "verify_email";
 /// `email_tokens.kind` for password reset.
@@ -208,6 +214,139 @@ pub fn verify_access_token(config: &Config, token: &str) -> Result<Claims> {
     Ok(data.claims)
 }
 
+// ---- registry bearer tokens ------------------------------------------------
+//
+// Registry tokens let `docker` authenticate against /v2 without replaying a
+// password on every request, and let a logged-out client pull public content
+// with an anonymous token. They are signed with a key derived from the JWT
+// secret (`sha256(secret || ":registry")`) so a registry token can never be
+// accepted where an access token is required, even if the kind check were
+// removed. `sub == 0` means anonymous.
+
+/// One granted scope inside a registry token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryAccess {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub actions: Vec<String>,
+}
+
+/// Registry bearer-token claims.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryClaims {
+    pub sub: i64,
+    pub username: Option<String>,
+    pub kind: String,
+    pub aud: String,
+    pub iss: String,
+    pub sid: Option<i64>,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+    pub access: Vec<RegistryAccess>,
+}
+
+/// Claims of the short-lived token minted between the password and TOTP steps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MfaClaims {
+    pub sub: i64,
+    pub kind: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+}
+
+/// Domain-separates HMAC keys so tokens of different kinds cannot be swapped.
+fn derived_key(secret: &str, label: &str) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.update(b":");
+    hasher.update(label.as_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Issues a registry bearer token for `sub` (`0` for anonymous).
+pub fn issue_registry_token(
+    config: &Config,
+    sub: i64,
+    username: Option<&str>,
+    service_account_id: Option<i64>,
+    access: Vec<RegistryAccess>,
+) -> Result<String> {
+    ensure_provider();
+    let now = Utc::now().timestamp();
+    let mut id = [0u8; 16];
+    rand::fill(&mut id);
+    let claims = RegistryClaims {
+        sub,
+        username: username.map(str::to_string),
+        kind: REGISTRY_KIND.to_string(),
+        aud: REGISTRY_AUDIENCE.to_string(),
+        iss: config.base_url.clone(),
+        sid: service_account_id,
+        iat: now,
+        exp: now + config.registry_token_ttl_secs,
+        jti: hex::encode(id),
+        access,
+    };
+    let header = Header::new(Algorithm::HS256);
+    let key = EncodingKey::from_secret(&derived_key(&config.jwt_secret, "registry"));
+    encode(&header, &claims, &key).map_err(|err| anyhow!("failed to issue registry token: {err}"))
+}
+
+/// Verifies a registry token's signature, expiry, audience and `kind` claim.
+pub fn verify_registry_token(config: &Config, token: &str) -> Result<RegistryClaims> {
+    ensure_provider();
+    let key = DecodingKey::from_secret(&derived_key(&config.jwt_secret, "registry"));
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    validation.required_spec_claims = HashSet::from(["exp".to_string()]);
+    validation.set_audience(&[REGISTRY_AUDIENCE]);
+    validation.set_issuer(&[config.base_url.as_str()]);
+    let data = decode::<RegistryClaims>(token, &key, &validation)
+        .map_err(|err| anyhow!("invalid registry token: {err}"))?;
+    if data.claims.kind != REGISTRY_KIND {
+        bail!("unexpected registry token kind");
+    }
+    Ok(data.claims)
+}
+
+/// Issues the short-lived token that stands in for a password once the caller
+/// still owes a TOTP code.
+pub fn issue_mfa_token(config: &Config, user_id: i64) -> Result<String> {
+    ensure_provider();
+    let now = Utc::now().timestamp();
+    let mut id = [0u8; 16];
+    rand::fill(&mut id);
+    let claims = MfaClaims {
+        sub: user_id,
+        kind: MFA_KIND.to_string(),
+        iat: now,
+        exp: now + config.mfa_token_ttl_secs,
+        jti: hex::encode(id),
+    };
+    let header = Header::new(Algorithm::HS256);
+    let key = EncodingKey::from_secret(&derived_key(&config.jwt_secret, "mfa"));
+    encode(&header, &claims, &key).map_err(|err| anyhow!("failed to issue mfa token: {err}"))
+}
+
+/// Verifies an MFA token. Never yields an identity on its own.
+pub fn verify_mfa_token(config: &Config, token: &str) -> Result<MfaClaims> {
+    ensure_provider();
+    let key = DecodingKey::from_secret(&derived_key(&config.jwt_secret, "mfa"));
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    validation.required_spec_claims = HashSet::from(["exp".to_string()]);
+    let data = decode::<MfaClaims>(token, &key, &validation)
+        .map_err(|err| anyhow!("invalid mfa token: {err}"))?;
+    if data.claims.kind != MFA_KIND {
+        bail!("unexpected mfa token kind");
+    }
+    Ok(data.claims)
+}
+
+
 // ---- opaque tokens ---------------------------------------------------------
 
 fn random_bytes<const N: usize>() -> [u8; N] {
@@ -246,6 +385,24 @@ pub fn generate_service_token() -> (String, String, String, String) {
 /// Verifies a service-account token against its stored Argon2id hash.
 pub fn verify_service_token(hash: &str, candidate: &str) -> bool {
     password::verify_password(hash, candidate)
+}
+
+/// Generates an app-password credential `lhp_<random>` together with its display
+/// prefix/suffix and SHA-256 hash. App passwords are 192-bit random values, so a
+/// fast indexed hash is sufficient and keeps Basic auth off the Argon2 path.
+pub fn generate_app_password_token() -> (String, String, String, String) {
+    let plaintext = format!("lhp_{}", hex::encode(random_bytes::<24>()));
+    let prefix = plaintext.chars().take(4).collect::<String>();
+    let suffix = plaintext
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let hash = hash_token(&plaintext);
+    (plaintext, prefix, suffix, hash)
 }
 
 /// SHA-256 hash used to persist refresh and e-mail tokens.

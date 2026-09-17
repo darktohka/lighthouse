@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::middleware::Authenticated;
-use crate::auth::{LoginAttempt, sessions, tokens};
+use crate::auth::{LoginAttempt, sessions, tokens, two_factor};
 use crate::captcha;
 use crate::db::Db;
 use crate::email;
@@ -42,6 +42,25 @@ struct LoginRequest {
     password: String,
     #[serde(default)]
     captcha: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TwoFactorLoginRequest {
+    mfa_token: String,
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TwoFactorCodeRequest {
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TwoFactorDisableRequest {
+    password: String,
+    code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +194,12 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/login/2fa", post(login_two_factor))
+        .route("/api/auth/2fa", get(two_factor_status))
+        .route("/api/auth/2fa/setup", post(two_factor_setup))
+        .route("/api/auth/2fa/enable", post(two_factor_enable))
+        .route("/api/auth/2fa/disable", post(two_factor_disable))
+        .route("/api/auth/2fa/backup-codes", post(two_factor_backup_codes))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/refresh", post(refresh))
         .route("/api/auth/me", get(me))
@@ -384,9 +409,50 @@ async fn login(
         return Err(invalid_credentials());
     }
 
+    let totp_enabled: bool = sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = ?")
+        .bind(user.id)
+        .fetch_one(&state.db)
+        .await?;
+
+    if !totp_enabled {
+        return complete_login(&state, &headers, &user, "password").await;
+    }
+
+    if let Some(code) = request.code.as_deref() {
+        if two_factor::verify_login_code(&state, user.id, code, Utc::now()).await? {
+            return complete_login(&state, &headers, &user, "two_factor").await;
+        }
+        crate::auth::record_login_event(
+            &state.db,
+            LoginAttempt {
+                user_id: Some(user.id),
+                service_account_id: None,
+                username: Some(&identifier),
+                success: false,
+                kind: "two_factor",
+                ip: ip.as_deref(),
+                user_agent: user_agent.as_deref(),
+            },
+        )
+        .await;
+        return Err(invalid_two_factor_code());
+    }
+
+    let mfa_token = tokens::issue_mfa_token(&state.config, user.id)?;
+    Ok(Json(json!({ "two_factor_required": true, "mfa_token": mfa_token })).into_response())
+}
+
+async fn complete_login(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: &User,
+    kind: &str,
+) -> ApiResult<Response> {
+    let ip = request_ip(state, headers);
+    let user_agent = header_user_agent(headers);
     let (session, refresh_token) = sessions::create(
-        &state,
-        &user,
+        state,
+        user,
         sessions::SessionAudit {
             user_agent: user_agent.as_deref(),
             ip: ip.as_deref(),
@@ -402,9 +468,9 @@ async fn login(
         LoginAttempt {
             user_id: Some(user.id),
             service_account_id: None,
-            username: Some(&identifier),
+            username: Some(&user.username),
             success: true,
-            kind: "password",
+            kind,
             ip: ip.as_deref(),
             user_agent: user_agent.as_deref(),
         },
@@ -413,9 +479,129 @@ async fn login(
 
     Ok(json_with_cookie(
         StatusCode::OK,
-        json!({ "user": UserView::from(&user), "refresh_token": refresh_token }),
+        json!({ "user": UserView::from(user), "refresh_token": refresh_token }),
         cookie,
     ))
+}
+
+async fn login_two_factor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TwoFactorLoginRequest>,
+) -> ApiResult<Response> {
+    let claims = tokens::verify_mfa_token(&state.config, &request.mfa_token)
+        .map_err(|_| ApiError::unauthorized("two-factor challenge is invalid or expired"))?;
+    let user = load_user(&state.db, claims.sub).await?;
+
+    let ip = request_ip(&state, &headers);
+    enforce_limit(
+        state
+            .limiters
+            .check_login(&Limiters::limit_key(ip.as_deref(), Some(&user.username))),
+    )?;
+
+    if !user.email_verified {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "email_not_verified",
+            "e-mail address has not been verified",
+        ));
+    }
+
+    if !two_factor::verify_login_code(&state, user.id, &request.code, Utc::now()).await? {
+        crate::auth::record_login_event(
+            &state.db,
+            LoginAttempt {
+                user_id: Some(user.id),
+                service_account_id: None,
+                username: Some(&user.username),
+                success: false,
+                kind: "two_factor",
+                ip: ip.as_deref(),
+                user_agent: header_user_agent(&headers).as_deref(),
+            },
+        )
+        .await;
+        return Err(invalid_two_factor_code());
+    }
+
+    complete_login(&state, &headers, &user, "two_factor").await
+}
+
+async fn two_factor_status(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+) -> ApiResult<Response> {
+    let user_id = ctx
+        .user_id
+        .ok_or_else(|| ApiError::unauthorized("user session required"))?;
+    let status = two_factor::status(&state.db, user_id).await?;
+    Ok(Json(status).into_response())
+}
+
+async fn two_factor_setup(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+) -> ApiResult<Response> {
+    let user_id = ctx
+        .user_id
+        .ok_or_else(|| ApiError::unauthorized("user session required"))?;
+    let issuer = state.config.title.clone();
+    let setup = two_factor::begin_setup(&state, user_id, &issuer).await?;
+    Ok(Json(setup).into_response())
+}
+
+async fn two_factor_enable(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Json(request): Json<TwoFactorCodeRequest>,
+) -> ApiResult<Response> {
+    let user_id = ctx
+        .user_id
+        .ok_or_else(|| ApiError::unauthorized("user session required"))?;
+    two_factor::enable(
+        &state,
+        user_id,
+        &request.code,
+        ctx.session_id.as_deref(),
+        Utc::now(),
+    )
+    .await?;
+    Ok(Json(json!({ "enabled": true })).into_response())
+}
+
+async fn two_factor_disable(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Json(request): Json<TwoFactorDisableRequest>,
+) -> ApiResult<Response> {
+    let user_id = ctx
+        .user_id
+        .ok_or_else(|| ApiError::unauthorized("user session required"))?;
+    let user = load_user(&state.db, user_id).await?;
+    two_factor::disable(
+        &state,
+        &user,
+        &request.password,
+        &request.code,
+        ctx.session_id.as_deref(),
+        Utc::now(),
+    )
+    .await?;
+    Ok(Json(json!({ "enabled": false })).into_response())
+}
+
+async fn two_factor_backup_codes(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Json(request): Json<TwoFactorCodeRequest>,
+) -> ApiResult<Response> {
+    let user_id = ctx
+        .user_id
+        .ok_or_else(|| ApiError::unauthorized("user session required"))?;
+    let codes = two_factor::regenerate_backup_codes(&state, user_id, &request.code, Utc::now())
+        .await?;
+    Ok(Json(json!({ "backup_codes": codes })).into_response())
 }
 
 async fn logout(
@@ -774,6 +960,14 @@ fn invalid_credentials() -> ApiError {
         StatusCode::UNAUTHORIZED,
         "invalid_credentials",
         "invalid username or password",
+    )
+}
+
+fn invalid_two_factor_code() -> ApiError {
+    ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        "invalid_two_factor_code",
+        "invalid authentication code",
     )
 }
 
@@ -1501,5 +1695,101 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn login_code(state: &AppState, user_id: i64) -> String {
+        let secret: String = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("secret");
+        let bytes = crate::auth::totp::base32_decode(&secret).expect("decode");
+        crate::auth::totp::format_code(crate::auth::totp::totp(
+            &bytes,
+            Utc::now().timestamp(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn two_factor_login_requires_a_valid_code() {
+        let (_dir, state) = test_state().await;
+        let alice = create_user(&state, "alice").await;
+        two_factor::begin_setup(&state, alice.id, "Lighthouse")
+            .await
+            .expect("setup");
+        let secret: String = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
+            .bind(alice.id)
+            .fetch_one(&state.db)
+            .await
+            .expect("secret");
+        let bytes = crate::auth::totp::base32_decode(&secret).expect("decode");
+        // Enrol with a previous-step code so the current-step code stays unused
+        // for the login that follows (TOTP codes are single-use).
+        let enabled_at = Utc::now() - Duration::seconds(30);
+        let enable_code =
+            crate::auth::totp::format_code(crate::auth::totp::totp(&bytes, enabled_at.timestamp()));
+        two_factor::enable(&state, alice.id, &enable_code, None, enabled_at)
+            .await
+            .expect("enable");
+
+        let app = http_app(&state);
+
+        let response = send(
+            &app,
+            "POST",
+            "/api/auth/login",
+            Some(json!({ "identifier": "alice", "password": "correct-horse-battery" })),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["two_factor_required"], true);
+        assert!(body["refresh_token"].is_null());
+        let mfa_token = body["mfa_token"].as_str().expect("mfa token").to_string();
+
+        let response = send(
+            &app,
+            "POST",
+            "/api/auth/login/2fa",
+            Some(json!({ "mfa_token": mfa_token, "code": "000000" })),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_json(response).await["error"]["code"],
+            "invalid_two_factor_code"
+        );
+
+        let response = send(
+            &app,
+            "POST",
+            "/api/auth/login/2fa",
+            Some(json!({ "mfa_token": mfa_token, "code": login_code(&state, alice.id).await })),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["user"]["username"], "alice");
+        assert!(body["refresh_token"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn two_factor_endpoints_require_a_session() {
+        let (_dir, state) = test_state().await;
+        let app = http_app(&state);
+        for uri in ["/api/auth/2fa", "/api/auth/2fa/setup"] {
+            let response = send(
+                &app,
+                if uri.ends_with("setup") { "POST" } else { "GET" },
+                uri,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
     }
 }

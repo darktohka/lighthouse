@@ -110,6 +110,14 @@ export function AvatarMenu() {
           </Link>
           <Link
             role="menuitem"
+            to="/app-passwords"
+            onClick={() => setOpen(false)}
+            className={menuItemClass}
+          >
+            App passwords
+          </Link>
+          <Link
+            role="menuitem"
             to="/settings"
             onClick={() => setOpen(false)}
             className={menuItemClass}

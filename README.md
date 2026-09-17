@@ -30,10 +30,13 @@ statistics, storage analytics and an in-browser layer filesystem viewer.
   deduplicated and content-addressed.
 - **Garbage collection** — reference-graph mark-and-sweep reclaims unreferenced
   blobs when tags or images are deleted.
-- **Identity** — Argon2id passwords, e-mail verification through Brevo,
-  stateless access cookie + refresh tokens, service accounts, login history.
+- **Identity** — Argon2id passwords, TOTP two-factor authentication with
+  single-use backup codes, per-account app passwords, e-mail verification
+  through Brevo, stateless access cookie + refresh tokens, service accounts,
+  login history.
 - **Authorization** — personal namespaces, workspaces, per-namespace and
-  per-repository delegations (including anonymous), push implies pull.
+  per-repository delegations (including anonymous), registry bearer tokens for
+  `/v2` (anonymous pull included), push implies pull.
 - **Control plane** — dashboard and activity timeline, image and tag detail with
   compressed/uncompressed sizes and platforms, JSON manifest/config browsing,
   in-browser layer filesystem, storage analytics, profile pages with a yearly

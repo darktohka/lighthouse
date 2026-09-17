@@ -16,7 +16,7 @@ pub async fn get(
 ) -> Response {
     match list(&state, &auth.0, raw.as_deref()).await {
         Ok(response) => response,
-        Err(err) => super::error_response(err),
+        Err(err) => super::error_response(&state.config, err, Some("registry:catalog:*")),
     }
 }
 
@@ -26,7 +26,13 @@ async fn list(
     raw: Option<&str>,
 ) -> Result<Response, RegistryError> {
     if !actor.is_authenticated() {
-        return Err(RegistryError::unauthorized("authentication required"));
+        return if actor.is_registry_token() {
+            Err(RegistryError::denied(
+                "requested access to the resource is denied",
+            ))
+        } else {
+            Err(RegistryError::unauthorized("authentication required"))
+        };
     }
     let query = super::query_pairs(raw);
     let page = super::parse_page_size(&query)?;

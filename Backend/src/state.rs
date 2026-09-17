@@ -8,6 +8,21 @@ use crate::ratelimit::Limiters;
 use crate::storage::Storage;
 use crate::storage::registry::Registry;
 
+/// How a request's identity was established. Registry bearer tokens are an
+/// identity for `/v2` only: [`CredentialSource::RegistryToken`] is deliberately
+/// rejected by the control-plane extractors so a token cached by `docker`
+/// cannot act as a web session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CredentialSource {
+    #[default]
+    None,
+    AccessToken,
+    Password,
+    AppPassword,
+    ServiceAccount,
+    RegistryToken,
+}
+
 /// Identity attached to a request by the authentication middleware. Inserted as
 /// a request extension so downstream handlers and the access log can read it.
 #[derive(Debug, Clone, Default)]
@@ -16,6 +31,10 @@ pub struct AuthContext {
     pub username: Option<String>,
     pub service_account_id: Option<i64>,
     pub is_admin: bool,
+    pub credential: CredentialSource,
+    /// Access-token `jti` when the caller presented a web session, so 2FA
+    /// enrolment can revoke every *other* session.
+    pub session_id: Option<String>,
 }
 
 impl AuthContext {
@@ -25,6 +44,13 @@ impl AuthContext {
 
     pub fn is_authenticated(&self) -> bool {
         self.user_id.is_some() || self.service_account_id.is_some()
+    }
+
+    /// True when the caller presented a valid registry bearer token, even an
+    /// anonymous one. Used to answer `DENIED` instead of re-issuing a `401`
+    /// challenge, which would make `docker` fetch tokens in a loop.
+    pub fn is_registry_token(&self) -> bool {
+        self.credential == CredentialSource::RegistryToken
     }
 }
 

@@ -29,10 +29,12 @@ backoff for operations that can still collide.
 ### Identity
 | Table | Purpose |
 |---|---|
-| `users` | accounts, Argon2id hash, profile, verification flag |
+| `users` | accounts, Argon2id hash, profile, verification flag, TOTP state |
 | `sessions` | refresh-token families; `id` is also the access-token `jti` |
 | `email_tokens` | single-use verification / password-reset tokens |
-| `login_events` | password, service-token and refresh usage history |
+| `totp_backup_codes` | single-use Argon2id-hashed 2FA recovery codes |
+| `app_passwords` | SHA-256-hashed registry credentials for human accounts |
+| `login_events` | password, service-token, app-password, two-factor and refresh usage history |
 
 ### Namespaces and repositories
 | Table | Purpose |
@@ -80,6 +82,17 @@ tag ──▶ manifest ──▶ manifest_blobs ──▶ blob (config | layer)
 Reachability over these edges drives the garbage collector: a blob is kept only
 while some reachable manifest references it, and a manifest is kept only while a
 tag, a repository link, or a parent index references it.
+
+## Migrations
+
+Migrations run in filename order at startup.
+
+- `0002_auth_factors.sql` adds the TOTP columns on `users` (`totp_secret`,
+  `totp_enabled`, `totp_confirmed_at`, `totp_last_used_step`), creates
+  `totp_backup_codes` and `app_passwords`, and widens the `login_events.kind`
+  CHECK to include `app_password`, `two_factor` and `registry_token`. Because
+  `login_events` is a leaf child table, the migration rebuilds it inside the
+  migration transaction.
 
 ## Maintenance
 

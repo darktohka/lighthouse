@@ -204,6 +204,28 @@ pub async fn revoke_all_for_user(state: &AppState, user_id: i64) -> ApiResult<u6
     Ok(result.rows_affected())
 }
 
+/// Revokes every active session except `keep`, so a factor change does not log
+/// the caller out of the session they are using.
+pub async fn revoke_all_except(
+    state: &AppState,
+    user_id: i64,
+    keep: Option<&str>,
+) -> ApiResult<u64> {
+    let Some(keep) = keep else {
+        return revoke_all_for_user(state, user_id).await;
+    };
+    let result = sqlx::query(
+        "UPDATE sessions SET revoked_at = ? \
+         WHERE user_id = ? AND revoked_at IS NULL AND id != ?",
+    )
+    .bind(Utc::now())
+    .bind(user_id)
+    .bind(keep)
+    .execute(&state.db)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Lists a user's sessions, most recently seen first.
 pub async fn list_for_user(db: &Db, user_id: i64) -> ApiResult<Vec<Session>> {
     let sessions = sqlx::query_as::<_, Session>(
