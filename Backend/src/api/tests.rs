@@ -388,11 +388,12 @@ async fn unique_and_shared_sizes_when_tags_share_layer() {
     )
     .await;
     let detail = body_json(response).await;
+    // The repository reaches every blob once and owns all of them: tag `a`
+    // introduced the shared layer, so nothing is shared across images.
     let total = (config_a.len() + config_b.len() + layer.len()) as i64;
-    let unique = (config_a.len() + config_b.len()) as i64;
     assert_eq!(detail["total_size"], total);
-    assert_eq!(detail["unique_size"], unique);
-    assert_eq!(detail["shared_size"], layer.len() as i64);
+    assert_eq!(detail["unique_size"], total);
+    assert_eq!(detail["shared_size"], 0);
     assert_eq!(detail["tag_count"], 2);
 
     let response = call(
@@ -406,22 +407,85 @@ async fn unique_and_shared_sizes_when_tags_share_layer() {
     assert_eq!(response.status(), StatusCode::OK);
     let ranked = body_json(response).await;
     assert_eq!(ranked["total"], 2);
-    let mut uniques: Vec<i64> = ranked["items"]
-        .as_array()
-        .expect("items")
-        .iter()
-        .map(|item| item["unique_size"].as_i64().unwrap_or(0))
-        .collect();
-    uniques.sort_unstable();
-    let mut expected = vec![config_a.len() as i64, config_b.len() as i64];
-    expected.sort_unstable();
-    assert_eq!(uniques, expected);
     for item in ranked["items"].as_array().expect("items") {
-        assert_eq!(
-            item["total_size"].as_i64().unwrap_or(0) - item["unique_size"].as_i64().unwrap_or(0),
-            layer.len() as i64
-        );
+        let total = item["total_size"].as_i64().unwrap_or(0);
+        let unique = item["unique_size"].as_i64().unwrap_or(0);
+        let shared = item["shared_size"].as_i64().unwrap_or(0);
+        assert_eq!(shared, total - unique);
+        match item["tag"].as_str().unwrap_or_default() {
+            "a" => {
+                // The first tag owns the layer outright.
+                assert_eq!(unique, (config_a.len() + layer.len()) as i64);
+                assert_eq!(shared, 0);
+            }
+            "b" => {
+                // The later tag counts the already-owned layer as shared.
+                assert_eq!(unique, config_b.len() as i64);
+                assert_eq!(shared, layer.len() as i64);
+            }
+            other => panic!("unexpected tag {other}"),
+        }
     }
+    assert_eq!(ranked["items"][0]["tag"], "a", "owner ranks highest first");
+}
+
+#[tokio::test]
+async fn cross_repository_sharing_is_owned_by_the_first_pusher() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    let config_one = b"config-one";
+    let config_two = b"config-two-cccccccc";
+    let layer = b"shared-layer-bytes-0123456789";
+    seed_image(&state, "alice/one", "v1", config_one, layer).await;
+    seed_image(&state, "alice/two", "v1", config_two, layer).await;
+
+    let one = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/one",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(one["unique_size"], (config_one.len() + layer.len()) as i64);
+    assert_eq!(one["shared_size"], 0);
+
+    let two = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/two",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(two["unique_size"], config_two.len() as i64);
+    assert_eq!(two["shared_size"], layer.len() as i64);
+
+    let overview = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/analytics/overview",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    let logical = (config_one.len() + config_two.len() + 2 * layer.len()) as i64;
+    assert_eq!(overview["total_size"], logical);
+    assert_eq!(
+        overview["unique_size"],
+        (config_one.len() + config_two.len() + layer.len()) as i64
+    );
+    assert_eq!(overview["shared_size"], layer.len() as i64);
 }
 
 #[tokio::test]

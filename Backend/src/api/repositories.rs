@@ -524,12 +524,8 @@ async fn build_tag_detail(
     .await?;
 
     let mut layers = Vec::with_capacity(edges.len());
-    let mut uncompressed_size = 0i64;
     let mut config: Option<Value> = None;
     for (digest, media_type, size, role) in edges {
-        if role == "layer" {
-            uncompressed_size += size;
-        }
         if role == "config" && config.is_none() {
             if let Some(value) = blob_json(state, &digest).await {
                 config = Some(value);
@@ -539,19 +535,14 @@ async fn build_tag_detail(
             digest,
             media_type,
             size,
-            uncompressed_size: size,
             role,
         });
-    }
-    if uncompressed_size == 0 {
-        uncompressed_size = summary.size;
     }
 
     let manifest_json =
         serde_json::from_slice(&manifest.content).unwrap_or(Value::Null);
     Ok(TagDetail {
         summary,
-        uncompressed_size,
         manifest: manifest_json,
         config,
         layers,

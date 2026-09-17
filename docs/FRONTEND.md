@@ -215,8 +215,9 @@ namespace.
 Pages: Explore/landing, Login, Register, Verify e-mail, Forgot password, Reset
 password, Dashboard (repositories + activity timeline + counters), Namespace
 repositories, Repository detail (header, pull snippet, tag table with sizes /
-platform badges / pull counts / delete), Tag detail (Manifest / Config / Layers
-tabs with the recursive JSON viewer + layer table), Layer browser (breadcrumbs,
+platform badges / pull counts / delete), Tag detail (Layers / Manifest / Config
+tabs with the recursive JSON viewer + layer table, defaulting to Layers, where a
+config row's Browse button opens the Config tab), Layer browser (breadcrumbs,
 directory listing, inline text preview, binary download, large-layer notice) and
 a 404 page.
 

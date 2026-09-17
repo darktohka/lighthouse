@@ -140,7 +140,6 @@ pub struct LayerInfo {
     pub digest: String,
     pub media_type: Option<String>,
     pub size: i64,
-    pub uncompressed_size: i64,
     pub role: String,
 }
 
@@ -170,7 +169,6 @@ pub struct TagSummary {
 pub struct TagDetail {
     #[serde(flatten)]
     pub summary: TagSummary,
-    pub uncompressed_size: i64,
     pub manifest: Value,
     pub config: Option<Value>,
     pub layers: Vec<LayerInfo>,
@@ -470,6 +468,7 @@ pub struct TagBlobRow {
     pub repository_id: i64,
     pub blob_id: i64,
     pub size: i64,
+    pub tag_created_at: DateTime<Utc>,
 }
 
 /// Loads the flattened reachability graph for every tag in one query. A tag's
@@ -488,7 +487,7 @@ pub async fn load_tag_blob_rows(state: &AppState) -> ApiResult<Vec<TagBlobRow>> 
              FROM reach r JOIN manifest_blobs mb ON mb.manifest_id = r.manifest_id \
          ) \
          SELECT tb.tag_id AS tag_id, t.repository_id AS repository_id, \
-                tb.blob_id AS blob_id, b.size AS size \
+                tb.blob_id AS blob_id, b.size AS size, t.created_at AS tag_created_at \
          FROM tag_blob tb \
          JOIN tags t ON t.id = tb.tag_id \
          JOIN blobs b ON b.id = tb.blob_id",
@@ -498,19 +497,54 @@ pub async fn load_tag_blob_rows(state: &AppState) -> ApiResult<Vec<TagBlobRow>> 
     Ok(rows)
 }
 
-/// Number of tags that reference each blob (global uniqueness).
-pub fn blob_reference_counts(rows: &[TagBlobRow]) -> HashMap<i64, i64> {
-    let mut counts: HashMap<i64, i64> = HashMap::new();
+/// For each blob, the tag that first referenced it anywhere in the registry.
+/// The earliest tag by `created_at` owns the blob; ties break on the lower tag
+/// id so ownership is deterministic. Every reachable blob has exactly one owner.
+pub fn blob_owners(rows: &[TagBlobRow]) -> HashMap<i64, i64> {
+    let mut owners: HashMap<i64, (DateTime<Utc>, i64)> = HashMap::new();
     for row in rows {
-        *counts.entry(row.blob_id).or_insert(0) += 1;
+        let candidate = (row.tag_created_at, row.tag_id);
+        let replace = match owners.get(&row.blob_id) {
+            Some(current) => candidate < *current,
+            None => true,
+        };
+        if replace {
+            owners.insert(row.blob_id, candidate);
+        }
     }
-    counts
+    owners
+        .into_iter()
+        .map(|(blob_id, (_, tag_id))| (blob_id, tag_id))
+        .collect()
 }
 
-/// Per-tag `(total_size, unique_size)`; a blob is unique when exactly one tag
-/// reaches it anywhere in the registry.
+/// Maps each tag to the repository it belongs to, derived from the graph rows.
+fn tag_repositories(rows: &[TagBlobRow]) -> HashMap<i64, i64> {
+    let mut repositories: HashMap<i64, i64> = HashMap::new();
+    for row in rows {
+        repositories.entry(row.tag_id).or_insert(row.repository_id);
+    }
+    repositories
+}
+
+/// The repository that owns `blob_id`, resolved through its earliest tag.
+fn owner_repository(
+    owners: &HashMap<i64, i64>,
+    repositories: &HashMap<i64, i64>,
+    blob_id: i64,
+) -> Option<i64> {
+    owners
+        .get(&blob_id)
+        .and_then(|tag_id| repositories.get(tag_id))
+        .copied()
+}
+
+/// Per-tag `(total_size, unique_size)`. `total_size` is the distinct blob bytes
+/// the tag reaches; `unique_size` is the storage the tag owns — every blob for
+/// which it is the earliest referencing tag. `shared_size` is the remainder,
+/// i.e. bytes an earlier tag already owned.
 pub fn tag_size_map(rows: &[TagBlobRow]) -> HashMap<i64, (i64, i64)> {
-    let counts = blob_reference_counts(rows);
+    let owners = blob_owners(rows);
     let mut totals: HashMap<i64, (i64, i64)> = HashMap::new();
     let mut seen: HashSet<(i64, i64)> = HashSet::new();
     for row in rows {
@@ -519,7 +553,7 @@ pub fn tag_size_map(rows: &[TagBlobRow]) -> HashMap<i64, (i64, i64)> {
         }
         let entry = totals.entry(row.tag_id).or_insert((0, 0));
         entry.0 += row.size;
-        if counts.get(&row.blob_id).copied().unwrap_or(0) == 1 {
+        if owners.get(&row.blob_id).copied() == Some(row.tag_id) {
             entry.1 += row.size;
         }
     }
@@ -527,8 +561,12 @@ pub fn tag_size_map(rows: &[TagBlobRow]) -> HashMap<i64, (i64, i64)> {
 }
 
 /// Per-repository `(total_size, unique_size)` over distinct reachable blobs.
+/// `unique_size` is the storage the repository owns: blobs whose earliest
+/// referencing tag lives in this repository. A blob owned by another repository
+/// counts as shared here even when this repository also reaches it.
 pub fn repository_size_map(rows: &[TagBlobRow]) -> HashMap<i64, (i64, i64)> {
-    let counts = blob_reference_counts(rows);
+    let owners = blob_owners(rows);
+    let repositories = tag_repositories(rows);
     let mut totals: HashMap<i64, (i64, i64)> = HashMap::new();
     let mut seen: HashSet<(i64, i64)> = HashSet::new();
     for row in rows {
@@ -537,7 +575,7 @@ pub fn repository_size_map(rows: &[TagBlobRow]) -> HashMap<i64, (i64, i64)> {
         }
         let entry = totals.entry(row.repository_id).or_insert((0, 0));
         entry.0 += row.size;
-        if counts.get(&row.blob_id).copied().unwrap_or(0) == 1 {
+        if owner_repository(&owners, &repositories, row.blob_id) == Some(row.repository_id) {
             entry.1 += row.size;
         }
     }
@@ -546,7 +584,8 @@ pub fn repository_size_map(rows: &[TagBlobRow]) -> HashMap<i64, (i64, i64)> {
 
 /// Distinct reachable blobs (with sizes) for one repository.
 pub fn repository_blob_totals(rows: &[TagBlobRow], repository_id: i64) -> (i64, i64) {
-    let counts = blob_reference_counts(rows);
+    let owners = blob_owners(rows);
+    let repositories = tag_repositories(rows);
     let mut seen: HashSet<i64> = HashSet::new();
     let mut total = 0i64;
     let mut unique = 0i64;
@@ -555,7 +594,7 @@ pub fn repository_blob_totals(rows: &[TagBlobRow], repository_id: i64) -> (i64, 
             continue;
         }
         total += row.size;
-        if counts.get(&row.blob_id).copied().unwrap_or(0) == 1 {
+        if owner_repository(&owners, &repositories, row.blob_id) == Some(repository_id) {
             unique += row.size;
         }
     }

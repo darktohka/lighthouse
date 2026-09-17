@@ -121,10 +121,10 @@ RepositoryDetail  { ...RepositorySummary, manifest_count, platform_count,
                     permissions: PublicPermission[], can_pull, can_push }
 TagSummary  { name, digest, media_type, size, compressed_size,
               platforms: Platform[], pull_count, updated_at }
-TagDetail   { ...TagSummary, uncompressed_size, manifest: object,
+TagDetail   { ...TagSummary, manifest: object,
               config: object|null, layers: LayerInfo[], can_pull, can_push }
 Platform    { os, architecture, variant|null, digest, size }
-LayerInfo   { digest, media_type, size, uncompressed_size, role: "config"|"layer" }
+LayerInfo   { digest, media_type, size, role: "config"|"layer" }
 TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
               platforms: Platform[], updated_at }
 ```
@@ -132,14 +132,15 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
 - `can_pull` / `can_push` report the calling actor's effective access to the
   repository (push implies pull); the UI uses them to offer reads to pullers and
   mutations only to pushers.
-- `size` is the sum of the compressed blob sizes referenced by the tag;
-  `uncompressed_size` sums `rootfs.diff_ids`-derived layer sizes.
-- `unique_size` counts blobs referenced by **only** this tag; `shared_size` is
-  `size - unique_size`.
+- `size` is the sum of the compressed blob sizes referenced by the tag.
+- `unique_size` is the storage owned by the entity — every blob for which its
+  earliest referencing tag (by `tags.created_at`) lives here; `shared_size` is
+  `size - unique_size`, bytes an earlier tag already owned. Reuse between tags
+  of the same repository does not count as shared.
 - Deleting an image or tag runs reference-counted cleanup: blobs with no remaining
   references and no remaining repository links are deleted from disk immediately.
 - `GET /tags` powers the "all my tags by size" page. `sort=unique_size` ranks by
-  storage that would actually be reclaimed.
+  the storage each tag owns.
 
 ---
 

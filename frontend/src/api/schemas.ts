@@ -233,7 +233,6 @@ export const layerInfoSchema = v.object({
   digest: v.string(),
   media_type: v.string(),
   size: v.number(),
-  uncompressed_size: v.number(),
   role: layerRoleSchema,
 })
 export type LayerInfo = v.InferOutput<typeof layerInfoSchema>
@@ -247,7 +246,6 @@ export const tagDetailSchema = v.object({
   platforms: v.array(platformSchema),
   pull_count: v.number(),
   updated_at: timestampSchema,
-  uncompressed_size: v.number(),
   manifest: jsonObjectSchema,
   config: v.nullable(jsonObjectSchema),
   layers: v.array(layerInfoSchema),

@@ -103,22 +103,31 @@ WITH RECURSIVE reach(tag_id, manifest_id) AS (
     SELECT DISTINCT r.tag_id, mb.blob_id
     FROM reach r JOIN manifest_blobs mb ON mb.manifest_id = r.manifest_id
 )
-SELECT tb.tag_id, t.repository_id, tb.blob_id, b.size
+SELECT tb.tag_id, t.repository_id, tb.blob_id, b.size, t.created_at
 FROM tag_blob tb JOIN tags t ON t.id = tb.tag_id JOIN blobs b ON b.id = tb.blob_id;
 ```
 
 ### Size accounting
 
+Every reachable blob has exactly one **owner**: the tag that first referenced it,
+i.e. the referencing tag with the earliest `tags.created_at` (ties break on the
+lower tag id). Ownership is global and stable — `set_tag` never rewrites
+`created_at` when a tag is moved.
+
 - `total_size` for a tag is the sum of `blobs.size` over its reachable set
   (config + layers; for an index, the union of its children's reachable blobs).
-- `unique_size` counts only blobs referenced by **exactly one tag anywhere in the
-  registry** (global uniqueness). `shared_size = total_size - unique_size`.
+- `unique_size` for a tag is the storage it owns (the blobs it introduced);
+  `shared_size = total_size - unique_size` is what an earlier tag already owned.
 - Repository totals are computed over the union of its tags' reachable blobs;
-  repository `unique_size` is the sum of globally-exclusive blobs.
+  repository `unique_size` is the sum of blobs whose owner tag lives in that
+  repository. A blob owned by another repository counts as shared here.
+- Globally, `unique_size` sums one copy of every owned blob (the actual distinct
+  bytes on disk) and `shared_size` sums the duplicate copies held by later
+  repositories.
 
-Global uniqueness is deliberate: it is the storage that deleting a single tag
-would actually reclaim, regardless of whether the blob is shared with a tag in a
-different repository.
+This means a layer reused between two tags of the **same** image is owned by the
+earlier tag and is not "shared storage" for that image; only reuse across
+different repositories counts as sharing.
 
 ---
 

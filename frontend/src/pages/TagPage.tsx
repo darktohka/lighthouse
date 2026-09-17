@@ -9,7 +9,7 @@ import { JsonViewer } from '../components/json-viewer'
 import { PageHeader } from '../components/PageHeader'
 import { PlatformBadges } from '../components/PlatformBadge'
 import { Box } from '../components/primitives/Box'
-import { LinkButton } from '../components/primitives/Button'
+import { Button, LinkButton } from '../components/primitives/Button'
 import { Label } from '../components/primitives/Label'
 import {
   EmptyState,
@@ -37,9 +37,9 @@ export type TagPageProps = {
 type TabId = 'manifest' | 'config' | 'layers'
 
 const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
+  { id: 'layers', label: 'Layers' },
   { id: 'manifest', label: 'Manifest' },
   { id: 'config', label: 'Config' },
-  { id: 'layers', label: 'Layers' },
 ]
 
 function tabClass(active: boolean): string {
@@ -52,7 +52,7 @@ function tabClass(active: boolean): string {
 }
 
 export function TagPage({ namespace, repo, tag }: TagPageProps) {
-  const [tab, setTab] = useState<TabId>('manifest')
+  const [tab, setTab] = useState<TabId>('layers')
   const state = useAsync(
     (signal) => repositoriesApi.tag(namespace, repo, tag, { signal }),
     `tag:${namespace}:${repo}:${tag}`,
@@ -94,25 +94,18 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
       render: (layer) => formatBytes(layer.size),
     },
     {
-      key: 'uncompressed_size',
-      header: 'Uncompressed',
-      align: 'right',
-      render: (layer) => formatBytes(layer.uncompressed_size),
-    },
-    {
       key: 'actions',
       header: <span className="sr-only">Actions</span>,
       align: 'right',
       render: (layer) =>
-        layer.role === 'layer' ? (
-          <LinkButton
-            size="sm"
-            to={layerRoute(namespace, repo, layer.digest)}
-          >
+        layer.role === 'config' ? (
+          <Button size="sm" onClick={() => setTab('config')}>
+            Browse
+          </Button>
+        ) : (
+          <LinkButton size="sm" to={layerRoute(namespace, repo, layer.digest)}>
             Browse
           </LinkButton>
-        ) : (
-          <span className="text-xs text-muted">—</span>
         ),
     },
   ]
@@ -159,17 +152,11 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
 
       {detail ? (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             <Box className="p-3">
               <p className="text-xs text-muted">Compressed</p>
               <p className="mt-1 text-lg font-semibold">
                 {formatBytes(detail.compressed_size)}
-              </p>
-            </Box>
-            <Box className="p-3">
-              <p className="text-xs text-muted">Uncompressed</p>
-              <p className="mt-1 text-lg font-semibold">
-                {formatBytes(detail.uncompressed_size)}
               </p>
             </Box>
             <Box className="p-3">
