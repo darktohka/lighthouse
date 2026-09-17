@@ -63,9 +63,9 @@ zstd = "0.14.0"
 http-body-util = "0.1.5"
 tempfile = "3"
 
-[profile.release]
+[profile."release-lto"]
+inherits = "release"
 opt-level = "z"
-lto = "fat"
+lto = "thin"
 codegen-units = 1
-strip = "symbols"
-panic = "unwind"
+strip = true

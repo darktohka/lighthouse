@@ -72,7 +72,7 @@ WORKDIR /app
 COPY Backend/Cargo.toml Backend/Cargo.lock ./
 RUN mkdir -p src \
  && echo 'fn main() {}' > src/main.rs \
- && cargo build --release --target "$(cat /tmp/rust-target)" \
+ && cargo build --profile release-lto --target "$(cat /tmp/rust-target)" \
  && rm -rf src
 
 # Real sources plus migrations: sqlx::migrate!("./migrations") embeds these at
@@ -83,9 +83,9 @@ COPY Backend/migrations ./migrations
 # COPY preserves the source mtimes, which can be older than the throwaway
 # binary's artifacts — cargo would then wrongly consider the crate fresh. Drop
 # the package's artifacts so the real server is always recompiled.
-RUN cargo clean -p lighthouse-registry --release --target "$(cat /tmp/rust-target)" \
- && cargo build --release --target "$(cat /tmp/rust-target)" \
- && cp "target/$(cat /tmp/rust-target)/release/registry" /app/registry
+RUN cargo clean -p lighthouse-registry --profile release-lto --target "$(cat /tmp/rust-target)" \
+ && cargo build --profile release-lto --target "$(cat /tmp/rust-target)" \
+ && cp "target/$(cat /tmp/rust-target)/release-lto/registry" /app/registry
 
 # Tiny static HTTP probe: the final image has no shell or curl and the server
 # binary has no health subcommand, so /healthz is checked from this helper.
