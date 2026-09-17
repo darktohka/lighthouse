@@ -88,7 +88,13 @@ async fn push_blob(state: &AppState, repo_id: i64, bytes: &[u8], media_type: &st
     digest
 }
 
-fn image_manifest(config: &str, config_size: i64, layer: &str, layer_size: i64) -> Vec<u8> {
+fn image_manifest(
+    config: &str,
+    config_size: i64,
+    layer: &str,
+    layer_size: i64,
+    layer_media_type: &str,
+) -> Vec<u8> {
     serde_json::json!({
         "schemaVersion": 2,
         "mediaType": media_types::OCI_IMAGE_MANIFEST,
@@ -98,7 +104,7 @@ fn image_manifest(config: &str, config_size: i64, layer: &str, layer_size: i64) 
             "size": config_size,
         },
         "layers": [{
-            "mediaType": media_types::OCI_IMAGE_LAYER_GZIP,
+            "mediaType": layer_media_type,
             "digest": layer,
             "size": layer_size,
         }],
@@ -114,18 +120,41 @@ async fn seed_image(
     config: &[u8],
     layer: &[u8],
 ) -> (Digest, Digest) {
+    seed_image_typed(
+        state,
+        repo_name,
+        tag,
+        config,
+        layer,
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    )
+    .await
+}
+
+/// Seeds an image whose single layer is declared with `layer_media_type`. The
+/// bytes are stored as given, so the declared type can intentionally disagree
+/// with the archive's actual compression.
+async fn seed_image_typed(
+    state: &AppState,
+    repo_name: &str,
+    tag: &str,
+    config: &[u8],
+    layer: &[u8],
+    layer_media_type: &str,
+) -> (Digest, Digest) {
     let repo = state
         .registry
         .ensure_repository(repo_name)
         .await
         .expect("repository");
     let config_digest = push_blob(state, repo.id, config, media_types::OCI_IMAGE_CONFIG).await;
-    let layer_digest = push_blob(state, repo.id, layer, media_types::OCI_IMAGE_LAYER_GZIP).await;
+    let layer_digest = push_blob(state, repo.id, layer, layer_media_type).await;
     let manifest = image_manifest(
         &config_digest.to_string(),
         config.len() as i64,
         &layer_digest.to_string(),
         layer.len() as i64,
+        layer_media_type,
     );
     let manifest_digest = Digest::from_bytes(&manifest);
     state
@@ -178,6 +207,28 @@ fn layer_archive() -> Vec<u8> {
         builder.finish().expect("finish tar");
     }
     encoder.finish().expect("finish gzip")
+}
+
+/// A real uncompressed tar, mirroring the entries of [`layer_archive`] but with
+/// no compression layer.
+fn plain_layer_archive() -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    add_file(&mut builder, "etc/config.txt", b"hello layer\n", 0o644);
+    add_file(&mut builder, "usr/bin/run", b"#!/bin/sh\n", 0o755);
+    builder.finish().expect("finish tar");
+    builder.into_inner().expect("tar bytes")
+}
+
+/// A real zstd-compressed tar with the same layout as [`plain_layer_archive`].
+fn zstd_layer_archive() -> Vec<u8> {
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("zstd encoder");
+    {
+        let mut builder = tar::Builder::new(&mut encoder);
+        add_file(&mut builder, "etc/config.txt", b"hello layer\n", 0o644);
+        add_file(&mut builder, "usr/bin/run", b"#!/bin/sh\n", 0o755);
+        builder.finish().expect("finish tar");
+    }
+    encoder.finish().expect("finish zstd")
 }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +915,104 @@ async fn layer_tree_serves_from_cache_and_invalidation_forces_a_rescan() {
     assert_eq!(state.layer_cache.len(), 0);
     let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn layer_browsing_sniffs_plain_tar_declared_as_zstd() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let layer = plain_layer_archive();
+    let (_, layer_digest) = seed_image_typed(
+        &state,
+        "alice/img",
+        "latest",
+        b"config",
+        &layer,
+        media_types::OCI_IMAGE_LAYER_ZSTD,
+    )
+    .await;
+    let digest = layer_digest.to_string();
+    let tree_uri = format!("/api/repositories/alice/img/layers/{digest}/tree");
+    let file_uri = format!("/api/repositories/alice/img/layers/{digest}/file");
+
+    // The declared media type claims zstd, but the content is a plain tar;
+    // sniffing the magic bytes must still browse it.
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a plain tar declared as zstd must not fail"
+    );
+    let tree = body_json(response).await;
+    let names: Vec<String> = tree
+        .as_array()
+        .expect("tree")
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.contains(&"etc".to_string()));
+    assert!(names.contains(&"usr".to_string()));
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{file_uri}?path=etc/config.txt"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let content = body_bytes(response).await;
+    assert_eq!(content, b"hello layer\n");
+}
+
+#[tokio::test]
+async fn layer_browsing_sniffs_zstd_declared_as_plain_tar() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let layer = zstd_layer_archive();
+    let (_, layer_digest) = seed_image_typed(
+        &state,
+        "alice/img",
+        "latest",
+        b"config",
+        &layer,
+        media_types::OCI_IMAGE_LAYER,
+    )
+    .await;
+    let digest = layer_digest.to_string();
+    let tree_uri = format!("/api/repositories/alice/img/layers/{digest}/tree");
+    let file_uri = format!("/api/repositories/alice/img/layers/{digest}/file");
+
+    // The declared media type claims an uncompressed tar, but the content is
+    // zstd-compressed; detection is content-based, not media-type-based.
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a zstd tar declared as plain must not fail"
+    );
+    let tree = body_json(response).await;
+    let names: Vec<String> = tree
+        .as_array()
+        .expect("tree")
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.contains(&"etc".to_string()));
+    assert!(names.contains(&"usr".to_string()));
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{file_uri}?path=etc/config.txt"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let content = body_bytes(response).await;
+    assert_eq!(content, b"hello layer\n");
 }
 
 // ---------------------------------------------------------------------------

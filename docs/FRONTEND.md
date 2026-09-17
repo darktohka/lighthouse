@@ -177,8 +177,10 @@ names (`alice/more/complicated/app`) and digests (`sha256:…`) survive intact.
 | `/login`, `/register` | Auth |
 | `/verify-email`, `/forgot-password`, `/reset-password` | Auth flows |
 | `/dashboard` | Dashboard (auth-gated by `RequireAuth`) |
-| `/:namespace` | Namespace repositories |
-| `/:namespace/*` | Repository, tag or layer (dispatched) |
+| `/:namespace` | Namespace repositories; redirects (replace) to `/users/{username}` for user accounts — including private personal namespaces, where a 404 from the namespace endpoint falls back to the public profile endpoint to confirm the account |
+| `/:namespace/*` | Repository, tag or layer (dispatched) — works for user, workspace and non-namespace repository paths |
+| `/users/:username` | Profile; hosts the personal namespace's description + visibility settings when `is_self` |
+| `/namespaces/:name/settings` | Workspace settings (general, members, delegations); redirects to `/users/{username}` for user accounts |
 
 Repository names are variable-length, so a single `/:namespace/*` splat is
 parsed by `parseRepositoryRoute` into one of three views: repository, `…/tags/:tag`
@@ -224,6 +226,19 @@ a 404 page.
 Auth uses `pow-captcha-react`; `GET /api/auth/captcha` decides whether the
 widget is rendered (a `204` means captcha is disabled and nothing is shown).
 
+Repository lists are sortable by name, size or last update (ascending or
+descending) and paginated. The profile (`UserRepositories`) and workspace
+(`NamespacePage`) tables sort **server-side** through
+`GET /api/namespaces/{name}/repositories?sort=name|size|updated&order=asc|desc`
+(default `updated`/`desc`), resetting to page 1 when the sort changes; their
+headers use the shared `TableSortHeader` / `TableColumn.sortDirection` pair so
+`aria-sort` tracks the active column. The dashboard ("Your repositories") and
+Explore ("Public repositories") payloads arrive whole, so they sort and paginate
+**client-side** with `src/lib/repositorySort.ts` (dashboard 25 per page, Explore
+12 per page, both reusing the same default directions). Explore has no table
+headers, so it exposes a labelled `<select>` plus an ascending/descending toggle
+and re-sorts/re-pages the filtered result after the search filter is applied.
+
 ## 8. Deferred to the next wave (and contract notes)
 
 - **Analytics page** — `recharts` is installed but unused; the
@@ -266,7 +281,7 @@ navigation and account menu gained entries, and new widgets live under
 |---|---|---|
 | `/analytics` | `AnalyticsPage` | `recharts` disk usage, largest tags, pulls over time and top repositories; headline counters; namespace filter |
 | `/tags` | `TagCleanupPage` | sortable total/unique size, shared-storage bar, multi-select batch delete |
-| `/users/:username` | `ProfilePage` | follow/unfollow, paginated followers/following, public repositories, yearly contribution heatmap |
+| `/users/:username` | `ProfilePage` | follow/unfollow, paginated followers/following, access-filtered repositories, yearly contribution heatmap; for the signed-in user it also hosts the personal namespace's description + public visibility settings (`NamespaceGeneralPanel`) |
 | `/settings` | `SettingsPage` | profile, profile picture (Libravatar), sessions, login history, password, security (2FA), service accounts, app passwords |
 | `/new` | `WorkspaceCreatePage` | live reserved/taken workspace-name validation |
 | `/namespaces/:name/settings` | `NamespaceSettingsPage` | general settings, members, delegations |

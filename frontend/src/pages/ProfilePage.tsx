@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 
-import { users as usersApi } from '../api/endpoints'
+import { namespaces as namespacesApi, users as usersApi } from '../api/endpoints'
 import { FollowPanel } from '../components/FollowPanel'
 import { Heatmap } from '../components/Heatmap'
+import { NamespaceGeneralPanel } from '../components/NamespaceGeneralPanel'
 import { ProfileHeader } from '../components/ProfileHeader'
 import { UserRepositories } from '../components/UserRepositories'
 import { Box, BoxHeader } from '../components/primitives/Box'
@@ -31,6 +32,13 @@ export function ProfilePage() {
         ? usersApi.heatmap(username, year, { signal })
         : Promise.resolve(null),
     `heatmap:${username}:${year}:${reloadToken}`,
+  )
+  const namespaceState = useAsync(
+    (signal) =>
+      profileState.data?.is_self && profileState.data.namespace
+        ? namespacesApi.detail(profileState.data.namespace, { signal })
+        : Promise.resolve(null),
+    `profile-namespace:${profileState.data?.namespace ?? 'none'}`,
   )
 
   if (username.length === 0) return <NotFoundPage />
@@ -76,7 +84,7 @@ export function ProfilePage() {
               id="profile-repositories"
               className="mb-2 text-base font-semibold"
             >
-              Public repositories
+              Repositories
             </h2>
             <UserRepositories
               namespace={profile.namespace}
@@ -90,6 +98,33 @@ export function ProfilePage() {
             </h2>
             <FollowPanel username={username} reloadToken={reloadToken} />
           </section>
+
+          {profile.is_self && profile.namespace ? (
+            <section aria-labelledby="profile-namespace-settings">
+              <h2
+                id="profile-namespace-settings"
+                className="mb-2 text-base font-semibold"
+              >
+                Namespace settings
+              </h2>
+              {namespaceState.loading && !namespaceState.data ? (
+                <LoadingState label="Loading namespace settings…" />
+              ) : null}
+              {namespaceState.error ? (
+                <ErrorState
+                  error={namespaceState.error}
+                  onRetry={namespaceState.reload}
+                />
+              ) : null}
+              {namespaceState.data ? (
+                <NamespaceGeneralPanel
+                  namespace={namespaceState.data}
+                  canManage
+                  onChanged={namespaceState.reload}
+                />
+              ) : null}
+            </section>
+          ) : null}
         </>
       ) : null}
     </div>

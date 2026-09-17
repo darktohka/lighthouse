@@ -83,14 +83,6 @@ export function AvatarMenu() {
           </Link>
           <Link
             role="menuitem"
-            to={`/${encodeURIComponent(user.username)}`}
-            onClick={() => setOpen(false)}
-            className={menuItemClass}
-          >
-            Your repositories
-          </Link>
-          <Link
-            role="menuitem"
             to={`/users/${encodeURIComponent(user.username)}`}
             onClick={() => setOpen(false)}
             className={menuItemClass}

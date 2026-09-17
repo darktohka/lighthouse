@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 
 import { grants, namespaces as namespacesApi, permissions } from '../api/endpoints'
 import { DelegationsPanel } from '../components/DelegationsPanel'
@@ -45,6 +45,10 @@ export function NamespaceSettingsPage() {
   const canManage = Boolean(
     detail && user && detail.owner?.username === user.username,
   )
+
+  if (detail?.kind === 'user') {
+    return <Navigate to={`/users/${encodeURIComponent(name)}`} replace />
+  }
 
   return (
     <div className="space-y-4">

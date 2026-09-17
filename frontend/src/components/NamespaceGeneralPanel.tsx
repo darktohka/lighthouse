@@ -14,7 +14,7 @@ export type NamespaceGeneralPanelProps = {
   namespace: Namespace
   canManage: boolean
   onChanged: () => void
-  onDeleted: () => void
+  onDeleted?: () => void
 }
 
 export function NamespaceGeneralPanel({
@@ -30,6 +30,10 @@ export function NamespaceGeneralPanel({
   const [saved, setSaved] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
+  const isWorkspace = namespace.kind === 'workspace'
+  const subject = isWorkspace ? 'Workspace' : 'Namespace'
+  const subjectLower = isWorkspace ? 'workspace' : 'namespace'
+
   const save = () => {
     setActionError(null)
     setSaved(null)
@@ -39,13 +43,13 @@ export function NamespaceGeneralPanel({
       .then(
         () => {
           setSaving(false)
-          setSaved('Workspace settings saved.')
+          setSaved(`${subject} settings saved.`)
           onChanged()
         },
         (error: unknown) => {
           setSaving(false)
           setActionError(
-            isApiError(error) ? error.message : 'The workspace could not be saved.',
+            isApiError(error) ? error.message : `The ${subjectLower} could not be saved.`,
           )
         },
       )
@@ -57,12 +61,12 @@ export function NamespaceGeneralPanel({
     void namespacesApi.remove(namespace.name).then(
       () => {
         setDeleting(false)
-        onDeleted()
+        onDeleted?.()
       },
       (error: unknown) => {
         setDeleting(false)
         setActionError(
-          isApiError(error) ? error.message : 'The workspace could not be deleted.',
+          isApiError(error) ? error.message : `The ${subjectLower} could not be deleted.`,
         )
       },
     )
@@ -92,11 +96,19 @@ export function NamespaceGeneralPanel({
                 label="Description"
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
-                hint="Shown on the workspace page and in Explore."
+                hint={
+                  isWorkspace
+                    ? 'Shown on the workspace page and in Explore.'
+                    : 'Shown in Explore.'
+                }
               />
               <SwitchField
-                label="Public workspace"
-                hint="Public workspaces list their repositories in Explore."
+                label={`Public ${subjectLower}`}
+                hint={
+                  isWorkspace
+                    ? 'Public workspaces list their repositories in Explore.'
+                    : 'Public namespaces list their repositories in Explore.'
+                }
                 checked={isPublic}
                 onCheckedChange={setIsPublic}
               />
@@ -106,7 +118,7 @@ export function NamespaceGeneralPanel({
             </>
           ) : (
             <p className="text-sm text-muted">
-              Only the workspace owner can change these settings.
+              Only the {subjectLower} owner can change these settings.
             </p>
           )}
         </BoxBody>

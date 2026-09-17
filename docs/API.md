@@ -100,7 +100,7 @@ returns `409 conflict` (`namespace_taken`). Reserved first segments
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/namespaces/{name}/repositories` | optional | list images in a namespace |
+| GET | `/namespaces/{name}/repositories?sort=updated\|size\|name&order=desc\|asc` | optional | list images in a namespace |
 | GET | `/repositories/{namespace}/{*repo}` | optional | image detail |
 | PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility |
 | DELETE | `/repositories/{namespace}/{*repo}` | required | delete the image and all its tags |
@@ -152,6 +152,14 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   references and no remaining repository links are deleted from disk immediately.
 - `GET /tags` powers the "all my tags by size" page. `sort=unique_size` ranks by
   the storage each tag owns.
+- `GET /namespaces/{name}/repositories` is paginated (`page`, `per_page`,
+  defaults `1` / `25`) and sorted server-side. `sort` is `name`
+  (case-insensitive path), `size` or `updated` (default `updated`); `order` is
+  `asc` or `desc` (default `desc`). `order` applies to the primary key only;
+  ties always break on `path` ascending, so the default is `updated_at` desc
+  with `path` asc. Invalid `sort`/`order` values return `400 bad_request`. The
+  response keeps the `{items, total, page, per_page}` envelope of
+  `RepositorySummary`, filtered to the repositories the caller may pull.
 
 ---
 

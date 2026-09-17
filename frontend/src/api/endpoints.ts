@@ -65,6 +65,7 @@ import {
   repositoryApiPath,
   tagApiPath,
 } from '../lib/paths'
+import type { RepositoryOrder, RepositorySort } from '../lib/repositorySort'
 
 const namespacePageSchema = pageSchema(namespaceSchema)
 const repositoryPageSchema = pageSchema(repositorySummarySchema)
@@ -329,9 +330,20 @@ export const namespaces = {
 // ---------------------------------------------------------------------------
 
 export const repositories = {
-  list(namespace: string, page = 1, perPage = 25, options?: RequestOptions) {
+  list(
+    namespace: string,
+    page = 1,
+    perPage = 25,
+    params?: { sort?: RepositorySort; order?: RepositoryOrder },
+    options?: RequestOptions,
+  ) {
     return api.get(
-      `${namespaceApiPath(namespace)}/repositories${buildQuery({ page, per_page: perPage })}`,
+      `${namespaceApiPath(namespace)}/repositories${buildQuery({
+        page,
+        per_page: perPage,
+        sort: params?.sort,
+        order: params?.order,
+      })}`,
       repositoryPageSchema,
       options,
     )

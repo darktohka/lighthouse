@@ -1,7 +1,9 @@
 //! Manifest / config JSON and the layer filesystem browser.
 //!
-//! Layer archives are decompressed transparently based on the blob media type
-//! (`tar`, `tar+gzip`, `tar+zstd`). Nothing is ever extracted to disk: the tar
+//! Layer archives are decompressed transparently by sniffing the blob's leading
+//! magic bytes (gzip, zstd, otherwise a plain tar); the stored media type is
+//! client metadata and is not trusted for decompression. Nothing is ever
+//! extracted to disk: the tar
 //! is read as an in-memory stream in a blocking task, with strict caps on the
 //! number of entries, decompressed bytes and the size of a single browsed file.
 //! Requested paths are sanitized (no absolute paths, no `..`, no NUL, no
@@ -12,7 +14,7 @@
 //! decompression cost.
 
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use axum::Json;
@@ -169,12 +171,37 @@ enum Compression {
     Zstd,
 }
 
-fn compression_for(media_type: Option<&str>) -> Compression {
-    let media_type = media_type.unwrap_or("").to_ascii_lowercase();
-    if media_type.contains("zstd") {
-        Compression::Zstd
-    } else if media_type.contains("gzip") {
+/// Selects the decompressor from the archive's leading magic bytes rather than
+/// its media type: the media type is untrusted client metadata, while the blob
+/// content is content-addressed and therefore authoritative. The file is
+/// rewound afterwards because both gzip and zstd decoders read from the current
+/// position.
+fn compression_for(file: &mut std::fs::File) -> io::Result<Compression> {
+    let mut magic = [0u8; 4];
+    let mut filled = 0usize;
+    while filled < magic.len() {
+        match file.read(&mut magic[filled..])? {
+            0 => break,
+            read => filled += read,
+        }
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(classify_magic(&magic[..filled]))
+}
+
+fn classify_magic(magic: &[u8]) -> Compression {
+    if magic.starts_with(&[0x1F, 0x8B]) {
         Compression::Gzip
+    } else if magic.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        Compression::Zstd
+    } else if magic.len() >= 4
+        && (0x50..=0x5F).contains(&magic[0])
+        && magic[1] == 0x2A
+        && magic[2] == 0x4D
+        && magic[3] == 0x18
+    {
+        // zstd skippable frame; the decoder skips it and reads the real frame.
+        Compression::Zstd
     } else {
         Compression::Plain
     }
@@ -206,8 +233,8 @@ fn download_filename(digest: &Digest, media_type: Option<&str>) -> String {
     )
 }
 
-fn decompressed(file: std::fs::File, media_type: Option<&str>) -> ApiResult<Box<dyn Read + Send>> {
-    match compression_for(media_type) {
+fn decompressed(mut file: std::fs::File) -> ApiResult<Box<dyn Read + Send>> {
+    match compression_for(&mut file).map_err(map_io)? {
         Compression::Plain => Ok(Box::new(file)),
         Compression::Gzip => Ok(Box::new(flate2::read::GzDecoder::new(file))),
         Compression::Zstd => {
@@ -813,7 +840,7 @@ pub async fn layer_tree(
     digest: String,
     path: Option<String>,
 ) -> ApiResult<Response> {
-    let (_repository, blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
+    let (_repository, _blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
     let path = sanitize_request_path(path.as_deref().unwrap_or_default())?;
 
     let index = match state.layer_cache.get(&parsed) {
@@ -821,11 +848,10 @@ pub async fn layer_tree(
         None => {
             let file = open_blob(&state, &parsed).await?;
             let std_file = file.into_std().await;
-            let media_type = blob.media_type.clone();
             state
                 .layer_cache
                 .get_or_build(&parsed, move || {
-                    let reader = decompressed(std_file, media_type.as_deref())?;
+                    let reader = decompressed(std_file)?;
                     let merged = merge_entries(reader)?;
                     Ok(Arc::new(LayerIndex::from_entries(merged)))
                 })
@@ -853,13 +879,12 @@ pub async fn layer_file(
         return Err(ApiError::bad_request("path is required"));
     }
 
-    let (_repository, blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
+    let (_repository, _blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
     let file = open_blob(&state, &parsed).await?;
     let std_file = file.into_std().await;
-    let media_type = blob.media_type.clone();
 
     let (content, content_type) = run_blocking(move || {
-        let reader = decompressed(std_file, media_type.as_deref())?;
+        let reader = decompressed(std_file)?;
         find_file(reader, &target)
     })
     .await?;

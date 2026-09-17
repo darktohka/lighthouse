@@ -1,22 +1,32 @@
 import { RepoIcon } from '@primer/octicons-react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { dashboard as dashboardApi } from '../api/endpoints'
 import type { Dashboard, RepositorySummary } from '../api/schemas'
 import { ActivityTimeline } from '../components/ActivityTimeline'
 import { PageHeader } from '../components/PageHeader'
+import { Pagination } from '../components/Pagination'
 import { Box, BoxHeader } from '../components/primitives/Box'
 import {
   EmptyState,
   ErrorState,
   LoadingState,
 } from '../components/primitives/StateViews'
-import { Table, type TableColumn } from '../components/primitives/Table'
+import { Table, TableSortHeader, type TableColumn } from '../components/primitives/Table'
 import { VisibilityLabel } from '../components/VisibilityLabel'
 import { useAuth } from '../lib/auth-context'
 import { formatBytes, formatDateTime, formatNumber, formatRelativeTime } from '../lib/format'
 import { repositoryRelativePath, repoRoute } from '../lib/paths'
+import {
+  compareRepositories,
+  nextRepositoryOrder,
+  type RepositoryOrder,
+  type RepositorySort,
+} from '../lib/repositorySort'
 import { useAsync } from '../lib/useAsync'
+
+const PER_PAGE = 25
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
@@ -29,10 +39,32 @@ function StatCard({ label, value }: { label: string; value: string }) {
 
 export function DashboardPage() {
   const { user } = useAuth()
+  const [sort, setSort] = useState<RepositorySort>('updated')
+  const [order, setOrder] = useState<RepositoryOrder>('desc')
+  const [page, setPage] = useState(1)
   const { data, error, loading, reload } = useAsync<Dashboard>(
     (signal) => dashboardApi.load({ signal }),
     'dashboard',
   )
+
+  const sortedRepositories = useMemo(() => {
+    const repositories = data?.repositories ?? []
+    return [...repositories].sort((a, b) =>
+      compareRepositories(a, b, sort, order),
+    )
+  }, [data, sort, order])
+
+  const visibleRepositories = useMemo(
+    () =>
+      sortedRepositories.slice((page - 1) * PER_PAGE, page * PER_PAGE),
+    [sortedRepositories, page],
+  )
+
+  const changeSort = (next: RepositorySort) => {
+    setOrder((previous) => nextRepositoryOrder(sort, previous, next))
+    setSort(next)
+    setPage(1)
+  }
 
   const host = typeof window === 'undefined' ? '' : window.location.host
   const pushExample = user
@@ -42,7 +74,15 @@ export function DashboardPage() {
   const columns: TableColumn<RepositorySummary>[] = [
     {
       key: 'name',
-      header: 'Repository',
+      header: (
+        <TableSortHeader
+          label="Repository"
+          active={sort === 'name'}
+          direction={order}
+          onSort={() => changeSort('name')}
+        />
+      ),
+      sortDirection: sort === 'name' ? order : undefined,
       render: (repo) => (
         <Link
           to={repoRoute(repo.namespace, repositoryRelativePath(repo.namespace, repo))}
@@ -65,14 +105,30 @@ export function DashboardPage() {
     },
     {
       key: 'size',
-      header: 'Size',
+      header: (
+        <TableSortHeader
+          label="Size"
+          active={sort === 'size'}
+          direction={order}
+          onSort={() => changeSort('size')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'size' ? order : undefined,
       render: (repo) => formatBytes(repo.size),
     },
     {
       key: 'updated',
-      header: 'Updated',
+      header: (
+        <TableSortHeader
+          label="Updated"
+          active={sort === 'updated'}
+          direction={order}
+          onSort={() => changeSort('updated')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'updated' ? order : undefined,
       render: (repo) => (
         <span title={formatDateTime(repo.updated_at)}>
           {formatRelativeTime(repo.updated_at)}
@@ -131,12 +187,22 @@ export function DashboardPage() {
                   icon={<RepoIcon size={24} aria-hidden="true" />}
                 />
               ) : (
-                <Table
-                  columns={columns}
-                  rows={data.repositories}
-                  rowKey={(repo) => repo.id}
-                  caption="Your repositories"
-                />
+                <>
+                  <Table
+                    columns={columns}
+                    rows={visibleRepositories}
+                    rowKey={(repo) => repo.id}
+                    caption="Your repositories"
+                  />
+                  <div className="px-4">
+                    <Pagination
+                      page={page}
+                      perPage={PER_PAGE}
+                      total={sortedRepositories.length}
+                      onPageChange={setPage}
+                    />
+                  </div>
+                </>
               )}
             </Box>
           </section>

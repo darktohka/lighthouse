@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, Navigate, useParams } from 'react-router-dom'
 
+import { isApiError } from '../api/client'
 import {
   namespaces as namespacesApi,
   repositories as repositoriesApi,
+  users as usersApi,
 } from '../api/endpoints'
 import type { RepositorySummary } from '../api/schemas'
 import { NotFoundPage } from './NotFoundPage'
@@ -18,11 +20,16 @@ import {
   ErrorState,
   LoadingState,
 } from '../components/primitives/StateViews'
-import { Table, type TableColumn } from '../components/primitives/Table'
+import { Table, TableSortHeader, type TableColumn } from '../components/primitives/Table'
 import { VisibilityLabel } from '../components/VisibilityLabel'
 import { useAuth } from '../lib/auth-context'
 import { formatBytes, formatDateTime, formatRelativeTime } from '../lib/format'
 import { repositoryRelativePath, repoRoute } from '../lib/paths'
+import {
+  nextRepositoryOrder,
+  type RepositoryOrder,
+  type RepositorySort,
+} from '../lib/repositorySort'
 import { useAsync } from '../lib/useAsync'
 
 const PER_PAGE = 25
@@ -32,6 +39,8 @@ export function NamespacePage() {
   const namespace = params.namespace ?? ''
   const { user } = useAuth()
   const [page, setPage] = useState(1)
+  const [sort, setSort] = useState<RepositorySort>('updated')
+  const [order, setOrder] = useState<RepositoryOrder>('desc')
 
   const namespaceState = useAsync(
     (signal) => namespacesApi.detail(namespace, { signal }),
@@ -39,8 +48,36 @@ export function NamespacePage() {
   )
 
   const reposState = useAsync(
-    (signal) => repositoriesApi.list(namespace, page, PER_PAGE, { signal }),
-    `namespace-repos:${namespace}:${page}`,
+    (signal) =>
+      repositoriesApi.list(
+        namespace,
+        page,
+        PER_PAGE,
+        { sort, order },
+        { signal },
+      ),
+    `namespace-repos:${namespace}:${page}:${sort}:${order}`,
+  )
+
+  const changeSort = (next: RepositorySort) => {
+    setOrder((previous) => nextRepositoryOrder(sort, previous, next))
+    setSort(next)
+    setPage(1)
+  }
+
+  const namespaceError = namespaceState.error
+  const namespaceMissing =
+    isApiError(namespaceError) && namespaceError.status === 404
+
+  const accountState = useAsync(
+    (signal) =>
+      namespaceMissing && namespace.length > 0
+        ? usersApi.profile(namespace, { signal }).then(
+            () => true,
+            () => false,
+          )
+        : Promise.resolve(null),
+    `namespace-account:${namespace}:${namespaceMissing}`,
   )
 
   if (namespace.length === 0) return <NotFoundPage />
@@ -48,7 +85,15 @@ export function NamespacePage() {
   const columns: TableColumn<RepositorySummary>[] = [
     {
       key: 'name',
-      header: 'Repository',
+      header: (
+        <TableSortHeader
+          label="Repository"
+          active={sort === 'name'}
+          direction={order}
+          onSort={() => changeSort('name')}
+        />
+      ),
+      sortDirection: sort === 'name' ? order : undefined,
       render: (repo) => (
         <Link
           to={repoRoute(
@@ -74,14 +119,30 @@ export function NamespacePage() {
     },
     {
       key: 'size',
-      header: 'Size',
+      header: (
+        <TableSortHeader
+          label="Size"
+          active={sort === 'size'}
+          direction={order}
+          onSort={() => changeSort('size')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'size' ? order : undefined,
       render: (repo) => formatBytes(repo.size),
     },
     {
       key: 'updated',
-      header: 'Last updated',
+      header: (
+        <TableSortHeader
+          label="Last updated"
+          active={sort === 'updated'}
+          direction={order}
+          onSort={() => changeSort('updated')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'updated' ? order : undefined,
       render: (repo) => (
         <span title={formatDateTime(repo.updated_at)}>
           {formatRelativeTime(repo.updated_at)}
@@ -91,6 +152,13 @@ export function NamespacePage() {
   ]
 
   const detail = namespaceState.data
+
+  if (detail?.kind === 'user' || accountState.data === true) {
+    return <Navigate to={`/users/${encodeURIComponent(namespace)}`} replace />
+  }
+  if (namespaceMissing && accountState.data === false) {
+    return <NotFoundPage />
+  }
 
   return (
     <div className="space-y-4">
@@ -142,7 +210,10 @@ export function NamespacePage() {
       {namespaceState.loading && !detail ? (
         <LoadingState label="Loading namespace…" />
       ) : null}
-      {namespaceState.error ? (
+      {namespaceMissing && accountState.loading ? (
+        <LoadingState label="Looking up account…" />
+      ) : null}
+      {namespaceState.error && !namespaceMissing ? (
         <ErrorState
           error={namespaceState.error}
           onRetry={namespaceState.reload}

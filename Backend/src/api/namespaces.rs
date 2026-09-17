@@ -434,11 +434,25 @@ async fn remove_member(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// `?page=` / `?per_page=` plus the repository sort controls. axum permits only
+/// one `Query` extractor per handler, so pagination and ordering share a struct.
+#[derive(Debug, Deserialize)]
+struct RepositoryListQuery {
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default)]
+    per_page: Option<i64>,
+    #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    order: Option<String>,
+}
+
 async fn repositories_in_namespace(
     State(state): State<AppState>,
     auth: Auth,
     Path(name): Path<String>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<RepositoryListQuery>,
 ) -> ApiResult<Response> {
     let Some(namespace) = load_namespace(&state.db, &name).await? else {
         return Err(ApiError::not_found("namespace not found"));
@@ -447,15 +461,35 @@ async fn repositories_in_namespace(
         return Err(ApiError::not_found("namespace not found"));
     }
 
+    let sort = query.sort.as_deref().unwrap_or("updated");
+    if sort != "name" && sort != "size" && sort != "updated" {
+        return Err(ApiError::bad_request(
+            "sort must be `name`, `size` or `updated`",
+        ));
+    }
+    let order = query.order.as_deref().unwrap_or("desc");
+    if order != "asc" && order != "desc" {
+        return Err(ApiError::bad_request("order must be `asc` or `desc`"));
+    }
+    let ascending = order == "asc";
+
     let mut summaries =
         super::repositories::namespace_repository_summaries(&state, &auth.0, namespace.id).await?;
     summaries.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.name.cmp(&b.name))
+        let primary = match sort {
+            "name" => a.path.to_lowercase().cmp(&b.path.to_lowercase()),
+            "size" => a.size.cmp(&b.size),
+            _ => a.updated_at.cmp(&b.updated_at),
+        };
+        let primary = if ascending { primary } else { primary.reverse() };
+        primary.then_with(|| a.path.cmp(&b.path))
     });
 
-    let pagination = Pagination::from_query(&query);
+    let page = PageQuery {
+        page: query.page,
+        per_page: query.per_page,
+    };
+    let pagination = Pagination::from_query(&page);
     let total = summaries.len() as i64;
     let items = pagination.window(summaries);
     Ok(Json(pagination.envelope(items, total)).into_response())

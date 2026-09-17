@@ -6,11 +6,16 @@ import { repositories as repositoriesApi } from '../api/endpoints'
 import type { RepositorySummary } from '../api/schemas'
 import { formatBytes, formatRelativeTime } from '../lib/format'
 import { repositoryRelativePath, repoRoute } from '../lib/paths'
+import {
+  nextRepositoryOrder,
+  type RepositoryOrder,
+  type RepositorySort,
+} from '../lib/repositorySort'
 import { useAsync } from '../lib/useAsync'
 import { Pagination } from './Pagination'
 import { Box } from './primitives/Box'
 import { EmptyState, ErrorState, LoadingState } from './primitives/StateViews'
-import { Table, type TableColumn } from './primitives/Table'
+import { Table, TableSortHeader, type TableColumn } from './primitives/Table'
 import { VisibilityLabel } from './VisibilityLabel'
 
 const PER_PAGE = 25
@@ -22,19 +27,41 @@ export type UserRepositoriesProps = {
 
 export function UserRepositories({ namespace, reloadToken }: UserRepositoriesProps) {
   const [page, setPage] = useState(1)
+  const [sort, setSort] = useState<RepositorySort>('updated')
+  const [order, setOrder] = useState<RepositoryOrder>('desc')
 
   const state = useAsync(
     (signal) =>
       namespace
-        ? repositoriesApi.list(namespace, page, PER_PAGE, { signal })
+        ? repositoriesApi.list(
+            namespace,
+            page,
+            PER_PAGE,
+            { sort, order },
+            { signal },
+          )
         : Promise.resolve(null),
-    `user-repos:${namespace ?? 'none'}:${page}:${reloadToken}`,
+    `user-repos:${namespace ?? 'none'}:${page}:${sort}:${order}:${reloadToken}`,
   )
+
+  const changeSort = (next: RepositorySort) => {
+    setOrder((previous) => nextRepositoryOrder(sort, previous, next))
+    setSort(next)
+    setPage(1)
+  }
 
   const columns: TableColumn<RepositorySummary>[] = [
     {
       key: 'name',
-      header: 'Repository',
+      header: (
+        <TableSortHeader
+          label="Repository"
+          active={sort === 'name'}
+          direction={order}
+          onSort={() => changeSort('name')}
+        />
+      ),
+      sortDirection: sort === 'name' ? order : undefined,
       render: (repo) => (
         <Link
           to={repoRoute(repo.namespace, repositoryRelativePath(repo.namespace, repo))}
@@ -57,14 +84,30 @@ export function UserRepositories({ namespace, reloadToken }: UserRepositoriesPro
     },
     {
       key: 'size',
-      header: 'Size',
+      header: (
+        <TableSortHeader
+          label="Size"
+          active={sort === 'size'}
+          direction={order}
+          onSort={() => changeSort('size')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'size' ? order : undefined,
       render: (repo) => formatBytes(repo.size),
     },
     {
       key: 'updated',
-      header: 'Updated',
+      header: (
+        <TableSortHeader
+          label="Updated"
+          active={sort === 'updated'}
+          direction={order}
+          onSort={() => changeSort('updated')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'updated' ? order : undefined,
       render: (repo) => formatRelativeTime(repo.updated_at),
     },
   ]
@@ -72,14 +115,14 @@ export function UserRepositories({ namespace, reloadToken }: UserRepositoriesPro
   if (!namespace) {
     return (
       <EmptyState
-        title="No public repositories"
+        title="No repositories"
         description="This account does not have a namespace yet."
         icon={<RepoIcon size={24} aria-hidden="true" />}
       />
     )
   }
 
-  const publicRepos = (state.data?.items ?? []).filter((repo) => repo.is_public)
+  const repositories = state.data?.items ?? []
 
   return (
     <>
@@ -88,19 +131,19 @@ export function UserRepositories({ namespace, reloadToken }: UserRepositoriesPro
       ) : null}
       {state.error ? <ErrorState error={state.error} onRetry={state.reload} /> : null}
       {state.data ? (
-        publicRepos.length === 0 ? (
+        repositories.length === 0 ? (
           <EmptyState
-            title="No public repositories"
-            description="Repositories this user makes public will appear here."
+            title="No repositories"
+            description="Repositories the viewer can access will appear here."
             icon={<RepoIcon size={24} aria-hidden="true" />}
           />
         ) : (
           <Box>
             <Table
               columns={columns}
-              rows={publicRepos}
+              rows={repositories}
               rowKey={(repo) => repo.id}
-              caption={`Public repositories in ${namespace}`}
+              caption={`Repositories in ${namespace}`}
             />
             <div className="px-4">
               <Pagination

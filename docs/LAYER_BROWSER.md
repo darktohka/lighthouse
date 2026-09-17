@@ -42,19 +42,23 @@ extension derived from the media type (`tar.gz` for gzip, `tar.zst` for zstd,
 
 ## 2. Decompression selection
 
-A layer's compression is inferred from its stored media type:
+A layer's compression is detected from the archive's leading magic bytes, not
+from its declared media type:
 
-| Media type contains | Decompressor |
+| Leading magic bytes | Decompressor |
 |---|---|
-| `zstd` | `zstd::stream::read::Decoder` |
-| `gzip` | `flate2::read::GzDecoder` |
+| `28 B5 2F FD` (zstd) | `zstd::stream::read::Decoder` |
+| `1F 8B` (gzip) | `flate2::read::GzDecoder` |
 | anything else | none (plain `tar`) |
 
-This covers `application/vnd.oci.image.layer.v1.tar`,
-`...tar+gzip`, `...tar+zstd`, `application/vnd.docker.image.rootfs.diff.tar.gzip`
-and the foreign-layer variants. A wrong or missing media type is treated as a
-plain tar; if the bytes are not a valid tar the read fails cleanly with a `500`
-rather than leaking a panic.
+A zstd SKIPPABLE frame prefix (`50`–`5F 2A 4D 18`) is also recognized as zstd.
+The blob is content-addressed and its digest was verified over the raw bytes on
+push, so the content is authoritative; the stored media type is advisory only.
+It is still used to pick the `download` filename extension (§1) and to document
+what a client intended, but browsing no longer depends on it. A wrong or missing
+media type therefore no longer breaks browsing: a plain tar declared as zstd (or
+vice versa) is detected correctly, and if the bytes are not a valid tar the read
+fails cleanly with a `500` rather than leaking a panic.
 
 ---
 
