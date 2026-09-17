@@ -172,6 +172,7 @@ fn layer_archive() -> Vec<u8> {
         add_file(&mut builder, "var/.wh..wh..opq", b"", 0o644);
         add_file(&mut builder, "var/b.txt", b"new\n", 0o644);
         add_symlink(&mut builder, "usr/bin/link", "run");
+        add_symlink(&mut builder, "root-link", "usr");
         add_file(&mut builder, ".wh.top.txt", b"", 0o644);
         builder.finish().expect("finish tar");
     }
@@ -210,6 +211,8 @@ async fn repository_detail_tags_patch_and_delete() {
     assert_eq!(detail["path"], "more/complicated/app");
     assert_eq!(detail["tag_count"], 1);
     assert_eq!(detail["total_size"], detail["size"]);
+    assert_eq!(detail["can_pull"], true);
+    assert_eq!(detail["can_push"], true);
 
     let response = call(
         &app,
@@ -237,6 +240,8 @@ async fn repository_detail_tags_patch_and_delete() {
     let tag = body_json(response).await;
     assert!(tag["manifest"].is_object());
     assert!(tag["layers"].is_array());
+    assert_eq!(tag["can_pull"], true);
+    assert_eq!(tag["can_push"], true);
     assert!(
         tag["layers"]
             .as_array()
@@ -285,6 +290,81 @@ async fn repository_detail_tags_patch_and_delete() {
             .expect("find")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn detail_reports_effective_actor_access() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let bob = create_user(&state, "bob").await;
+    seed_image(&state, "alice/app", "v1", b"{\"cfg\":1}", b"layer-one").await;
+
+    let detail = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(detail["can_pull"], true);
+    assert_eq!(detail["can_push"], true);
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/repositories/alice/app/permissions",
+        Some(actor(&alice)),
+        Some(json!({ "subject_type": "user", "subject": "bob", "can_push": false })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let detail = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app",
+            Some(actor(&bob)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(detail["can_pull"], true);
+    assert_eq!(detail["can_push"], false);
+
+    let tag = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags/v1",
+            Some(actor(&bob)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(tag["can_pull"], true);
+    assert_eq!(tag["can_push"], false);
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        "/api/repositories/alice/app",
+        Some(actor(&alice)),
+        Some(json!({ "is_public": true })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let detail =
+        body_json(call(&app, Method::GET, "/api/repositories/alice/app", None, None).await).await;
+    assert_eq!(detail["can_pull"], true);
+    assert_eq!(detail["can_push"], false);
 }
 
 #[tokio::test]
@@ -486,6 +566,33 @@ async fn layer_tree_file_and_path_traversal_safety() {
     assert!(names.contains(&"usr".to_string()));
     assert!(!names.contains(&"top.txt".to_string()), "whiteout must hide top.txt");
 
+    let size_of = |entries: &serde_json::Value, name: &str| -> i64 {
+        entries
+            .as_array()
+            .expect("tree")
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .and_then(|entry| entry["size"].as_i64())
+            .unwrap_or(-1)
+    };
+    let entry_of = |entries: &serde_json::Value, name: &str| -> serde_json::Value {
+        entries
+            .as_array()
+            .expect("tree")
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .cloned()
+            .expect("entry present")
+    };
+    assert_eq!(size_of(&tree, "etc"), 12, "directory rolls up its file");
+    assert_eq!(size_of(&tree, "usr"), 10, "nested directory total");
+    assert_eq!(size_of(&tree, "var"), 4, "opaque dir keeps only surviving file");
+
+    let root_link = entry_of(&tree, "root-link");
+    assert_eq!(root_link["kind"], "symlink");
+    assert_eq!(root_link["link_kind"], "dir");
+    assert_eq!(root_link["link_resolved"], "usr");
+
     let response = call(
         &app,
         Method::GET,
@@ -517,6 +624,31 @@ async fn layer_tree_file_and_path_traversal_safety() {
         .map(|entry| entry["name"].as_str().unwrap_or_default().to_string())
         .collect();
     assert_eq!(var_names, vec!["b.txt".to_string()], "opaque dir hides a.txt");
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=usr"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let usr = body_json(response).await;
+    assert_eq!(size_of(&usr, "bin"), 10, "nested directory total");
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=usr/bin"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let usr_bin = body_json(response).await;
+    let link = entry_of(&usr_bin, "link");
+    assert_eq!(link["kind"], "symlink");
+    assert_eq!(link["link_kind"], "file");
+    assert_eq!(link["link_resolved"], "usr/bin/run");
 
     let response = call(
         &app,
@@ -580,6 +712,19 @@ async fn layer_tree_file_and_path_traversal_safety() {
     let download_uri = format!("/api/repositories/alice/img/layers/{digest}/download");
     let response = call(&app, Method::GET, &download_uri, Some(actor(&alice)), None).await;
     assert_eq!(response.status(), StatusCode::OK);
+    let disposition = response
+        .headers()
+        .get("content-disposition")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        disposition,
+        format!(
+            "attachment; filename=\"sha256-{}.tar.gz\"",
+            layer_digest.encoded()
+        )
+    );
     let downloaded = body_bytes(response).await;
     assert_eq!(downloaded, layer);
 }

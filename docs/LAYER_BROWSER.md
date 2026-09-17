@@ -23,10 +23,20 @@ part of the OCI module; this document covers the `/api` browsing endpoints.
 | GET | `/api/blobs/{digest}/json` | A blob parsed as JSON (config blobs). |
 
 `tree` returns `[{ name, path, kind: "file"|"dir"|"symlink", size, mode,
-link_target }]`; `mode` is the raw tar mode (e.g. `420` for `0644`). `file`
-returns the entry bytes with a MIME type guessed from the path via
-`mime_guess` (falling back to `application/octet-stream`). `download` streams the
-original archive unchanged.
+link_target, link_resolved, link_kind }]`; `mode` is the raw tar mode (e.g. `420`
+for `0644`). `size` is the uncompressed byte count for a file or symlink, and for
+a directory the recursive total of every sized descendant, computed once when the
+index is built (§6). For a symlink, `link_resolved` is the normalized layer path
+the link points at — following symlink chains, with `.`/`..` folded and `..` never
+escaping the layer root — and `link_kind` is the resolved entry's kind (`file` or
+`dir`); both are `null` when the link is dangling, cyclic, or escapes the layer,
+and are `null` for every non-symlink entry. `file` returns the entry bytes with a
+MIME type guessed from the path via `mime_guess` (falling back to
+`application/octet-stream`). `download` streams the original archive unchanged,
+with a `Content-Disposition: attachment` header whose filename is
+`<algorithm>-<encoded>.<ext>` — the layer digest with `:` replaced by `-`, plus an
+extension derived from the media type (`tar.gz` for gzip, `tar.zst` for zstd,
+`tar` for a plain tar, and `bin` when the media type is not a tar).
 
 ---
 
@@ -93,7 +103,8 @@ Every requested and archive path is sanitized before use:
 - Archive entries whose paths are absolute or contain `..` are skipped entirely.
 - `file` refuses to follow symlinks (`400`), so a symlink can never be used to
   escape the layer; `tree` reports symlinks (`kind: "symlink"` with
-  `link_target`) but never follows them.
+  `link_target`) and additionally resolves each link to its normalized target as
+  metadata (`link_resolved`/`link_kind`), but never reads through it.
 - Entry types other than regular files/directories/symlinks (devices, FIFOs) are
   not browsed as files.
 
@@ -130,6 +141,12 @@ A tar stream is sequential and has no central directory, so building the merged
 path map means decompressing the whole archive. `tree` memoizes that map per
 layer digest in `src/layer_cache.rs`: only the first request for a digest pays
 the scan, and every later directory listing of that layer is served from memory.
+
+Recursive directory sizes are folded into the cached index at the same time the
+map is merged: every sized entry is added to each of its ancestor directories, so
+a directory's total is one lookup rather than a re-walk. Those totals are
+charged to the index's estimated weight, so they fall under the same LRU and TTL
+bounds as the map itself.
 
 The cache is bounded and self-expiring:
 

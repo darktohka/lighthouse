@@ -118,17 +118,20 @@ RepositorySummary { id, namespace, path, name, description, is_public,
 RepositoryDetail  { ...RepositorySummary, manifest_count, platform_count,
                     total_size, unique_size, shared_size, created_at,
                     created_by: UserSummary|null,
-                    permissions: PublicPermission[] }
+                    permissions: PublicPermission[], can_pull, can_push }
 TagSummary  { name, digest, media_type, size, compressed_size,
               platforms: Platform[], pull_count, updated_at }
 TagDetail   { ...TagSummary, uncompressed_size, manifest: object,
-              config: object|null, layers: LayerInfo[] }
+              config: object|null, layers: LayerInfo[], can_pull, can_push }
 Platform    { os, architecture, variant|null, digest, size }
 LayerInfo   { digest, media_type, size, uncompressed_size, role: "config"|"layer" }
 TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
               platforms: Platform[], updated_at }
 ```
 
+- `can_pull` / `can_push` report the calling actor's effective access to the
+  repository (push implies pull); the UI uses them to offer reads to pullers and
+  mutations only to pushers.
 - `size` is the sum of the compressed blob sizes referenced by the tag;
   `uncompressed_size` sums `rootfs.diff_ids`-derived layer sizes.
 - `unique_size` counts blobs referenced by **only** this tag; `shared_size` is
@@ -154,9 +157,16 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
 
 ```
 LayerTreeEntry { name, path, kind: "file"|"dir"|"symlink", size,
-                 mode, link_target }
+                 mode, link_target, link_resolved, link_kind }
 LayerReference { digest, media_type, size, role }
 ```
+
+`size` is the uncompressed byte count for a file or symlink; for a directory it
+is the recursive total of every file below it, computed once when the layer index
+is built and served from the cache. For a symlink, `link_resolved` is the
+normalized layer path it points at (following chains) and `link_kind` is the
+resolved entry's kind (`file`/`dir`); both are `null` for a dangling or cyclic
+link and for every non-symlink entry.
 
 Layer archives are decompressed transparently for browsing — `tar`,
 `tar+gzip` and `tar+zstd` are supported, selected by the layer media type. Paths

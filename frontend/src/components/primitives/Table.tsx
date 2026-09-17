@@ -1,7 +1,10 @@
-import type { ReactNode } from 'react'
+import { ChevronDownIcon, ChevronUpIcon } from '@primer/octicons-react'
+import { Fragment, type ReactNode } from 'react'
 
 import { cx } from '../../lib/cx'
 import { alignClasses } from '../../lib/ui'
+
+export type SortDirection = 'asc' | 'desc'
 
 export type TableColumn<T> = {
   /** Stable identity for React keys. */
@@ -11,6 +14,8 @@ export type TableColumn<T> = {
   align?: 'left' | 'right' | 'center'
   className?: string
   headClassName?: string
+  /** When set, announces the column's sort direction via aria-sort. */
+  sortDirection?: SortDirection
 }
 
 export type TableProps<T> = {
@@ -19,6 +24,10 @@ export type TableProps<T> = {
   rowKey: (row: T, index: number) => string | number
   /** Visually hidden caption describing the table for screen readers. */
   caption?: string
+  /** Rendered in a full-width body row when `rows` is empty. */
+  empty?: ReactNode
+  /** Extra content rendered in a full-width row immediately after `row`. */
+  rowDetails?: (row: T, index: number) => ReactNode
   className?: string
 }
 
@@ -31,6 +40,8 @@ export function Table<T>({
   rows,
   rowKey,
   caption,
+  empty,
+  rowDetails,
   className,
 }: TableProps<T>) {
   return (
@@ -43,6 +54,13 @@ export function Table<T>({
               <th
                 key={column.key}
                 scope="col"
+                aria-sort={
+                  column.sortDirection
+                    ? column.sortDirection === 'asc'
+                      ? 'ascending'
+                      : 'descending'
+                    : undefined
+                }
                 className={cx(
                   'whitespace-nowrap border-b border-border px-3 py-2 font-semibold text-muted',
                   alignClasses(column.align),
@@ -55,27 +73,73 @@ export function Table<T>({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => (
-            <tr
-              key={rowKey(row, index)}
-              className="border-b border-border last:border-b-0"
-            >
-              {columns.map((column) => (
-                <td
-                  key={column.key}
-                  className={cx(
-                    'px-3 py-2 align-middle',
-                    alignClasses(column.align),
-                    column.className,
-                  )}
-                >
-                  {column.render(row)}
-                </td>
-              ))}
+          {rows.length === 0 && empty ? (
+            <tr className="border-b border-border last:border-b-0">
+              <td colSpan={columns.length}>{empty}</td>
             </tr>
-          ))}
+          ) : null}
+          {rows.map((row, index) => {
+            const details = rowDetails?.(row, index)
+            return (
+              <Fragment key={rowKey(row, index)}>
+                <tr className="border-b border-border last:border-b-0">
+                  {columns.map((column) => (
+                    <td
+                      key={column.key}
+                      className={cx(
+                        'px-3 py-2 align-middle',
+                        alignClasses(column.align),
+                        column.className,
+                      )}
+                    >
+                      {column.render(row)}
+                    </td>
+                  ))}
+                </tr>
+                {details ? (
+                  <tr className="border-b border-border last:border-b-0">
+                    <td
+                      colSpan={columns.length}
+                      className="bg-canvas-subtle px-3 py-3 align-top"
+                    >
+                      {details}
+                    </td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            )
+          })}
         </tbody>
       </table>
     </div>
+  )
+}
+
+export function TableSortHeader({
+  label,
+  active,
+  direction,
+  onSort,
+}: {
+  label: string
+  active: boolean
+  direction: SortDirection
+  onSort: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSort}
+      className="inline-flex cursor-pointer items-center gap-1 font-semibold hover:text-foreground"
+    >
+      {label}
+      {active ? (
+        direction === 'desc' ? (
+          <ChevronDownIcon size={12} aria-hidden="true" />
+        ) : (
+          <ChevronUpIcon size={12} aria-hidden="true" />
+        )
+      ) : null}
+    </button>
   )
 }

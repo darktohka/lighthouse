@@ -180,6 +180,32 @@ fn compression_for(media_type: Option<&str>) -> Compression {
     }
 }
 
+/// The download filename extension implied by a blob's media type.
+fn download_extension(media_type: Option<&str>) -> &'static str {
+    let media_type = media_type.unwrap_or("").to_ascii_lowercase();
+    if !media_type.contains("tar") {
+        return "bin";
+    }
+    if media_type.contains("zstd") {
+        "tar.zst"
+    } else if media_type.contains("gzip") {
+        "tar.gz"
+    } else {
+        "tar"
+    }
+}
+
+/// A stable, filesystem-safe download name for a blob: its digest plus an
+/// extension derived from the media type.
+fn download_filename(digest: &Digest, media_type: Option<&str>) -> String {
+    format!(
+        "{}-{}.{}",
+        digest.algorithm(),
+        digest.encoded(),
+        download_extension(media_type)
+    )
+}
+
 fn decompressed(file: std::fs::File, media_type: Option<&str>) -> ApiResult<Box<dyn Read + Send>> {
     match compression_for(media_type) {
         Compression::Plain => Ok(Box::new(file)),
@@ -334,9 +360,16 @@ struct LayerTreeEntry {
     name: String,
     path: String,
     kind: String,
+    /// Bytes for a file/symlink; recursive total of everything below it for a
+    /// directory.
     size: i64,
     mode: u32,
     link_target: Option<String>,
+    /// For a symlink: the normalized layer path it points at, when resolvable.
+    link_resolved: Option<String>,
+    /// For a symlink: the resolved entry's kind (`file`/`dir`); `None` when the
+    /// link is dangling or cyclic.
+    link_kind: Option<String>,
 }
 
 fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> {
@@ -387,13 +420,34 @@ fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> 
             } else {
                 format!("{path}/{name}")
             };
+            let size = match data.kind {
+                EntryKind::Dir => index.dir_size(&full_path),
+                _ => data.size,
+            };
+            let (link_resolved, link_kind) = match data.kind {
+                EntryKind::Symlink => {
+                    match data
+                        .link_target
+                        .as_deref()
+                        .and_then(|target| index.resolve_link(&full_path, target))
+                    {
+                        Some((resolved, kind)) => {
+                            (Some(resolved), Some(kind.as_str().to_string()))
+                        }
+                        None => (None, None),
+                    }
+                }
+                _ => (None, None),
+            };
             Some(LayerTreeEntry {
                 name,
                 path: full_path,
                 kind: data.kind.as_str().to_string(),
-                size: data.size,
+                size,
                 mode: data.mode,
                 link_target: data.link_target.as_deref().map(str::to_string),
+                link_resolved,
+                link_kind,
             })
         })
         .collect())
@@ -825,5 +879,12 @@ pub async fn layer_download(
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    Ok(stream_blob(file, blob.size.max(0) as u64, &content_type))
+    let mut response = stream_blob(file, blob.size.max(0) as u64, &content_type);
+    let filename = download_filename(&parsed, blob.media_type.as_deref());
+    if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
+    }
+    Ok(response)
 }

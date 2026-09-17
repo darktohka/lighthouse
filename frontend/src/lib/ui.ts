@@ -11,7 +11,7 @@ export type LabelVariant =
   | 'muted'
 
 const BUTTON_BASE =
-  'inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60'
+  'inline-flex cursor-pointer select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60'
 
 const BUTTON_SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs',

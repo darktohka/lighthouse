@@ -173,6 +173,8 @@ pub struct TagDetail {
     pub manifest: Value,
     pub config: Option<Value>,
     pub layers: Vec<LayerInfo>,
+    pub can_pull: bool,
+    pub can_push: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -236,6 +238,8 @@ pub struct RepositoryDetail {
     pub created_at: DateTime<Utc>,
     pub created_by: Option<UserSummary>,
     pub permissions: Vec<PublicPermission>,
+    pub can_pull: bool,
+    pub can_push: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

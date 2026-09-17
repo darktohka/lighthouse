@@ -54,9 +54,12 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
     `repo-tags:${namespace}:${repo}:${page}`,
   )
 
+  const detail = detailState.data
   const host = typeof window === 'undefined' ? '' : window.location.host
   const firstTag = tagsState.data?.items[0]?.name
   const pullCommand = `docker pull ${host}/${namespace}/${repo}:${firstTag ?? '<tag>'}`
+  const pullCommandFor = (tag: string) =>
+    `docker pull ${host}/${namespace}/${repo}:${tag}`
 
   const deleteTag = (tag: string) => {
     setActionError(null)
@@ -147,20 +150,29 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
             </Button>
           </span>
         ) : (
-          <Button
-            size="sm"
-            variant="danger"
-            onClick={() => setConfirming(tag.name)}
-            aria-label={`Delete tag ${tag.name}`}
-            leadingIcon={<TrashIcon size={14} aria-hidden="true" />}
-          >
-            Delete
-          </Button>
+          <span className="flex items-center justify-end gap-1">
+            {detail?.can_pull ? (
+              <CopyButton
+                value={pullCommandFor(tag.name)}
+                label="Copy pull"
+                ariaLabel={`Copy pull command for ${tag.name}`}
+              />
+            ) : null}
+            {detail?.can_push ? (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setConfirming(tag.name)}
+                aria-label={`Delete tag ${tag.name}`}
+                leadingIcon={<TrashIcon size={14} aria-hidden="true" />}
+              >
+                Delete
+              </Button>
+            ) : null}
+          </span>
         ),
     },
   ]
-
-  const detail = detailState.data
 
   return (
     <div className="space-y-4">

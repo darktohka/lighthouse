@@ -1,4 +1,3 @@
-import { ChevronDownIcon, ChevronUpIcon } from '@primer/octicons-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -6,37 +5,12 @@ import type { TagSizeEntry } from '../api/schemas'
 import { formatBytes, formatDateTime, formatRelativeTime } from '../lib/format'
 import { repositoryRelativePath, repoRoute, tagRoute } from '../lib/paths'
 import { PlatformBadges } from './PlatformBadge'
-import { Table, type TableColumn } from './primitives/Table'
+import {
+  Table,
+  TableSortHeader,
+  type TableColumn,
+} from './primitives/Table'
 import { tagSelectionKey } from './tagSelection'
-
-function SortHeader({
-  label,
-  active,
-  order,
-  onSort,
-}: {
-  label: string
-  active: boolean
-  order: 'asc' | 'desc'
-  onSort: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSort}
-      className="inline-flex items-center gap-1 font-semibold hover:text-foreground"
-    >
-      {label}
-      {active ? (
-        order === 'desc' ? (
-          <ChevronDownIcon size={12} aria-hidden="true" />
-        ) : (
-          <ChevronUpIcon size={12} aria-hidden="true" />
-        )
-      ) : null}
-    </button>
-  )
-}
 
 export type TagSizeTableProps = {
   entries: readonly TagSizeEntry[]
@@ -126,27 +100,29 @@ export function TagSizeTable({
     {
       key: 'total_size',
       header: (
-        <SortHeader
+        <TableSortHeader
           label="Total"
           active={sort === 'total_size'}
-          order={order}
+          direction={order}
           onSort={() => onSort('total_size')}
         />
       ),
       align: 'right',
+      sortDirection: sort === 'total_size' ? order : undefined,
       render: (entry) => formatBytes(entry.total_size),
     },
     {
       key: 'unique_size',
       header: (
-        <SortHeader
+        <TableSortHeader
           label="Unique"
           active={sort === 'unique_size'}
-          order={order}
+          direction={order}
           onSort={() => onSort('unique_size')}
         />
       ),
       align: 'right',
+      sortDirection: sort === 'unique_size' ? order : undefined,
       render: (entry) => formatBytes(entry.unique_size),
     },
     {

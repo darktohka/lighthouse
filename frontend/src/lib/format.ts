@@ -15,6 +15,43 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[index]}`
 }
 
+export type ModeEntryKind = 'file' | 'dir' | 'symlink'
+
+const MODE_TYPE: Record<ModeEntryKind, string> = {
+  dir: 'd',
+  symlink: 'l',
+  file: '-',
+}
+
+/** Parses POSIX mode bits into the symbolic `ls -l` form, e.g. `drwxr-xr-x`. */
+export function formatMode(mode: number, kind: ModeEntryKind): string {
+  const bits = Math.trunc(mode) & 0o7777
+  const shifts = [6, 3, 0] as const
+  const specialBits = [0o4000, 0o2000, 0o1000] as const
+  const specialChars = ['s', 's', 't'] as const
+
+  let result = MODE_TYPE[kind]
+  shifts.forEach((shift, index) => {
+    const permission = (bits >> shift) & 0o7
+    const executable = (permission & 0o1) !== 0
+    result += permission & 0o4 ? 'r' : '-'
+    result += permission & 0o2 ? 'w' : '-'
+    if (bits & specialBits[index]) {
+      result += executable
+        ? specialChars[index]
+        : specialChars[index].toUpperCase()
+    } else {
+      result += executable ? 'x' : '-'
+    }
+  })
+  return result
+}
+
+/** Four-digit octal mode for `chmod`, e.g. `0644` or `4755`. */
+export function formatModeOctal(mode: number): string {
+  return (Math.trunc(mode) & 0o7777).toString(8).padStart(4, '0')
+}
+
 export function formatNumber(value: number): string {
   if (!Number.isFinite(value)) return '—'
   return value.toLocaleString()

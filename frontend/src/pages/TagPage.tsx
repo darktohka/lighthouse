@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 
 import { repositories as repositoriesApi } from '../api/endpoints'
 import type { LayerInfo } from '../api/schemas'
+import { CopyButton } from '../components/CopyButton'
 import { JsonViewer } from '../components/JsonViewer'
 import { PageHeader } from '../components/PageHeader'
 import { PlatformBadges } from '../components/PlatformBadge'
@@ -57,6 +58,8 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
     `tag:${namespace}:${repo}:${tag}`,
   )
   const detail = state.data
+  const host = typeof window === 'undefined' ? '' : window.location.host
+  const pullCommand = `docker pull ${host}/${namespace}/${repo}:${tag}`
 
   const layerColumns: TableColumn<LayerInfo>[] = [
     {
@@ -182,6 +185,13 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
               </p>
             </Box>
           </div>
+
+          {detail.can_pull ? (
+            <div className="flex flex-col gap-2 rounded-md border border-border bg-canvas-subtle p-3 sm:flex-row sm:items-center sm:justify-between">
+              <code className="break-all font-mono text-xs">{pullCommand}</code>
+              <CopyButton value={pullCommand} label="Copy pull command" />
+            </div>
+          ) : null}
 
           <Box className="p-3">
             <dl className="grid gap-2 text-xs sm:grid-cols-2">

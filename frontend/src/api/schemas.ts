@@ -203,6 +203,8 @@ export const repositoryDetailSchema = v.object({
   created_at: timestampSchema,
   created_by: v.nullable(userSummarySchema),
   permissions: v.array(publicPermissionSchema),
+  can_pull: v.boolean(),
+  can_push: v.boolean(),
 })
 export type RepositoryDetail = v.InferOutput<typeof repositoryDetailSchema>
 
@@ -249,6 +251,8 @@ export const tagDetailSchema = v.object({
   manifest: jsonObjectSchema,
   config: v.nullable(jsonObjectSchema),
   layers: v.array(layerInfoSchema),
+  can_pull: v.boolean(),
+  can_push: v.boolean(),
 })
 export type TagDetail = v.InferOutput<typeof tagDetailSchema>
 
@@ -415,10 +419,15 @@ export const layerTreeEntrySchema = v.object({
   name: v.string(),
   path: v.string(),
   kind: layerTreeEntryKindSchema,
+  /** Bytes for a file/symlink; recursive total of everything below it for a directory. */
   size: v.number(),
   /** Raw tar mode (e.g. `420` for `0644`); the backend serializes it as a number. */
   mode: v.number(),
   link_target: v.nullable(v.string()),
+  /** Normalized layer path a symlink points at, after following chains. */
+  link_resolved: v.nullable(v.string()),
+  /** Kind of the resolved symlink target; null for a dangling/cyclic link. */
+  link_kind: v.nullable(v.picklist(['file', 'dir'])),
 })
 export type LayerTreeEntry = v.InferOutput<typeof layerTreeEntrySchema>
 

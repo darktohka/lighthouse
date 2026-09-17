@@ -503,6 +503,7 @@ async fn build_tag_detail(
     tag: &Tag,
     manifest: &Manifest,
     sizes: &HashMap<i64, (i64, i64)>,
+    access: authz::Access,
 ) -> ApiResult<TagDetail> {
     let summary = build_tag_summary(state, repository_id, tag, manifest, sizes).await?;
 
@@ -554,6 +555,8 @@ async fn build_tag_detail(
         manifest: manifest_json,
         config,
         layers,
+        can_pull: access.can_pull,
+        can_push: access.can_push,
     })
 }
 
@@ -626,6 +629,8 @@ async fn build_detail(
         created_at: repository.created_at,
         created_by,
         permissions,
+        can_pull: access.can_pull,
+        can_push: access.can_push,
     })
 }
 
@@ -844,7 +849,9 @@ async fn tag_detail(
 
     let rowset = super::load_tag_blob_rows(&state).await?;
     let sizes = tag_size_map(&rowset);
-    let detail = build_tag_detail(&state, repository.id, &tag_row, &manifest, &sizes).await?;
+    let access = authz::repository_access(&state, &actor, &name).await?;
+    let detail =
+        build_tag_detail(&state, repository.id, &tag_row, &manifest, &sizes, access).await?;
     Ok(Json(detail).into_response())
 }
 

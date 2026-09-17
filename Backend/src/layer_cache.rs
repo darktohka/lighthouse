@@ -31,6 +31,14 @@ use crate::oci::digest::Digest;
 /// fields of [`CachedEntry`]. Path and symlink bytes are charged on top.
 const ENTRY_OVERHEAD_BYTES: usize = 64;
 
+/// Estimated fixed cost of one cached directory-size entry: the map node plus
+/// the `i64` total. Directory path bytes are charged on top.
+const DIR_SIZE_OVERHEAD_BYTES: usize = 40;
+
+/// Maximum number of symlink hops followed before a link is treated as
+/// unresolvable.
+const MAX_SYMLINK_DEPTH: usize = 16;
+
 /// The kind of filesystem object an index entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -75,22 +83,36 @@ impl CachedEntry {
     }
 }
 
-/// The merged, whiteout-resolved path map of one layer. Immutable once built
-/// and shared between requests, so it only needs to be cheap to read.
+/// The merged, whiteout-resolved path map of one layer, plus the recursive
+/// byte total of every directory in it. Immutable once built and shared
+/// between requests, so it only needs to be cheap to read.
 #[derive(Debug, Default)]
 pub struct LayerIndex {
     entries: HashMap<String, CachedEntry>,
+    /// Recursive uncompressed size per directory path, precomputed at build
+    /// time. The root is omitted, and a path absent here is not a directory.
+    dir_sizes: HashMap<String, i64>,
     weight: usize,
 }
 
 impl LayerIndex {
-    /// Wraps an already-merged path map, computing its weight once.
+    /// Wraps an already-merged path map, computing the recursive directory
+    /// totals and the weight once.
     pub fn from_entries(entries: HashMap<String, CachedEntry>) -> Self {
-        let weight = entries
+        let dir_sizes = directory_sizes(&entries);
+        let entry_weight = entries
             .iter()
             .map(|(path, entry)| path.len() + entry.weight())
-            .sum();
-        Self { entries, weight }
+            .sum::<usize>();
+        let dir_weight = dir_sizes
+            .iter()
+            .map(|(path, _)| path.len() + DIR_SIZE_OVERHEAD_BYTES)
+            .sum::<usize>();
+        Self {
+            entries,
+            dir_sizes,
+            weight: entry_weight + dir_weight,
+        }
     }
 
     /// The merged path map, keyed by normalized path.
@@ -111,6 +133,93 @@ impl LayerIndex {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Recursive uncompressed byte total of everything below `path`; the
+    /// directory entry itself contributes nothing. Returns `0` for a directory
+    /// with no sized descendants and for a path that is not a directory.
+    pub fn dir_size(&self, path: &str) -> i64 {
+        self.dir_sizes.get(path).copied().unwrap_or(0)
+    }
+
+    /// Resolves a symlink's raw `target` (relative to the symlink's own
+    /// directory, or absolute inside the layer) to an existing entry, following
+    /// chains. Returns the normalized path and the final entry's kind, or
+    /// `None` when the link is dangling, cyclic, or escapes the layer.
+    pub fn resolve_link(&self, link_path: &str, target: &str) -> Option<(String, EntryKind)> {
+        let mut current = normalize_link_target(parent_directory(link_path), target)?;
+        for _ in 0..MAX_SYMLINK_DEPTH {
+            match self.entry_kind(&current)? {
+                EntryKind::Symlink => {
+                    let next = self.entries.get(&current)?.link_target.as_deref()?;
+                    current = normalize_link_target(parent_directory(&current), next)?;
+                }
+                kind => return Some((current, kind)),
+            }
+        }
+        None
+    }
+
+    /// The kind at `path`, recognizing directories that exist only as a prefix
+    /// of deeper entries.
+    fn entry_kind(&self, path: &str) -> Option<EntryKind> {
+        if let Some(entry) = self.entries.get(path) {
+            return Some(entry.kind);
+        }
+        if path.is_empty() {
+            return Some(EntryKind::Dir);
+        }
+        let prefix = format!("{path}/");
+        self.entries
+            .keys()
+            .any(|candidate| candidate.starts_with(&prefix))
+            .then_some(EntryKind::Dir)
+    }
+}
+
+/// Folds every non-directory entry's size into each of its ancestor
+/// directories, so a directory's recursive total is available without walking
+/// the map again.
+fn directory_sizes(entries: &HashMap<String, CachedEntry>) -> HashMap<String, i64> {
+    let mut dir_sizes: HashMap<String, i64> = HashMap::new();
+    for (path, entry) in entries {
+        if entry.kind == EntryKind::Dir || entry.size <= 0 {
+            continue;
+        }
+        for (index, byte) in path.bytes().enumerate() {
+            if byte == b'/' {
+                let total = dir_sizes.entry(path[..index].to_string()).or_insert(0);
+                *total = total.saturating_add(entry.size);
+            }
+        }
+    }
+    dir_sizes
+}
+
+fn parent_directory(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some((parent, _)) => parent,
+        None => "",
+    }
+}
+
+/// Joins `target` onto `base` (an absolute target restarts at the layer root)
+/// and normalizes `.`/`..`, rejecting traversal above the root.
+fn normalize_link_target(base: &str, target: &str) -> Option<String> {
+    let mut components: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base.split('/').filter(|part| !part.is_empty()).collect()
+    };
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            other => components.push(other),
+        }
+    }
+    Some(components.join("/"))
 }
 
 /// Tunables for [`LayerIndexCache`].
@@ -405,6 +514,102 @@ mod tests {
             entries.insert((*path).to_string(), CachedEntry::directory());
         }
         Arc::new(LayerIndex::from_entries(entries))
+    }
+
+    fn file_entry(path: &str, size: i64) -> (String, CachedEntry) {
+        (
+            path.to_string(),
+            CachedEntry {
+                kind: EntryKind::File,
+                size,
+                mode: 0o644,
+                link_target: None,
+            },
+        )
+    }
+
+    fn symlink(path: &str, target: &str) -> (String, CachedEntry) {
+        (
+            path.to_string(),
+            CachedEntry {
+                kind: EntryKind::Symlink,
+                size: 0,
+                mode: 0o777,
+                link_target: Some(target.to_string().into_boxed_str()),
+            },
+        )
+    }
+
+    #[test]
+    fn directory_sizes_are_summed_recursively() {
+        let entries: HashMap<String, CachedEntry> = [
+            file_entry("etc/config", 5),
+            file_entry("usr/bin/run", 10),
+            file_entry("usr/lib/lib.so", 20),
+            ("usr".to_string(), CachedEntry::directory()),
+        ]
+        .into_iter()
+        .collect();
+        let index = LayerIndex::from_entries(entries);
+
+        assert_eq!(index.dir_size("etc"), 5);
+        assert_eq!(index.dir_size("usr"), 30, "nested files roll up");
+        assert_eq!(index.dir_size("usr/bin"), 10);
+        assert_eq!(index.dir_size("usr/lib"), 20);
+        assert_eq!(index.dir_size("var"), 0, "unknown directory");
+    }
+
+    #[test]
+    fn resolves_symlinks_to_files_and_directories() {
+        let entries: HashMap<String, CachedEntry> = [
+            file_entry("etc/config", 5),
+            file_entry("usr/bin/run", 10),
+            symlink("usr/bin/link", "run"),
+            symlink("usr/abs", "/usr/bin/run"),
+            symlink("usr/up", "../etc"),
+            symlink("root-link", "usr"),
+            symlink("usr/bin/chain", "link"),
+            symlink("dangling", "missing"),
+            symlink("loop-a", "loop-b"),
+            symlink("loop-b", "loop-a"),
+            symlink("escape", "../../etc/passwd"),
+        ]
+        .into_iter()
+        .collect();
+        let index = LayerIndex::from_entries(entries);
+
+        assert_eq!(
+            index.resolve_link("usr/bin/link", "run"),
+            Some(("usr/bin/run".to_string(), EntryKind::File)),
+            "relative file target"
+        );
+        assert_eq!(
+            index.resolve_link("usr/abs", "/usr/bin/run"),
+            Some(("usr/bin/run".to_string(), EntryKind::File)),
+            "absolute target"
+        );
+        assert_eq!(
+            index.resolve_link("usr/up", "../etc"),
+            Some(("etc".to_string(), EntryKind::Dir)),
+            "parent traversal"
+        );
+        assert_eq!(
+            index.resolve_link("root-link", "usr"),
+            Some(("usr".to_string(), EntryKind::Dir)),
+            "synthesized directory target"
+        );
+        assert_eq!(
+            index.resolve_link("usr/bin/chain", "link"),
+            Some(("usr/bin/run".to_string(), EntryKind::File)),
+            "chain follows to the final file"
+        );
+        assert_eq!(index.resolve_link("dangling", "missing"), None, "dangling");
+        assert_eq!(index.resolve_link("loop-a", "loop-b"), None, "cycle");
+        assert_eq!(
+            index.resolve_link("escape", "../../etc/passwd"),
+            None,
+            "traversal above root"
+        );
     }
 
     fn config(max_bytes: usize) -> LayerCacheConfig {
