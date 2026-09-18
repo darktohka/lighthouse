@@ -9,9 +9,9 @@ import {
 } from '../api/endpoints'
 import type { RepositorySummary } from '../api/schemas'
 import { NotFoundPage } from './NotFoundPage'
+import { LibravatarAvatar } from '../components/LibravatarAvatar'
 import { PageHeader } from '../components/PageHeader'
 import { Pagination } from '../components/Pagination'
-import { Avatar } from '../components/primitives/Avatar'
 import { Box } from '../components/primitives/Box'
 import { LinkButton } from '../components/primitives/Button'
 import { Label } from '../components/primitives/Label'
@@ -202,8 +202,9 @@ export function NamespacePage() {
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted">
           {detail.owner ? (
             <span className="flex items-center gap-2">
-              <Avatar
+              <LibravatarAvatar
                 src={detail.owner.avatar_url}
+                hash={detail.owner.avatar_hash}
                 name={detail.owner.username}
                 size={20}
               />

@@ -8,7 +8,7 @@ import { formatRelativeTime } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 import { ConfirmAction } from './ConfirmAction'
 import { SelectField } from './FormFields'
-import { Avatar } from './primitives/Avatar'
+import { LibravatarAvatar } from './LibravatarAvatar'
 import { Box, BoxBody, BoxHeader } from './primitives/Box'
 import { Button } from './primitives/Button'
 import { Flash } from './primitives/Flash'
@@ -142,8 +142,9 @@ export function MembersPanel({ namespace, canManage }: MembersPanelProps) {
                   className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
                 >
                   <span className="flex items-center gap-2">
-                    <Avatar
+                    <LibravatarAvatar
                       src={member.user.avatar_url}
+                      hash={member.user.avatar_hash}
                       name={member.user.username}
                       size={20}
                     />

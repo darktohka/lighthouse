@@ -405,8 +405,17 @@ is in `docs/AUTH.md`.
 ```
 TwoFactorStatus { enabled, backup_codes_remaining }
 TwoFactorSetup  { secret, otpauth_uri, backup_codes: string[] }
-AuthResponse    { user, refresh_token }
+UserView        { id, username, email, first_name, last_name, email_verified,
+                  is_admin, avatar_url, avatar_hash, theme, created_at }
+AuthResponse    { user: UserView, refresh_token }
 ```
+
+`UserView` is the authenticated user object returned by `/auth/login`,
+`/auth/register`, `/auth/refresh` and `/auth/me`. Its `avatar_hash` is the
+lowercase hex SHA-256 of the trimmed, lowercased e-mail (the public Libravatar
+key), with the same semantics as `UserSummary`/`UserProfile` in §1: it lets the
+browser render the signed-in user's avatar without using the e-mail for that
+purpose. `email` is retained for account management.
 
 When 2FA is enabled, `POST /api/auth/login` without a `code` returns
 `{ two_factor_required: true, mfa_token }` and no cookie; the client then calls

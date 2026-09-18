@@ -6,7 +6,7 @@ import { directory } from '../api/endpoints'
 import type { UserSummary } from '../api/schemas'
 import { cx } from '../lib/cx'
 import { inputClasses } from '../lib/ui'
-import { Avatar } from './primitives/Avatar'
+import { LibravatarAvatar } from './LibravatarAvatar'
 import { Spinner } from './primitives/StateViews'
 
 export type UserAutocompleteProps = {
@@ -189,7 +189,12 @@ export function UserAutocomplete({
                   highlight === index ? 'bg-accent-subtle' : undefined,
                 )}
               >
-                <Avatar src={user.avatar_url} name={user.username} size={20} />
+                <LibravatarAvatar
+                  src={user.avatar_url}
+                  hash={user.avatar_hash}
+                  name={user.username}
+                  size={20}
+                />
                 <span className="font-medium">{user.username}</span>
                 {[user.first_name, user.last_name].filter(Boolean).length > 0 ? (
                   <span className="truncate text-xs text-muted">

@@ -3,11 +3,11 @@ import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 
 import { grants, namespaces as namespacesApi, permissions } from '../api/endpoints'
 import { DelegationsPanel } from '../components/DelegationsPanel'
+import { LibravatarAvatar } from '../components/LibravatarAvatar'
 import { MembersPanel } from '../components/MembersPanel'
 import { NamespaceGeneralPanel } from '../components/NamespaceGeneralPanel'
 import { PageHeader } from '../components/PageHeader'
 import { TabNav, TabPanel } from '../components/Tabs'
-import { Avatar } from '../components/primitives/Avatar'
 import { Label } from '../components/primitives/Label'
 import { ErrorState, LoadingState } from '../components/primitives/StateViews'
 import { useAuth } from '../lib/auth-context'
@@ -73,8 +73,9 @@ export function NamespaceSettingsPage() {
         <div className="flex items-center gap-2 text-sm text-muted">
           {detail.owner ? (
             <>
-              <Avatar
+              <LibravatarAvatar
                 src={detail.owner.avatar_url}
+                hash={detail.owner.avatar_hash}
                 name={detail.owner.username}
                 size={20}
               />

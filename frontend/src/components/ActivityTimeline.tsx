@@ -2,7 +2,7 @@ import { BroadcastIcon } from '@primer/octicons-react'
 
 import type { ActivityEntry } from '../api/schemas'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
-import { Avatar } from './primitives/Avatar'
+import { LibravatarAvatar } from './LibravatarAvatar'
 import { Label } from './primitives/Label'
 import { EmptyState } from './primitives/StateViews'
 import { Timeline, TimelineItem } from './primitives/Timeline'
@@ -36,8 +36,9 @@ export function ActivityTimeline({
           key={entry.id}
           avatar={
             entry.actor ? (
-              <Avatar
+              <LibravatarAvatar
                 src={entry.actor.avatar_url}
+                hash={entry.actor.avatar_hash}
                 name={entry.actor.username}
                 size={32}
               />

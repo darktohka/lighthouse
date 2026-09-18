@@ -516,6 +516,7 @@ export const authUserSchema = v.object({
   email_verified: v.boolean(),
   is_admin: v.boolean(),
   avatar_url: v.nullable(v.string()),
+  avatar_hash: v.string(),
   theme: v.fallback(v.picklist(['light', 'dark']), 'light'),
   created_at: timestampSchema,
 })

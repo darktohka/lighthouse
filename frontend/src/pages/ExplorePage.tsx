@@ -16,7 +16,6 @@ import { SelectField } from '../components/FormFields'
 import { LibravatarAvatar } from '../components/LibravatarAvatar'
 import { PageHeader } from '../components/PageHeader'
 import { Pagination } from '../components/Pagination'
-import { Avatar } from '../components/primitives/Avatar'
 import { Button } from '../components/primitives/Button'
 import { CounterLabel } from '../components/primitives/CounterLabel'
 import { Label } from '../components/primitives/Label'
@@ -161,16 +160,10 @@ export function ExplorePage() {
                       className="block h-full rounded-md border border-border bg-canvas-default p-3 transition-colors hover:border-accent"
                     >
                       <div className="flex items-center gap-2">
-                        {item.kind === 'user' && item.owner ? (
+                        {item.owner ? (
                           <LibravatarAvatar
                             src={item.owner.avatar_url}
                             hash={item.owner.avatar_hash}
-                            name={item.owner.username}
-                            size={20}
-                          />
-                        ) : item.owner ? (
-                          <Avatar
-                            src={item.owner.avatar_url}
                             name={item.owner.username}
                             size={20}
                           />

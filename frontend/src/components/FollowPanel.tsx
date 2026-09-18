@@ -6,8 +6,8 @@ import { users as usersApi } from '../api/endpoints'
 import type { Page, UserSummary } from '../api/schemas'
 import { formatNumber } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { LibravatarAvatar } from './LibravatarAvatar'
 import { Pagination } from './Pagination'
-import { Avatar } from './primitives/Avatar'
 import { EmptyState, ErrorState, LoadingState } from './primitives/StateViews'
 import { TabNav } from './Tabs'
 
@@ -72,7 +72,12 @@ export function FollowPanel({ username, reloadToken }: FollowPanelProps) {
                     to={`/users/${encodeURIComponent(person.username)}`}
                     className="flex items-center gap-2 rounded-md border border-border bg-canvas-default p-2 transition-colors hover:border-accent"
                   >
-                    <Avatar src={person.avatar_url} name={person.username} size={28} />
+                    <LibravatarAvatar
+                      src={person.avatar_url}
+                      hash={person.avatar_hash}
+                      name={person.username}
+                      size={28}
+                    />
                     <span className="min-w-0">
                       <span className="block truncate text-sm font-medium">
                         {person.username}

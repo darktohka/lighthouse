@@ -57,7 +57,7 @@ export function AvatarMenu() {
       >
         <LibravatarAvatar
           src={user.avatar_url}
-          email={user.email}
+          hash={user.avatar_hash}
           name={displayName}
           size={26}
         />

@@ -7,7 +7,7 @@ import { formatDateTime } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 import { ConfirmAction } from './ConfirmAction'
 import { SelectField, SwitchField } from './FormFields'
-import { Avatar } from './primitives/Avatar'
+import { LibravatarAvatar } from './LibravatarAvatar'
 import { Box, BoxBody, BoxHeader } from './primitives/Box'
 import { Button } from './primitives/Button'
 import { Flash } from './primitives/Flash'
@@ -171,8 +171,9 @@ export function DelegationsPanel({
                   <div className="flex min-w-0 items-center gap-2">
                     {grant.subject ? (
                       <>
-                        <Avatar
+                        <LibravatarAvatar
                           src={grant.subject.avatar_url}
+                          hash={grant.subject.avatar_hash}
                           name={grant.subject.username}
                           size={20}
                         />

@@ -117,6 +117,7 @@ struct UserView {
     email_verified: bool,
     is_admin: bool,
     avatar_url: Option<String>,
+    avatar_hash: String,
     theme: String,
     created_at: DateTime<Utc>,
 }
@@ -132,6 +133,7 @@ impl From<&User> for UserView {
             email_verified: user.email_verified,
             is_admin: user.is_admin,
             avatar_url: user.avatar_url.clone(),
+            avatar_hash: crate::api::avatar_hash(&user.email),
             theme: user.theme.clone(),
             created_at: user.created_at,
         }
@@ -1341,6 +1343,10 @@ mod tests {
         let cookie = cookie_pair(&response, "lighthouse_token").expect("access cookie");
         let login = body_json(response).await;
         assert_eq!(login["user"]["username"], "alice");
+        assert_eq!(
+            login["user"]["avatar_hash"],
+            "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976"
+        );
         assert!(
             login["refresh_token"]
                 .as_str()
@@ -1349,7 +1355,12 @@ mod tests {
 
         let response = send(&app, "GET", "/api/auth/me", None, Some(&cookie)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body_json(response).await["user"]["username"], "alice");
+        let me = body_json(response).await;
+        assert_eq!(me["user"]["username"], "alice");
+        assert_eq!(
+            me["user"]["avatar_hash"],
+            "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976"
+        );
 
         let session_id: String = sqlx::query_scalar(
             "SELECT id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -1392,6 +1403,36 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::OK, "identifier={identifier}");
         }
+    }
+
+    #[tokio::test]
+    async fn login_and_me_expose_the_public_avatar_hash() {
+        let (_dir, state) = test_state().await;
+        create_user(&state, "alice").await;
+        let app = http_app(&state);
+
+        let response = send(
+            &app,
+            "POST",
+            "/api/auth/login",
+            Some(json!({ "identifier": "alice", "password": "correct-horse-battery" })),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = cookie_pair(&response, "lighthouse_token").expect("access cookie");
+        let login = body_json(response).await;
+        assert_eq!(
+            login["user"]["avatar_hash"],
+            "497f085b5955fac70a3418401432cdf4223dc77b41067d1c09eddc3eee6bf6da"
+        );
+
+        let response = send(&app, "GET", "/api/auth/me", None, Some(&cookie)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await["user"]["avatar_hash"],
+            "497f085b5955fac70a3418401432cdf4223dc77b41067d1c09eddc3eee6bf6da"
+        );
     }
 
     #[tokio::test]

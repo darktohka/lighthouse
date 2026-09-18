@@ -275,13 +275,12 @@ and re-sorts/re-pages the filtered result after the search filter is applied.
   `repositoryRelativePath` tolerating a relative value; `UserProfile.namespace`
   is treated as a namespace name; `/namespaces`, `/namespaces/{name}/permissions`
   and `/users/search` follow the paginated-envelope convention.
-- **Avatars** — the API returns a resolved `avatar_url` when one exists and the
-  frontend renders it directly. When it is absent, the profile and user-summary
-  responses carry a public `avatar_hash` (lowercase hex SHA-256 of the normalized
-  e-mail), from which the frontend builds the Libravatar URL (base URL from
-  `VITE_LIBRAVATAR_BASE_URL`, default `https://seccdn.libravatar.org`) regardless
-  of the viewer's auth state; initials are the last resort. The legacy
-  email-derived path remains only for the signed-in account menu.
+- **Avatars** — every user avatar (profiles, user summaries and the signed-in
+  auth user) resolves its Libravatar from the public `avatar_hash` (lowercase hex
+  SHA-256 of the normalized e-mail; base URL from `VITE_LIBRAVATAR_BASE_URL`,
+  default `https://seccdn.libravatar.org`) regardless of the viewer's auth state.
+  An explicit `avatar_url` from the API takes priority when present, and initials
+  are only the last-resort fallback when the image fails to load.
 
 ---
 
