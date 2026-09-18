@@ -168,7 +168,7 @@ impl Config {
             brevo_sender_email: env_or("BREVO_SENDER_EMAIL", "noreply@example.com"),
             brevo_sender_name: env_or("BREVO_SENDER_NAME", "Lighthouse Registry"),
 
-            captcha_enabled: env_parse("CAPTCHA_ENABLED", false)?,
+            captcha_enabled: env_parse("CAPTCHA_ENABLED", true)?,
             captcha_difficulty: env_parse("CAPTCHA_DIFFICULTY", 18)?,
 
             rate_limit_login_per_minute: env_parse("RATE_LIMIT_LOGIN_PER_MINUTE", 10)?,

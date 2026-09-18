@@ -77,9 +77,10 @@ JWT_SECRET=replace-me-with-openssl-rand-hex-32
 COOKIE_SECURE=false
 TRUST_PROXY=false
 
-# Development conveniences: no SMTP, no proof-of-work.
+# Development conveniences: e-mail is written to the logs instead of sent.
 EMAIL_ENABLED=false
-CAPTCHA_ENABLED=false
+# Proof-of-work captcha is on by default; set to false to skip it locally.
+CAPTCHA_ENABLED=true
 
 RUST_LOG=info
 ```

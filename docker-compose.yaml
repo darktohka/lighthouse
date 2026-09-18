@@ -64,7 +64,7 @@ services:
       BREVO_SENDER_EMAIL: ${BREVO_SENDER_EMAIL:-noreply@example.com}
       BREVO_SENDER_NAME: ${BREVO_SENDER_NAME:-Lighthouse Registry}
       # --- abuse protection -------------------------------------------------
-      CAPTCHA_ENABLED: ${CAPTCHA_ENABLED:-false}
+      CAPTCHA_ENABLED: ${CAPTCHA_ENABLED:-true}
       CAPTCHA_DIFFICULTY: ${CAPTCHA_DIFFICULTY:-18}
       RATE_LIMIT_LOGIN_PER_MINUTE: ${RATE_LIMIT_LOGIN_PER_MINUTE:-10}
       RATE_LIMIT_REGISTER_PER_HOUR: ${RATE_LIMIT_REGISTER_PER_HOUR:-20}
