@@ -1,7 +1,7 @@
 # Rust
-/Backend/target/
-/Backend/data/
-/Backend/database/
+/backend/target/
+/backend/data/
+/backend/database/
 **/*.rs.bk
 
 # Node

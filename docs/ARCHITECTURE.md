@@ -29,14 +29,12 @@ Non-goals: Helm charts, proxy/pull-through cache, notifications, replication.
 
 ```
 /
-├── Backend/                 Rust service (binary: `registry`)
+├── backend/                 Rust service (binary: `registry`)
 │   ├── Cargo.toml
 │   ├── migrations/          sqlx migrations
 │   └── src/
 ├── frontend/                Vite + React + TypeScript control plane
 ├── docs/                    All documentation (this folder)
-├── distribution/            Reference Go registry (read-only reference)
-├── image-spec/              OCI image spec (read-only reference)
 ├── Dockerfile               Multi-stage build → scratch
 ├── docker-compose.yaml      Host-directory deployment
 └── .github/workflows/       Multi-arch image build & push

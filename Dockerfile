@@ -69,7 +69,7 @@ WORKDIR /app
 
 # Dependency cache layer: cargo-chef is not part of the base image, so build a
 # throwaway binary against the real manifests to warm the crate cache.
-COPY Backend/Cargo.toml Backend/Cargo.lock ./
+COPY backend/Cargo.toml backend/Cargo.lock ./
 RUN mkdir -p src \
  && echo 'fn main() {}' > src/main.rs \
  && cargo build --profile release-lto --target "$(cat /tmp/rust-target)" \
@@ -77,8 +77,8 @@ RUN mkdir -p src \
 
 # Real sources plus migrations: sqlx::migrate!("./migrations") embeds these at
 # compile time, so no database is needed during the build.
-COPY Backend/src ./src
-COPY Backend/migrations ./migrations
+COPY backend/src ./src
+COPY backend/migrations ./migrations
 
 # COPY preserves the source mtimes, which can be older than the throwaway
 # binary's artifacts — cargo would then wrongly consider the crate fresh. Drop

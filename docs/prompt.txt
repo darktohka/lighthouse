@@ -10,7 +10,7 @@ The frontend is a Vite application (TypeScript 6 - TypeScript 7 is not ready yet
 - Use cookies , not local storage for main token. Can use local storage for refresh token.
 
 The backend is a Rust application.
-- "Backend" folder.
+- "backend" folder.
 - Axum based, async runtime with tokio.
 - Logging is handled. Request-response logs with IP address and user agent per request. Includes timestamp on all logs. Logs are saved into LOGS_DIR folder, following YY-MM-DD.log format (year-month-day.log) and cycling every day.
 - Database is SQLite, using sqlx, with busy_timeout 5000, WAL mode enabled. Work around "database busy" issues. Migrations are handled.

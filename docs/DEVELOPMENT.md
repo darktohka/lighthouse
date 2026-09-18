@@ -25,7 +25,7 @@ cd /path/to/registry
 cp .env.example .env
 openssl rand -hex 32          # paste the output into JWT_SECRET
 $EDITOR .env                  # see the dev values in §3
-cargo run --manifest-path Backend/Cargo.toml
+cargo run --manifest-path backend/Cargo.toml
 ```
 
 **Terminal B — frontend** (listens on `:5173`):
@@ -47,8 +47,8 @@ backend, so cookies and OCI calls work from one origin during development.
 
 `dotenvy::dotenv()` searches the **current working directory and its parents**.
 Running from the repository root therefore loads the root `.env` — the same file
-`docker compose` reads — while running from `Backend/` would load
-`Backend/.env` instead.
+`docker compose` reads — while running from `backend/` would load
+`backend/.env` instead.
 
 ### `.env.example` is container-oriented
 
@@ -89,21 +89,21 @@ RUST_LOG=info
 ### Start it
 
 ```bash
-cargo run --manifest-path Backend/Cargo.toml      # from the repository root
+cargo run --manifest-path backend/Cargo.toml      # from the repository root
 ```
 
-or, if you prefer the shorter command, keep a `Backend/.env` with the same values
+or, if you prefer the shorter command, keep a `backend/.env` with the same values
 and:
 
 ```bash
-cd Backend && cargo run
+cd backend && cargo run
 ```
 
 Either way the working directory decides where the data directories land. On
 first start the process:
 
 1. creates `database/`, `data/` and `logs/`,
-2. applies the migrations in `Backend/migrations/`,
+2. applies the migrations in `backend/migrations/`,
 3. binds the address, logging `lighthouse registry listening addr=…`.
 
 Verify it is up:
@@ -122,7 +122,7 @@ There is no file watcher. Either restart with `Ctrl+C`, or install
 [cargo-watch](https://crates.io/crates/cargo-watch) and run:
 
 ```bash
-cargo watch -x 'run --manifest-path Backend/Cargo.toml'
+cargo watch -x 'run --manifest-path backend/Cargo.toml'
 ```
 
 ### Resetting local state
@@ -220,7 +220,7 @@ cd frontend && pnpm build && cd ..
 FRONTEND_DIR=frontend/dist \
 BASE_URL=http://localhost:8080 \
 PUBLIC_HOST=localhost:8080 \
-cargo run --manifest-path Backend/Cargo.toml
+cargo run --manifest-path backend/Cargo.toml
 ```
 
 Open http://localhost:8080. The SPA is served from `frontend/dist` with a
@@ -245,10 +245,10 @@ so you can inspect or back up the state directly from the host.
 
 | Task | Command |
 |---|---|
-| Backend tests | `cargo test --manifest-path Backend/Cargo.toml` |
-| Backend build | `cargo build --manifest-path Backend/Cargo.toml` |
-| Backend lint | `cargo clippy --manifest-path Backend/Cargo.toml --all-targets` |
-| Backend format | `cargo fmt --manifest-path Backend/Cargo.toml` |
+| Backend tests | `cargo test --manifest-path backend/Cargo.toml` |
+| Backend build | `cargo build --manifest-path backend/Cargo.toml` |
+| Backend lint | `cargo clippy --manifest-path backend/Cargo.toml --all-targets` |
+| Backend format | `cargo fmt --manifest-path backend/Cargo.toml` |
 | Frontend dev | `cd frontend && pnpm dev` |
 | Frontend build | `cd frontend && pnpm build` |
 | Frontend lint | `cd frontend && pnpm lint` |

@@ -81,13 +81,13 @@ docker push <host>:8080/<username>/my-image:v1
 docker pull <host>:8080/<username>/my-image:v1
 ```
 
-For local development, run the backend with `cargo run` in `Backend/` and the
+For local development, run the backend with `cargo run` in `backend/` and the
 frontend with `pnpm dev` in `frontend/` (the dev server proxies `/api` and `/v2`).
 
 ## Layout
 
 ```
-Backend/     Rust service (Axum, sqlx/SQLite, Tokio) — binary: registry
+backend/     Rust service (Axum, sqlx/SQLite, Tokio) — binary: registry
 frontend/    Vite + React + TypeScript + Tailwind control plane
 docs/        all documentation
 Dockerfile   multi-stage build → scratch
@@ -109,13 +109,13 @@ guide (env setup, first push, troubleshooting).
 ```bash
 # terminal A — backend on :8080
 cp .env.example .env && $EDITOR .env     # set JWT_SECRET, then use the dev profile
-cargo run --manifest-path Backend/Cargo.toml
+cargo run --manifest-path backend/Cargo.toml
 
 # terminal B — frontend on :5173 (proxies /api and /v2 to :8080)
 cd frontend && pnpm install && pnpm dev
 ```
 
-Open <http://localhost:5173>. Tests: `cargo test --manifest-path Backend/Cargo.toml`
+Open <http://localhost:5173>. Tests: `cargo test --manifest-path backend/Cargo.toml`
 (220 tests) and `pnpm build` in `frontend/`.
 
 ## License

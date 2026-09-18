@@ -6,7 +6,7 @@
 .omo
 
 # Rust build output (rebuilt inside the builder stage)
-/Backend/target
+/backend/target
 
 # Frontend dependencies and build output (rebuilt inside the frontend stage)
 /frontend/node_modules

@@ -41,11 +41,11 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            Backend/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Backend/Cargo.lock') }}
+            backend/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('backend/Cargo.lock') }}
 
       - name: cargo test
-        working-directory: Backend
+        working-directory: backend
         env:
           JWT_SECRET: ci-test-secret
           RUST_LOG: info

@@ -1,6 +1,6 @@
 # Lighthouse — Database
 
-SQLite managed through `sqlx`, with migrations in `Backend/migrations/`.
+SQLite managed through `sqlx`, with migrations in `backend/migrations/`.
 
 ## Connection settings
 
