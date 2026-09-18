@@ -159,7 +159,7 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
               {formatDateTime(layer.created)}
             </span>
           ) : (
-            <span className="text-muted">—</span>
+            <span className="text-muted">-</span>
           ),
       },
       {
@@ -167,7 +167,7 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
         header: 'Comment',
         render: (layer) => {
           const comment = layer.comment?.trim() ?? ''
-          if (comment.length === 0) return <span className="text-muted">—</span>
+          if (comment.length === 0) return <span className="text-muted">-</span>
           return (
             <span
               className="block max-w-[20rem] truncate"

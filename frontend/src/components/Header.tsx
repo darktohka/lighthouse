@@ -35,11 +35,11 @@ export function Header() {
           <NavLink to="/" end className={navLinkClass}>
             Explore
           </NavLink>
-          <NavLink to="/tags" className={navLinkClass}>
-            Tags
-          </NavLink>
           {user ? (
             <>
+              <NavLink to="/tags" className={navLinkClass}>
+                Tags
+              </NavLink>
               <NavLink to="/dashboard" className={navLinkClass}>
                 Dashboard
               </NavLink>

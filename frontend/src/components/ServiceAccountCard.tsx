@@ -179,7 +179,7 @@ export function ServiceAccountCard({
           <p className="mb-1 text-sm font-medium">Grants</p>
           {account.grants.length === 0 ? (
             <p className="text-xs text-muted">
-              No grants yet — this token can only pull public images.
+              No grants yet - this token can only pull public images.
             </p>
           ) : (
             <ul className="divide-y divide-border rounded-md border border-border">
@@ -216,7 +216,7 @@ export function ServiceAccountCard({
           <p className="mb-1 text-sm font-medium">IP allowlist</p>
           {account.ip_ranges.length === 0 ? (
             <p className="text-xs text-muted">
-              No IP restriction — this account can authenticate from any address.
+              No IP restriction - this account can authenticate from any address.
             </p>
           ) : (
             <ul className="divide-y divide-border rounded-md border border-border">

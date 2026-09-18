@@ -1,31 +1,27 @@
-import {
-  CheckIcon,
-  KeyIcon,
-  ShieldCheckIcon,
-} from '@primer/octicons-react'
-import { useState, type FormEvent } from 'react'
-import QRCode from 'react-qr-code'
+import { CheckIcon, KeyIcon, ShieldCheckIcon } from "@primer/octicons-react";
+import { useState, type FormEvent } from "react";
+import QRCode from "react-qr-code";
 
-import { isApiError } from '../api/client'
-import { auth } from '../api/endpoints'
+import { isApiError } from "../api/client";
+import { auth } from "../api/endpoints";
 import {
   twoFactorDisableFormSchema,
   verifyCodeFormSchema,
   type TwoFactorSetup,
-} from '../api/schemas'
-import { validateForm, type FieldErrors } from '../lib/forms'
-import { useAsync } from '../lib/useAsync'
-import { CopyButton } from './CopyButton'
-import { Box, BoxBody, BoxHeader } from './primitives/Box'
-import { Button } from './primitives/Button'
-import { Flash } from './primitives/Flash'
-import { Label } from './primitives/Label'
-import { ErrorState, LoadingState } from './primitives/StateViews'
-import { TextInput } from './primitives/TextInput'
+} from "../api/schemas";
+import { validateForm, type FieldErrors } from "../lib/forms";
+import { useAsync } from "../lib/useAsync";
+import { CopyButton } from "./CopyButton";
+import { Box, BoxBody, BoxHeader } from "./primitives/Box";
+import { Button } from "./primitives/Button";
+import { Flash } from "./primitives/Flash";
+import { Label } from "./primitives/Label";
+import { ErrorState, LoadingState } from "./primitives/StateViews";
+import { TextInput } from "./primitives/TextInput";
 
 /** `isApiError` first, then the caller's context-specific sentence. */
 function describeError(error: unknown, fallback: string): string {
-  return isApiError(error) ? error.message : fallback
+  return isApiError(error) ? error.message : fallback;
 }
 
 /**
@@ -34,21 +30,21 @@ function describeError(error: unknown, fallback: string): string {
  * is only reachable from `codes`, so it can never happen without a successful
  * verify in this session.
  */
-type SetupStage = 'scan' | 'codes'
+type SetupStage = "scan" | "codes";
 
 function BackupCodes({
   codes,
   onDone,
 }: {
-  codes: string[]
-  onDone?: () => void
+  codes: string[];
+  onDone?: () => void;
 }) {
   return (
     <Flash variant="warning" title="Save your backup codes">
       <div className="space-y-2">
         <p>
           These codes are shown <strong>once</strong>. Each one signs you in if
-          you lose access to your authenticator app. Store them somewhere safe —
+          you lose access to your authenticator app. Store them somewhere safe -
           they cannot be retrieved again.
         </p>
         <ul className="grid grid-cols-2 gap-1.5 rounded-md border border-attention bg-canvas-default p-2 font-mono text-xs">
@@ -59,7 +55,7 @@ function BackupCodes({
           ))}
         </ul>
         <div className="flex flex-wrap items-center gap-2">
-          <CopyButton value={codes.join('\n')} label="Copy codes" />
+          <CopyButton value={codes.join("\n")} label="Copy codes" />
           {onDone ? (
             <Button
               size="sm"
@@ -73,207 +69,210 @@ function BackupCodes({
         </div>
       </div>
     </Flash>
-  )
+  );
 }
 
 export function TwoFactorPanel() {
   const state = useAsync(
     (signal) => auth.twoFactorStatus({ signal }),
-    'two-factor',
-  )
+    "two-factor",
+  );
 
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const [setup, setSetup] = useState<TwoFactorSetup | null>(null)
-  const [stage, setStage] = useState<SetupStage | null>(null)
-  const [startingSetup, setStartingSetup] = useState(false)
-  const [verifyCode, setVerifyCode] = useState('')
-  const [verifyErrors, setVerifyErrors] = useState<FieldErrors>({})
-  const [verifying, setVerifying] = useState(false)
-  const [enabling, setEnabling] = useState(false)
+  const [setup, setSetup] = useState<TwoFactorSetup | null>(null);
+  const [stage, setStage] = useState<SetupStage | null>(null);
+  const [startingSetup, setStartingSetup] = useState(false);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [verifyErrors, setVerifyErrors] = useState<FieldErrors>({});
+  const [verifying, setVerifying] = useState(false);
+  const [enabling, setEnabling] = useState(false);
 
-  const [regenerateOpen, setRegenerateOpen] = useState(false)
-  const [regenCode, setRegenCode] = useState('')
-  const [regenErrors, setRegenErrors] = useState<FieldErrors>({})
-  const [regenerating, setRegenerating] = useState(false)
-  const [newCodes, setNewCodes] = useState<string[] | null>(null)
+  const [regenerateOpen, setRegenerateOpen] = useState(false);
+  const [regenCode, setRegenCode] = useState("");
+  const [regenErrors, setRegenErrors] = useState<FieldErrors>({});
+  const [regenerating, setRegenerating] = useState(false);
+  const [newCodes, setNewCodes] = useState<string[] | null>(null);
 
-  const [disableOpen, setDisableOpen] = useState(false)
-  const [disablePassword, setDisablePassword] = useState('')
-  const [disableCode, setDisableCode] = useState('')
-  const [disableErrors, setDisableErrors] = useState<FieldErrors>({})
-  const [disabling, setDisabling] = useState(false)
+  const [disableOpen, setDisableOpen] = useState(false);
+  const [disablePassword, setDisablePassword] = useState("");
+  const [disableCode, setDisableCode] = useState("");
+  const [disableErrors, setDisableErrors] = useState<FieldErrors>({});
+  const [disabling, setDisabling] = useState(false);
 
-  const status = state.data
+  const status = state.data;
 
   const startSetup = () => {
-    setActionError(null)
-    setNotice(null)
-    setStartingSetup(true)
+    setActionError(null);
+    setNotice(null);
+    setStartingSetup(true);
     void auth.twoFactorSetup().then(
       (result) => {
-        setStartingSetup(false)
-        setSetup(result)
-        setStage('scan')
-        setVerifyCode('')
-        setVerifyErrors({})
+        setStartingSetup(false);
+        setSetup(result);
+        setStage("scan");
+        setVerifyCode("");
+        setVerifyErrors({});
       },
       (error: unknown) => {
-        setStartingSetup(false)
-        setActionError(
-          describeError(error, 'Two-factor authentication could not be started.'),
-        )
-      },
-    )
-  }
-
-  const cancelSetup = () => {
-    setSetup(null)
-    setStage(null)
-    setVerifyCode('')
-    setVerifyErrors({})
-    setActionError(null)
-  }
-
-  const onVerify = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    setActionError(null)
-    setNotice(null)
-
-    const validation = validateForm(verifyCodeFormSchema, { code: verifyCode })
-    if (!validation.ok) {
-      setVerifyErrors(validation.errors)
-      return
-    }
-    setVerifyErrors({})
-
-    setVerifying(true)
-    void auth.twoFactorVerify(validation.value.code).then(
-      () => {
-        setVerifying(false)
-        setStage('codes')
-      },
-      (error: unknown) => {
-        setVerifying(false)
-        setActionError(
-          describeError(error, 'That code could not be verified. Try again.'),
-        )
-      },
-    )
-  }
-
-  const onEnable = () => {
-    if (stage !== 'codes' || !setup) return
-
-    setActionError(null)
-    setNotice(null)
-    setEnabling(true)
-    void auth.twoFactorEnable().then(
-      () => {
-        setEnabling(false)
-        setSetup(null)
-        setStage(null)
-        setVerifyCode('')
-        setVerifyErrors({})
-        setNotice('Two-factor authentication is now enabled.')
-        state.reload()
-      },
-      (error: unknown) => {
-        setEnabling(false)
+        setStartingSetup(false);
         setActionError(
           describeError(
             error,
-            'Two-factor authentication could not be enabled.',
+            "Two-factor authentication could not be started.",
           ),
-        )
+        );
       },
-    )
-  }
+    );
+  };
 
-  const closeRegenerate = () => {
-    setRegenerateOpen(false)
-    setRegenCode('')
-    setRegenErrors({})
-  }
+  const cancelSetup = () => {
+    setSetup(null);
+    setStage(null);
+    setVerifyCode("");
+    setVerifyErrors({});
+    setActionError(null);
+  };
 
-  const onRegenerate = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    setActionError(null)
-    setNotice(null)
+  const onVerify = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setActionError(null);
+    setNotice(null);
 
-    const validation = validateForm(verifyCodeFormSchema, { code: regenCode })
+    const validation = validateForm(verifyCodeFormSchema, { code: verifyCode });
     if (!validation.ok) {
-      setRegenErrors(validation.errors)
-      return
+      setVerifyErrors(validation.errors);
+      return;
     }
-    setRegenErrors({})
+    setVerifyErrors({});
 
-    setRegenerating(true)
-    void auth.twoFactorBackupCodes(validation.value.code).then(
-      (result) => {
-        setRegenerating(false)
-        setRegenerateOpen(false)
-        setRegenCode('')
-        setNewCodes(result.backup_codes)
-        setNotice('Your backup codes have been regenerated.')
-        state.reload()
+    setVerifying(true);
+    void auth.twoFactorVerify(validation.value.code).then(
+      () => {
+        setVerifying(false);
+        setStage("codes");
       },
       (error: unknown) => {
-        setRegenerating(false)
+        setVerifying(false);
         setActionError(
-          describeError(error, 'New backup codes could not be generated.'),
-        )
+          describeError(error, "That code could not be verified. Try again."),
+        );
       },
-    )
-  }
+    );
+  };
+
+  const onEnable = () => {
+    if (stage !== "codes" || !setup) return;
+
+    setActionError(null);
+    setNotice(null);
+    setEnabling(true);
+    void auth.twoFactorEnable().then(
+      () => {
+        setEnabling(false);
+        setSetup(null);
+        setStage(null);
+        setVerifyCode("");
+        setVerifyErrors({});
+        setNotice("Two-factor authentication is now enabled.");
+        state.reload();
+      },
+      (error: unknown) => {
+        setEnabling(false);
+        setActionError(
+          describeError(
+            error,
+            "Two-factor authentication could not be enabled.",
+          ),
+        );
+      },
+    );
+  };
+
+  const closeRegenerate = () => {
+    setRegenerateOpen(false);
+    setRegenCode("");
+    setRegenErrors({});
+  };
+
+  const onRegenerate = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setActionError(null);
+    setNotice(null);
+
+    const validation = validateForm(verifyCodeFormSchema, { code: regenCode });
+    if (!validation.ok) {
+      setRegenErrors(validation.errors);
+      return;
+    }
+    setRegenErrors({});
+
+    setRegenerating(true);
+    void auth.twoFactorBackupCodes(validation.value.code).then(
+      (result) => {
+        setRegenerating(false);
+        setRegenerateOpen(false);
+        setRegenCode("");
+        setNewCodes(result.backup_codes);
+        setNotice("Your backup codes have been regenerated.");
+        state.reload();
+      },
+      (error: unknown) => {
+        setRegenerating(false);
+        setActionError(
+          describeError(error, "New backup codes could not be generated."),
+        );
+      },
+    );
+  };
 
   const closeDisable = () => {
-    setDisableOpen(false)
-    setDisablePassword('')
-    setDisableCode('')
-    setDisableErrors({})
-  }
+    setDisableOpen(false);
+    setDisablePassword("");
+    setDisableCode("");
+    setDisableErrors({});
+  };
 
   const onDisable = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    setActionError(null)
-    setNotice(null)
+    event.preventDefault();
+    setActionError(null);
+    setNotice(null);
 
     const validation = validateForm(twoFactorDisableFormSchema, {
       password: disablePassword,
       code: disableCode,
-    })
+    });
     if (!validation.ok) {
-      setDisableErrors(validation.errors)
-      return
+      setDisableErrors(validation.errors);
+      return;
     }
-    setDisableErrors({})
+    setDisableErrors({});
 
-    setDisabling(true)
+    setDisabling(true);
     void auth
       .twoFactorDisable(validation.value.password, validation.value.code)
       .then(
         () => {
-          setDisabling(false)
-          setDisableOpen(false)
-          setDisablePassword('')
-          setDisableCode('')
-          setNewCodes(null)
-          setNotice('Two-factor authentication has been disabled.')
-          state.reload()
+          setDisabling(false);
+          setDisableOpen(false);
+          setDisablePassword("");
+          setDisableCode("");
+          setNewCodes(null);
+          setNotice("Two-factor authentication has been disabled.");
+          state.reload();
         },
         (error: unknown) => {
-          setDisabling(false)
+          setDisabling(false);
           setActionError(
             describeError(
               error,
-              'Two-factor authentication could not be disabled.',
+              "Two-factor authentication could not be disabled.",
             ),
-          )
+          );
         },
-      )
-  }
+      );
+  };
 
   return (
     <Box>
@@ -316,14 +315,12 @@ export function TwoFactorPanel() {
               onClick={startSetup}
               disabled={startingSetup}
             >
-              {startingSetup
-                ? 'Starting…'
-                : 'Enable two-factor authentication'}
+              {startingSetup ? "Starting…" : "Enable two-factor authentication"}
             </Button>
           </div>
         ) : null}
 
-        {status && !status.enabled && setup && stage === 'scan' ? (
+        {status && !status.enabled && setup && stage === "scan" ? (
           <div className="space-y-4">
             <p className="text-xs font-medium text-muted">Step 1 of 2</p>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -353,8 +350,8 @@ export function TwoFactorPanel() {
               <form className="space-y-3" onSubmit={onVerify} noValidate>
                 <p className="text-sm">
                   Scan the QR code with your authenticator app, then enter the
-                  6-digit code it shows to confirm the app is set up. You&apos;ll
-                  get your backup codes in the next step.
+                  6-digit code it shows to confirm the app is set up.
+                  You&apos;ll get your backup codes in the next step.
                 </p>
                 <TextInput
                   label="Verification code"
@@ -369,7 +366,7 @@ export function TwoFactorPanel() {
                 />
                 <div className="flex flex-wrap gap-2">
                   <Button type="submit" variant="primary" disabled={verifying}>
-                    {verifying ? 'Verifying…' : 'Verify code'}
+                    {verifying ? "Verifying…" : "Verify code"}
                   </Button>
                   <Button onClick={cancelSetup} disabled={verifying}>
                     Cancel
@@ -380,13 +377,12 @@ export function TwoFactorPanel() {
           </div>
         ) : null}
 
-        {status && !status.enabled && setup && stage === 'codes' ? (
+        {status && !status.enabled && setup && stage === "codes" ? (
           <div className="space-y-3">
             <p className="text-xs font-medium text-muted">Step 2 of 2</p>
             <p className="text-sm">
               Save these backup codes somewhere safe, then confirm to turn on
-              two-factor authentication. You can take as long as you need — no
-              code is required to finish.
+              two-factor authentication.
             </p>
             <BackupCodes codes={setup.backup_codes} onDone={onEnable} />
             <div className="flex flex-wrap gap-2">
@@ -402,8 +398,8 @@ export function TwoFactorPanel() {
             <div className="flex flex-wrap items-center gap-2">
               <Label variant="success">Enabled</Label>
               <span className="text-sm text-muted">
-                {status.backup_codes_remaining} backup{' '}
-                {status.backup_codes_remaining === 1 ? 'code' : 'codes'}{' '}
+                {status.backup_codes_remaining} backup{" "}
+                {status.backup_codes_remaining === 1 ? "code" : "codes"}{" "}
                 remaining.
               </span>
               {status.backup_codes_remaining === 0 ? (
@@ -442,7 +438,7 @@ export function TwoFactorPanel() {
                     variant="primary"
                     disabled={regenerating}
                   >
-                    {regenerating ? 'Generating…' : 'Regenerate codes'}
+                    {regenerating ? "Generating…" : "Regenerate codes"}
                   </Button>
                   <Button onClick={closeRegenerate} disabled={regenerating}>
                     Cancel
@@ -452,9 +448,9 @@ export function TwoFactorPanel() {
             ) : (
               <Button
                 onClick={() => {
-                  setRegenerateOpen(true)
-                  setRegenCode('')
-                  setRegenErrors({})
+                  setRegenerateOpen(true);
+                  setRegenCode("");
+                  setRegenErrors({});
                 }}
               >
                 Regenerate backup codes
@@ -469,8 +465,8 @@ export function TwoFactorPanel() {
               >
                 <p className="text-sm">
                   Disabling two-factor authentication removes the second sign-in
-                  step and invalidates your backup codes. Enter your password and
-                  a current code to confirm.
+                  step and invalidates your backup codes. Enter your password
+                  and a current code to confirm.
                 </p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <TextInput
@@ -493,14 +489,10 @@ export function TwoFactorPanel() {
                   />
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="submit"
-                    variant="danger"
-                    disabled={disabling}
-                  >
+                  <Button type="submit" variant="danger" disabled={disabling}>
                     {disabling
-                      ? 'Disabling…'
-                      : 'Disable two-factor authentication'}
+                      ? "Disabling…"
+                      : "Disable two-factor authentication"}
                   </Button>
                   <Button onClick={closeDisable} disabled={disabling}>
                     Cancel
@@ -511,10 +503,10 @@ export function TwoFactorPanel() {
               <Button
                 variant="danger"
                 onClick={() => {
-                  setDisableOpen(true)
-                  setDisablePassword('')
-                  setDisableCode('')
-                  setDisableErrors({})
+                  setDisableOpen(true);
+                  setDisablePassword("");
+                  setDisableCode("");
+                  setDisableErrors({});
                 }}
               >
                 Disable two-factor authentication
@@ -524,5 +516,5 @@ export function TwoFactorPanel() {
         ) : null}
       </BoxBody>
     </Box>
-  )
+  );
 }

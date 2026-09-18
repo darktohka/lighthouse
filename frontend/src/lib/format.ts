@@ -2,7 +2,7 @@
 
 /** Formats a byte count using decimal units (KB/MB/GB), as registries do. */
 export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  if (!Number.isFinite(bytes) || bytes < 0) return '-'
   if (bytes < 1000) return `${bytes} B`
   const units = ['KB', 'MB', 'GB', 'TB', 'PB']
   let value = bytes / 1000
@@ -53,7 +53,7 @@ export function formatModeOctal(mode: number): string {
 }
 
 export function formatNumber(value: number): string {
-  if (!Number.isFinite(value)) return '—'
+  if (!Number.isFinite(value)) return '-'
   return value.toLocaleString()
 }
 
@@ -97,9 +97,9 @@ export function formatRelativeTime(value: string): string {
  * Splits a shell command line (typically an image config `created_by`) into
  * readable logical lines.
  *
- * A break is inserted *before* each shell control operator — `&&`, `||`, `;`
+ * A break is inserted *before* each shell control operator - `&&`, `||`, `;`
  * and the whole-word keywords `then`, `do`, `done`, `else`, `elif`, `fi`,
- * `esac` — so the operator starts the following line. A bare `|` is
+ * `esac` - so the operator starts the following line. A bare `|` is
  * deliberately left alone: buildkit's `RUN |4 ...` heredoc prefix is part of
  * the command rather than a pipeline separator. CRLF/CR endings are normalized
  * to LF, each line is trimmed, whitespace following an operator is collapsed to
@@ -119,7 +119,7 @@ export function splitCommandLines(value: string): string[] {
     .filter((line) => line.length > 0)
 }
 
-/** `sha256:0123456789ab…` — enough to identify a digest without the noise. */
+/** `sha256:0123456789ab…` - enough to identify a digest without the noise. */
 export function shortDigest(digest: string): string {
   const separator = digest.indexOf(':')
   if (separator < 0) return digest

@@ -291,23 +291,6 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
               )
             ) : null}
           </Box>
-
-          <p className="text-xs text-muted">
-            View the manifest, config and layers by opening a tag.{' '}
-            {user ? (
-              <Link
-                to={`/repositories/${encodeURIComponent(namespace)}/${repo
-                  .split('/')
-                  .map((segment) => encodeURIComponent(segment))
-                  .join('/')}/settings`}
-                className="text-accent hover:underline"
-              >
-                Repository settings and permissions
-              </Link>
-            ) : (
-              'Repository settings and permissions are available to the owner.'
-            )}
-          </p>
         </>
       ) : null}
     </div>

@@ -19,7 +19,7 @@ export function OneTimeToken({
     <Flash variant="warning" title={title}>
       <div className="space-y-2">
         <p>
-          This token is shown <strong>once</strong>. Store it somewhere safe — it
+          This token is shown <strong>once</strong>. Store it somewhere safe - it
           cannot be retrieved again.
         </p>
         <div className="flex flex-col gap-2 rounded-md border border-attention bg-canvas-default p-2 sm:flex-row sm:items-center sm:justify-between">

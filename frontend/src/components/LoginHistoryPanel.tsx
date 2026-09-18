@@ -50,20 +50,20 @@ export function LoginHistoryPanel() {
       key: 'ip',
       header: 'IP address',
       render: (event) => (
-        <span className="font-mono text-xs">{event.ip ?? '—'}</span>
+        <span className="font-mono text-xs">{event.ip ?? '-'}</span>
       ),
     },
     {
       key: 'username',
       header: 'Account',
-      render: (event) => event.username_attempted ?? '—',
+      render: (event) => event.username_attempted ?? '-',
     },
     {
       key: 'agent',
       header: 'User agent',
       render: (event) => (
         <span className="block max-w-xs truncate text-xs text-muted" title={event.user_agent ?? ''}>
-          {event.user_agent ?? '—'}
+          {event.user_agent ?? '-'}
         </span>
       ),
     },

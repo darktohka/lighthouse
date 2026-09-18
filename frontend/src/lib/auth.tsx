@@ -1,7 +1,7 @@
 /**
  * Authentication provider.
  *
- * The access token never touches JS — it is an httpOnly cookie. This provider
+ * The access token never touches JS - it is an httpOnly cookie. This provider
  * only mirrors the *identity* returned by `/api/auth/me` and stores the
  * refresh token (the one credential the backend explicitly returns in JSON).
  */

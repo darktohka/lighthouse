@@ -535,6 +535,27 @@ pub async fn visible_repository_ids(
     Ok(visible)
 }
 
+/// Every repository id the caller may push to. Anonymous callers never hold
+/// push access, so this is empty for them.
+pub async fn pushable_repository_ids(
+    state: &AppState,
+    actor: &AuthContext,
+) -> ApiResult<HashSet<i64>> {
+    let repositories = sqlx::query_as::<_, Repository>("SELECT * FROM repositories ORDER BY id")
+        .fetch_all(&state.db)
+        .await?;
+    let mut pushable = HashSet::new();
+    for repository in repositories {
+        if authz::repository_access(state, actor, &repository.name)
+            .await?
+            .can_push
+        {
+            pushable.insert(repository.id);
+        }
+    }
+    Ok(pushable)
+}
+
 // ---------------------------------------------------------------------------
 // Size accounting
 // ---------------------------------------------------------------------------

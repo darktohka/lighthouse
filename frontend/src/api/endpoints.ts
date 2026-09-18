@@ -401,7 +401,7 @@ export const repositories = {
   },
 
   /**
-   * `GET /repositories/{namespace}/{*repo}/pulls?days=` — API.md describes the
+   * `GET /repositories/{namespace}/{*repo}/pulls?days=` - API.md describes the
    * endpoint but not its response body, so it is bound as opaque JSON until the
    * contract is firmed up. The pull-statistics UI is deferred to the next wave.
    */

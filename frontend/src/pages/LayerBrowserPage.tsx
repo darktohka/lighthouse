@@ -213,7 +213,7 @@ function FilePreview({
     return (
       <div className="space-y-2">
         <p className="text-sm text-muted">
-          Binary file ({result.contentType || 'unknown type'}) — preview
+          Binary file ({result.contentType || 'unknown type'}) - preview
           unavailable.
         </p>
         <AnchorButton
@@ -610,7 +610,7 @@ export function LayerBrowserPage({
           return (
             <span
               className="font-mono text-danger line-through"
-              title="Removed in this layer — no contents to preview"
+              title="Removed in this layer - no contents to preview"
             >
               {entry.name}
             </span>

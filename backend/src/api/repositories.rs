@@ -26,8 +26,8 @@ use super::permissions as delegations;
 use super::{
     LayerInfo, PageQuery, Pagination, Platform, PlatformDetail, RepositoryDetail,
     RepositorySummary, TagDetail, TagSizeEntry, TagSummary, apply_layer_history,
-    is_namespace_owner, load_namespace, namespace_by_id, repository_blob_totals, tag_size_map,
-    user_summary, visible_repository, visible_repository_ids,
+    is_namespace_owner, load_namespace, namespace_by_id, pushable_repository_ids,
+    repository_blob_totals, tag_size_map, user_summary, visible_repository,
 };
 
 // ---------------------------------------------------------------------------
@@ -1115,10 +1115,9 @@ struct GlobalTagRow {
 
 async fn list_all_tags(
     State(state): State<AppState>,
-    auth: Auth,
+    Authenticated(actor): Authenticated,
     Query(query): Query<AllTagsQuery>,
 ) -> ApiResult<Response> {
-    let actor = auth.0;
     let sort = query.sort.unwrap_or_else(|| "total_size".to_string());
     if sort != "total_size" && sort != "unique_size" {
         return Err(ApiError::bad_request(
@@ -1130,7 +1129,7 @@ async fn list_all_tags(
         return Err(ApiError::bad_request("order must be `asc` or `desc`"));
     }
 
-    let visible = visible_repository_ids(&state, &actor).await?;
+    let pushable = pushable_repository_ids(&state, &actor).await?;
     let namespace_filter = match query.namespace.as_deref() {
         Some(raw) if !raw.trim().is_empty() => {
             let namespace = load_namespace(&state.db, raw.trim())
@@ -1168,7 +1167,7 @@ async fn list_all_tags(
 
     let mut candidates = Vec::new();
     for row in rows {
-        if !visible.contains(&row.repository_id) {
+        if !pushable.contains(&row.repository_id) {
             continue;
         }
         if let Some(namespace_id) = namespace_filter {

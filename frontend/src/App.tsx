@@ -56,7 +56,14 @@ export default function App() {
               </Suspense>
             }
           />
-          <Route path="tags" element={<TagCleanupPage />} />
+          <Route
+            path="tags"
+            element={
+              <RequireAuth>
+                <TagCleanupPage />
+              </RequireAuth>
+            }
+          />
           <Route path="users/:username" element={<ProfilePage />} />
           <Route
             path="settings"

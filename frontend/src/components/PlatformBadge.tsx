@@ -38,7 +38,7 @@ export function PlatformBadges({
   className,
 }: PlatformBadgesProps) {
   if (platforms.length === 0) {
-    return <span className="text-xs text-muted">—</span>
+    return <span className="text-xs text-muted">-</span>
   }
   const visible = platforms.slice(0, limit)
   const hidden = platforms.length - visible.length

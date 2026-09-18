@@ -111,13 +111,10 @@ export function TagCleanupPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="Tags by storage"
-        description="Find the tags consuming the most disk space and reclaim shared storage."
-      />
+      <PageHeader title="Tags by storage" />
 
-      <div className="flex flex-wrap items-end gap-3">
-        {namespaces.length > 1 ? (
+      {namespaces.length > 1 ? (
+        <div className="flex flex-wrap items-end gap-3">
           <div className="w-56">
             <SelectField
               label="Namespace"
@@ -132,12 +129,8 @@ export function TagCleanupPage() {
               ]}
             />
           </div>
-        ) : null}
-        <p className="text-xs text-muted">
-          Sort by <strong>unique size</strong> to see the storage that would
-          actually be reclaimed.
-        </p>
-      </div>
+        </div>
+      ) : null}
 
       {result ? (
         <Flash variant="success" onDismiss={() => setResult(null)}>
@@ -174,11 +167,6 @@ export function TagCleanupPage() {
             />
           </span>
         </div>
-      ) : null}
-      {!user ? (
-        <p className="text-xs text-muted">
-          Sign in to delete tags. Deleting requires push access to each repository.
-        </p>
       ) : null}
 
       <Box>
