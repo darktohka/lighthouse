@@ -1075,6 +1075,10 @@ async fn cumulative_overlay(
     layers: &[Digest],
     position: usize,
 ) -> ApiResult<Arc<ComposedLayer>> {
+    let target: ComposedKey = (manifest_digest.clone(), position);
+    if let Some(hit) = state.composed_cache.get(&target) {
+        return Ok(hit);
+    }
     let mut current: Arc<ComposedLayer> = Arc::new(ComposedLayer::empty());
     for (index, layer) in layers.iter().enumerate().take(position + 1) {
         let key: ComposedKey = (manifest_digest.clone(), index);
@@ -1314,20 +1318,30 @@ pub async fn layer_tree(
 
     let manifest_digest = Digest::parse(&manifest.digest).map_err(ApiError::from)?;
     let final_layer = cumulative_overlay(&state, &manifest_digest, &layers, position).await?;
-    let mut changes: Option<Changes> = None;
+    let mut changes: Option<Arc<Changes>> = None;
     let lower_layer = if mode.shows_ghosts() {
         let lower = match position.checked_sub(1) {
             Some(lower) => cumulative_overlay(&state, &manifest_digest, &layers, lower).await?,
             None => Arc::new(ComposedLayer::empty()),
         };
-        changes = Some(crate::layer_cache::classify(&final_layer, &lower));
+        let change_key: ComposedKey = (manifest_digest.clone(), position);
+        changes = Some(
+            state
+                .changes_cache
+                .get_or_build(&change_key, {
+                    let final_layer = Arc::clone(&final_layer);
+                    let lower = Arc::clone(&lower);
+                    move || Ok(Arc::new(crate::layer_cache::classify(&final_layer, &lower)))
+                })
+                .await?,
+        );
         lower
     } else {
         Arc::new(ComposedLayer::empty())
     };
 
     let entries = run_blocking(move || {
-        list_level_composed(&final_layer, &lower_layer, &path, changes.as_ref(), mode)
+        list_level_composed(&final_layer, &lower_layer, &path, changes.as_deref(), mode)
     })
     .await?;
 

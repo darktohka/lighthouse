@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::layer_cache::{ComposedLayerCache, LayerCacheConfig, LayerIndexCache};
+use crate::layer_cache::{ChangesCache, ComposedLayerCache, LayerCacheConfig, LayerIndexCache};
 use crate::ratelimit::Limiters;
 use crate::storage::Storage;
 use crate::storage::registry::Registry;
@@ -68,6 +68,9 @@ pub struct AppState {
     /// Cumulative overlays keyed by `(manifest_digest, layer_position)`; see
     /// [`crate::layer_cache::ComposedLayerCache`].
     pub composed_cache: Arc<ComposedLayerCache>,
+    /// Diff classifications keyed by `(manifest_digest, layer_position)`; see
+    /// [`crate::layer_cache::ChangesCache`].
+    pub changes_cache: Arc<ChangesCache>,
 }
 
 impl AppState {
@@ -87,6 +90,7 @@ impl AppState {
             cache_config,
             layer_cache.generation(),
         ));
+        let changes_cache = Arc::new(ChangesCache::new(cache_config, layer_cache.generation()));
 
         Ok(Self {
             config: Arc::new(config),
@@ -96,6 +100,7 @@ impl AppState {
             limiters,
             layer_cache,
             composed_cache,
+            changes_cache,
         })
     }
 }

@@ -176,7 +176,7 @@ impl Config {
 
             max_blob_size: env::var("MAX_BLOB_SIZE").ok().and_then(|v| v.parse().ok()),
 
-            layer_cache_max_bytes: env_parse("LAYER_CACHE_MAX_BYTES", 64 * 1024 * 1024)?,
+            layer_cache_max_bytes: env_parse("LAYER_CACHE_MAX_BYTES", 256 * 1024 * 1024)?,
             layer_cache_ttl_secs: env_parse("LAYER_CACHE_TTL_SECS", 900)?,
             layer_max_scan_bytes,
             layer_max_entries,

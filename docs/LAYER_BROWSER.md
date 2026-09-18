@@ -219,7 +219,7 @@ The cache is bounded and self-expiring:
 
 | Bound | Default | Behaviour |
 |---|---|---|
-| `LAYER_CACHE_MAX_BYTES` | 64 MiB | Estimated total footprint; least-recently-used indices are evicted first. An index whose own weight exceeds the budget is never cached, so one huge layer cannot flush every other layer. |
+| `LAYER_CACHE_MAX_BYTES` | 256 MiB | Estimated total footprint; least-recently-used indices are evicted first. An index whose own weight exceeds the budget is never cached, so one huge layer cannot flush every other layer. |
 | `LAYER_CACHE_TTL_SECS` | 900 s | An index older than this is a miss and is rebuilt. Expired indices are reclaimed by a sweep scheduled for the earliest entry's expiry, never on a fixed cadence. |
 
 Concurrent misses for one digest are collapsed onto a single scan: the first
@@ -245,6 +245,11 @@ The composed cache shares the layer-index cache's generation counter:
 `invalidate` and `clear` advance it, and an overlay stamped with an older
 generation is treated as a miss and rebuilt. A layer whose blob was removed can
 therefore never be served from a stale aggregate.
+
+A third, identically bounded cache holds the diff classification — the per-path
+`Changes` map — keyed the same way, so a repeated `diff` or `aggregate-diff`
+does not reclassify. It shares the same generation counter and is likewise
+dropped when a layer index is invalidated.
 
 `file` is not cached: returning a single file's bytes would still require
 decompressing everything before it, so it keeps its early-exit scan.

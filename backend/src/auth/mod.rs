@@ -123,7 +123,7 @@ pub(crate) mod test_support {
             rate_limit_login_per_minute: 10,
             rate_limit_register_per_hour: 20,
             max_blob_size: None,
-            layer_cache_max_bytes: 64 * 1024 * 1024,
+            layer_cache_max_bytes: 256 * 1024 * 1024,
             layer_cache_ttl_secs: 900,
             layer_max_scan_bytes: 64 * 1024 * 1024,
             layer_max_entries: 100_000,

@@ -404,6 +404,23 @@ impl Changes {
     pub fn get(&self, path: &str) -> Option<Change> {
         self.changes.get(path).copied()
     }
+
+    /// Estimated heap footprint of this change map in bytes.
+    pub fn weight(&self) -> usize {
+        self.changes
+            .keys()
+            .map(|path| path.len() + ENTRY_OVERHEAD_BYTES)
+            .sum()
+    }
+
+    /// Number of classified paths.
+    pub fn len(&self) -> usize {
+        self.changes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
 }
 
 /// Classifies every path in `final_layer` relative to `lower_layer`. Directory
@@ -556,9 +573,9 @@ pub struct LayerCacheConfig {
 }
 
 impl LayerCacheConfig {
-    /// 64 MiB: several hundred typical image layers, or a handful of layers at
+    /// 256 MiB: several hundred typical image layers, or a handful of layers at
     /// the 100k-entry cap, while staying well inside a small container's RAM.
-    pub const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
+    pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
     /// 15 minutes: warm for an interactive browsing session, bounded staleness.
     pub const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
 }
@@ -1143,6 +1160,271 @@ impl ComposedLayerCache {
     }
 }
 
+struct ChangesEntry {
+    changes: Arc<Changes>,
+    inserted_at: Instant,
+    seq: u64,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct ChangesInner {
+    entries: HashMap<ComposedKey, ChangesEntry>,
+    order: BTreeMap<u64, ComposedKey>,
+    inflight: HashMap<ComposedKey, Arc<tokio::sync::Mutex<()>>>,
+    clock: u64,
+    weight: usize,
+    next_expires: Option<Instant>,
+}
+
+impl ChangesInner {
+    fn remove(&mut self, key: &ComposedKey) -> Option<Arc<Changes>> {
+        let entry = self.entries.remove(key)?;
+        self.order.remove(&entry.seq);
+        self.weight = self.weight.saturating_sub(entry.changes.weight());
+        Some(entry.changes)
+    }
+
+    fn touch(&mut self, key: &ComposedKey) -> Option<u64> {
+        let old_seq = self.entries.get(key)?.seq;
+        self.clock += 1;
+        let next = self.clock;
+        self.order.remove(&old_seq);
+        self.order.insert(next, key.clone());
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.seq = next;
+        }
+        Some(next)
+    }
+}
+
+/// RAII lease on one change-classification build lock; see [`LayerBuildLease`].
+struct ChangesBuildLease<'a> {
+    cache: &'a ChangesCache,
+    key: ComposedKey,
+    slot: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ChangesBuildLease<'_> {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.slot.lock().await
+    }
+}
+
+impl Drop for ChangesBuildLease<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.cache.lock();
+        let ours = inner
+            .inflight
+            .get(&self.key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, &self.slot));
+        // See `LayerBuildLease`: leave the entry for waiters that share it.
+        if ours && Arc::strong_count(&self.slot) <= 2 {
+            inner.inflight.remove(&self.key);
+        }
+    }
+}
+
+/// Concurrent, bounded, self-expiring cache of diff classifications.
+///
+/// Entries are keyed by `(manifest_digest, layer_position)` and stamped with
+/// the [`LayerIndexCache`] generation at build time; a lookup whose generation
+/// is stale is a miss, so invalidating a layer index can never leave a
+/// classification of data derived from it.
+pub struct ChangesCache {
+    config: LayerCacheConfig,
+    inner: Mutex<ChangesInner>,
+    sweeps: AtomicU64,
+    generation: Arc<AtomicU64>,
+}
+
+impl ChangesCache {
+    pub fn new(config: LayerCacheConfig, generation: Arc<AtomicU64>) -> Self {
+        Self {
+            config,
+            inner: Mutex::new(ChangesInner::default()),
+            sweeps: AtomicU64::new(0),
+            generation,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ChangesInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Returns a cached classification, dropping it first when its generation
+    /// is stale or its TTL has elapsed.
+    pub fn get(&self, key: &ComposedKey) -> Option<Arc<Changes>> {
+        let now = Instant::now();
+        let mut inner = self.lock();
+        self.sweep_if_due(&mut inner, now);
+        let generation = self.current_generation();
+        if inner
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.generation != generation)
+        {
+            inner.remove(key);
+        }
+        if self.is_expired(inner.entries.get(key), now) {
+            inner.remove(key);
+            return None;
+        }
+        inner.touch(key);
+        inner
+            .entries
+            .get(key)
+            .map(|entry| Arc::clone(&entry.changes))
+    }
+
+    /// Stores a classification, evicting least-recently-used entries to stay in
+    /// budget.
+    pub fn insert(&self, key: ComposedKey, changes: Arc<Changes>) {
+        let generation = self.current_generation();
+        self.insert_with_generation(key, changes, generation);
+    }
+
+    fn insert_with_generation(&self, key: ComposedKey, changes: Arc<Changes>, generation: u64) {
+        let weight = changes.weight();
+        if weight > self.config.max_bytes {
+            tracing::debug!(weight, "layer change map exceeds cache budget; not cached");
+            return;
+        }
+        let mut inner = self.lock();
+        inner.remove(&key);
+        inner.clock += 1;
+        let seq = inner.clock;
+        let inserted_at = Instant::now();
+        let expires = inserted_at + self.config.ttl;
+        inner.weight += weight;
+        inner.entries.insert(
+            key.clone(),
+            ChangesEntry {
+                changes,
+                inserted_at,
+                seq,
+                generation,
+            },
+        );
+        inner.order.insert(seq, key);
+        inner.next_expires = Some(match inner.next_expires {
+            Some(current) => current.min(expires),
+            None => expires,
+        });
+        self.evict_to_budget(&mut inner);
+    }
+
+    /// Returns the cached classification for `key`, building it with `build` on
+    /// a miss.
+    pub async fn get_or_build<F>(&self, key: &ComposedKey, build: F) -> ApiResult<Arc<Changes>>
+    where
+        F: FnOnce() -> ApiResult<Arc<Changes>> + Send + 'static,
+    {
+        if let Some(changes) = self.get(key) {
+            return Ok(changes);
+        }
+
+        let lease = self.begin_build(key);
+        let _guard = lease.lock().await;
+
+        if let Some(changes) = self.get(key) {
+            return Ok(changes);
+        }
+
+        let generation = self.current_generation();
+        match tokio::task::spawn_blocking(build).await {
+            Ok(Ok(changes)) => {
+                self.insert_with_generation(key.clone(), Arc::clone(&changes), generation);
+                Ok(changes)
+            }
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
+                tracing::error!(error = %err, "layer change classification panicked");
+                Err(ApiError::internal("layer reader failed"))
+            }
+        }
+    }
+
+    /// Number of cached classifications (introspection for tests and metrics).
+    pub fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    /// Estimated total bytes of cached classifications.
+    pub fn weight(&self) -> usize {
+        self.lock().weight
+    }
+
+    /// Number of expired-entry sweeps performed.
+    pub fn sweep_count(&self) -> u64 {
+        self.sweeps.load(Ordering::SeqCst)
+    }
+
+    fn is_expired(&self, entry: Option<&ChangesEntry>, now: Instant) -> bool {
+        entry.is_some_and(|entry| now.duration_since(entry.inserted_at) >= self.config.ttl)
+    }
+
+    fn begin_build(&self, key: &ComposedKey) -> ChangesBuildLease<'_> {
+        let mut inner = self.lock();
+        let slot = Arc::clone(
+            inner
+                .inflight
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        );
+        ChangesBuildLease {
+            cache: self,
+            key: key.clone(),
+            slot,
+        }
+    }
+
+    fn evict_to_budget(&self, inner: &mut ChangesInner) {
+        while inner.weight > self.config.max_bytes {
+            let victim = inner.order.iter().next().map(|(_, key)| key.clone());
+            match victim {
+                Some(victim) => {
+                    inner.remove(&victim);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn sweep_if_due(&self, inner: &mut ChangesInner, now: Instant) {
+        let due = inner.next_expires.is_some_and(|next| now >= next);
+        if !due {
+            return;
+        }
+        self.sweep_expired_locked(inner, now);
+    }
+
+    fn sweep_expired_locked(&self, inner: &mut ChangesInner, now: Instant) {
+        self.sweeps.fetch_add(1, Ordering::SeqCst);
+        let ttl = self.config.ttl;
+        let mut next: Option<Instant> = None;
+        let mut expired: Vec<ComposedKey> = Vec::new();
+        for (key, entry) in inner.entries.iter() {
+            if now.duration_since(entry.inserted_at) >= ttl {
+                expired.push(key.clone());
+            } else {
+                let expires = entry.inserted_at + ttl;
+                next = Some(next.map_or(expires, |current| current.min(expires)));
+            }
+        }
+        for key in &expired {
+            inner.remove(key);
+        }
+        inner.next_expires = next;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,5 +1809,61 @@ mod tests {
             leaked, 0,
             "a cancelled composed build must not leave an in-flight entry"
         );
+    }
+
+    fn changes(paths: &[&str]) -> Arc<Changes> {
+        let changes = paths
+            .iter()
+            .map(|path| ((*path).to_string(), Change::New))
+            .collect();
+        Arc::new(Changes { changes })
+    }
+
+    #[test]
+    fn changes_cache_skips_an_entry_larger_than_the_budget() {
+        let generation = LayerIndexCache::new(config(1024)).generation();
+        let cache = ChangesCache::new(config(100), generation);
+        cache.insert((digest(1), 0), changes(&["a"]));
+        assert_eq!(cache.len(), 1, "a small change map is cached");
+
+        // A 40-byte path weighs 40 + 64 = 104, over the 100-byte budget.
+        let heavy = "x".repeat(40);
+        cache.insert((digest(2), 0), changes(&[heavy.as_str()]));
+        assert_eq!(cache.len(), 1, "an oversized change map is not cached");
+    }
+
+    #[test]
+    fn changes_cache_expired_entry_is_treated_as_a_miss() {
+        let generation = LayerIndexCache::new(config(1024)).generation();
+        let cache = ChangesCache::new(
+            LayerCacheConfig {
+                max_bytes: 1024,
+                ttl: Duration::from_millis(10),
+            },
+            generation,
+        );
+        let key: ComposedKey = (digest(1), 0);
+        cache.insert(key.clone(), changes(&["etc"]));
+        assert!(cache.get(&key).is_some());
+
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(cache.get(&key).is_none(), "TTL elapsed");
+        assert_eq!(cache.len(), 0, "expired entry is reclaimed");
+    }
+
+    #[test]
+    fn changes_cache_stale_generation_is_treated_as_a_miss() {
+        let layer_cache = LayerIndexCache::new(config(1024));
+        let cache = ChangesCache::new(config(1024), layer_cache.generation());
+        let key: ComposedKey = (digest(1), 0);
+        cache.insert(key.clone(), changes(&["etc"]));
+        assert!(cache.get(&key).is_some());
+
+        layer_cache.invalidate(&digest(9));
+        assert!(
+            cache.get(&key).is_none(),
+            "a generation advance invalidates cached classifications"
+        );
+        assert_eq!(cache.len(), 0);
     }
 }
