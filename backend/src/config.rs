@@ -54,6 +54,9 @@ pub struct Config {
     pub brevo_sender_name: String,
 
     pub captcha_enabled: bool,
+    /// Number of leading hexadecimal characters a proof-of-work hash must
+    /// match (not bits). Each increment multiplies the solver's work by 16;
+    /// values above ~6 make challenges too slow to solve in the browser.
     pub captcha_difficulty: u32,
 
     pub rate_limit_login_per_minute: u32,
@@ -169,7 +172,7 @@ impl Config {
             brevo_sender_name: env_or("BREVO_SENDER_NAME", "Lighthouse Registry"),
 
             captcha_enabled: env_parse("CAPTCHA_ENABLED", true)?,
-            captcha_difficulty: env_parse("CAPTCHA_DIFFICULTY", 18)?,
+            captcha_difficulty: env_parse("CAPTCHA_DIFFICULTY", 5)?,
 
             rate_limit_login_per_minute: env_parse("RATE_LIMIT_LOGIN_PER_MINUTE", 10)?,
             rate_limit_register_per_hour: env_parse("RATE_LIMIT_REGISTER_PER_HOUR", 20)?,

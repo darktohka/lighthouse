@@ -227,7 +227,8 @@ directly reachable by clients.
 - Both are pass-throughs when `CAPTCHA_ENABLED=false`, so registration and login
   work unchanged in development.
 
-Challenge parameters: 50 puzzles, 32-hex salts, difficulty `CAPTCHA_DIFFICULTY`,
+Challenge parameters: 50 puzzles, 32-hex salts, difficulty `CAPTCHA_DIFFICULTY`
+counted in leading hex characters (`0-9a-f`, not bits — each step is 16x harder),
 600 s TTL; redeemed tokens live for 1200 s.
 
 ---
