@@ -134,11 +134,7 @@ RUN rustc --edition 2021 \
         -C opt-level=z -C lto=fat -C codegen-units=1 -C panic=abort -C strip=symbols \
         -C target-feature=+crt-static \
         --target "$(cat /tmp/rust-target)" \
-        /tmp/healthcheck.rs -o /app/healthcheck \
- && mkdir -p /app/data /app/logs /app/database \
- && touch /app/data/.keep /app/logs/.keep /app/database/.keep \
- && printf 'lighthouse:x:10001:10001:Lighthouse:/app:/sbin/nologin\n' > /app/passwd \
- && printf 'lighthouse:x:10001:\n' > /app/group
+        /tmp/healthcheck.rs -o /app/healthcheck
 
 # -----------------------------------------------------------------------------
 # Stage 3 — final image (scratch)
@@ -153,17 +149,11 @@ LABEL org.opencontainers.image.title="Lighthouse" \
 # Server binary and health probe (statically linked, symbols stripped).
 COPY --from=builder /app/registry /app/registry
 COPY --from=builder /app/healthcheck /app/healthcheck
+
 # Built single-page app, served by the backend at /
 COPY --from=frontend /app/dist /app/dist
 # scratch has no trust store; copy the Alpine CA bundle for outbound TLS.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-# Give the unprivileged UID a name and pre-create writable runtime dirs.
-# The docker-compose bind mounts shadow these paths on the host.
-COPY --from=builder /app/passwd /etc/passwd
-COPY --from=builder /app/group /etc/group
-COPY --from=builder --chown=10001:10001 /app/data /app/data
-COPY --from=builder --chown=10001:10001 /app/logs /app/logs
-COPY --from=builder --chown=10001:10001 /app/database /app/database
 
 WORKDIR /app
 EXPOSE 8080
@@ -172,9 +162,6 @@ ENV LOGS_DIR=/app/logs \
     DATA_DIR=/app/data \
     DATABASE_DIR=/app/database \
     FRONTEND_DIR=/app/dist
-
-# Non-root. Host bind mounts must be owned by UID/GID 10001 — see docs/DEPLOYMENT.md.
-USER 10001:10001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/app/healthcheck"]
