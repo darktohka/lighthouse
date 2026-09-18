@@ -1,13 +1,13 @@
 name: build
 
 # Trigger policy:
-#   push to main / v* tags → checks, then native amd64+arm64 builds, then a
-#                            multi-arch image published to Docker Hub + GHCR
+#   push to master / v* tags → checks, then native amd64+arm64 builds, then a
+#                              multi-arch image published to Docker Hub + GHCR
 #   pull_request           → checks only (no push)
 #   workflow_dispatch      → full pipeline on demand
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -76,7 +76,6 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.platform }}
-    needs: checks
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -149,7 +148,7 @@ jobs:
   # ---------------------------------------------------------------------------
   merge:
     name: Publish multi-arch image
-    needs: build
+    needs: [build, checks]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
