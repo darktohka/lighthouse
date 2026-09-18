@@ -144,7 +144,8 @@ async fn build_profile(
     let public_repository_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM repositories r \
          JOIN namespaces n ON n.id = r.namespace_id \
-         WHERE n.owner_user_id = ? AND n.kind = 'user' AND n.is_public = 1 AND r.is_public = 1",
+         WHERE n.owner_user_id = ? AND n.kind = 'user' AND n.is_public = 1 AND r.is_public = 1 \
+           AND r.is_hidden = 0",
     )
     .bind(user.id)
     .fetch_one(&state.db)
@@ -172,7 +173,8 @@ async fn build_profile(
              JOIN repositories r ON r.id = ps.repository_id \
              JOIN namespaces n ON n.id = r.namespace_id \
              WHERE n.owner_user_id = ? AND n.kind = 'user' \
-               AND n.is_public = 1 AND r.is_public = 1",
+               AND n.is_public = 1 AND r.is_public = 1 \
+               AND r.is_hidden = 0",
         )
         .bind(user.id)
         .fetch_one(&state.db)

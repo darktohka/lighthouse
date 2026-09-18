@@ -275,6 +275,7 @@ pub struct RepositorySummary {
     pub name: String,
     pub description: Option<String>,
     pub is_public: bool,
+    pub is_hidden: bool,
     pub tag_count: i64,
     pub size: i64,
     pub pull_count: i64,
@@ -296,6 +297,7 @@ impl RepositorySummary {
             name: repository.name.clone(),
             description: repository.description.clone(),
             is_public: repository.is_public,
+            is_hidden: repository.is_hidden,
             tag_count,
             size,
             pull_count,
@@ -484,6 +486,9 @@ pub async fn visible_repository(
     else {
         return Err(ApiError::not_found("repository not found"));
     };
+    if repository.is_hidden && !actor.is_authenticated() {
+        return Err(ApiError::not_found("repository not found"));
+    }
     if !access_visible(authz::repository_access(state, actor, name).await?) {
         return Err(ApiError::not_found("repository not found"));
     }
@@ -525,6 +530,9 @@ pub async fn visible_repository_ids(
         .await?;
     let mut visible = HashSet::new();
     for repository in repositories {
+        if repository.is_hidden && !actor.is_authenticated() {
+            continue;
+        }
         if authz::repository_access(state, actor, &repository.name)
             .await?
             .can_pull

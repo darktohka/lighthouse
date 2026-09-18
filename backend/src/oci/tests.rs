@@ -1086,6 +1086,52 @@ mod auth_flow {
     }
 
     #[tokio::test]
+    async fn hidden_public_repository_still_allows_anonymous_oci_pull() {
+        let (_dir, state, app) = harness().await;
+
+        let config = b"cfg".to_vec();
+        let layer = b"layer".to_vec();
+        let config_digest = push_blob(&app, "darktohka/hidden", &config).await;
+        let layer_digest = push_blob(&app, "darktohka/hidden", &layer).await;
+        let body = oci_manifest(&config_digest, config.len(), &layer_digest, layer.len());
+        push_manifest(
+            &app,
+            "darktohka/hidden",
+            "latest",
+            media_types::OCI_IMAGE_MANIFEST,
+            &body,
+        )
+        .await;
+
+        sqlx::query(
+            "UPDATE repositories SET is_hidden = 1 WHERE name = 'darktohka/hidden' COLLATE NOCASE",
+        )
+        .execute(&state.db)
+        .await
+        .expect("hide repository");
+
+        let token = anonymous_token(&app, "repository:darktohka/hidden:pull").await;
+        let pulled = send(
+            &app,
+            Method::GET,
+            "/v2/darktohka/hidden/manifests/latest",
+            None,
+            &[
+                ("authorization", &format!("Bearer {token}")),
+                ("accept", media_types::OCI_IMAGE_MANIFEST),
+            ],
+            &[],
+        )
+        .await;
+        assert_eq!(
+            pulled.status(),
+            StatusCode::OK,
+            "hidden is unlisted, not private: OCI authorization is unchanged"
+        );
+        assert_eq!(body_bytes(pulled).await, body);
+    }
+
+    #[tokio::test]
     async fn app_password_authenticates_basic_and_bypasses_totp() {
         let (_dir, state, app) = harness().await;
         let alice: i64 =

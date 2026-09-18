@@ -106,13 +106,16 @@ pub(crate) async fn namespace_view(
             .fetch_one(&state.db)
             .await?
     } else if access.can_pull {
-        let names: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM repositories WHERE namespace_id = ?")
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT name, is_hidden FROM repositories WHERE namespace_id = ?")
                 .bind(namespace.id)
                 .fetch_all(&state.db)
                 .await?;
         let mut count = 0i64;
-        for name in names {
+        for (name, is_hidden) in rows {
+            if is_hidden && !actor.is_authenticated() {
+                continue;
+            }
             if permissions::repository_access(state, actor, &name)
                 .await?
                 .can_pull
@@ -165,7 +168,8 @@ async fn list(
                        WHERE g.namespace_id = n.id AND g.service_account_id = ?) \
             OR (n.is_public = 1 AND EXISTS ( \
                     SELECT 1 FROM repositories r \
-                    WHERE r.namespace_id = n.id AND r.is_public = 1)) \
+                    WHERE r.namespace_id = n.id AND r.is_public = 1 \
+                      AND (r.is_hidden = 0 OR ?))) \
          ORDER BY n.name COLLATE NOCASE",
     )
     .bind(user_id)
@@ -173,6 +177,7 @@ async fn list(
     .bind(user_id)
     .bind(anonymous)
     .bind(service_account_id)
+    .bind(actor.is_authenticated())
     .fetch_all(&state.db)
     .await?;
 

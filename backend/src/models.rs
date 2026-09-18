@@ -81,6 +81,7 @@ pub struct Repository {
     pub path: String,
     pub description: Option<String>,
     pub is_public: bool,
+    pub is_hidden: bool,
     pub created_by: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

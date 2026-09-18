@@ -264,6 +264,8 @@ struct PatchRepository {
     description: Option<String>,
     #[serde(default)]
     is_public: Option<bool>,
+    #[serde(default)]
+    is_hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -772,6 +774,9 @@ pub(crate) async fn namespace_repository_summaries(
 
     let mut summaries = Vec::new();
     for repository in repositories {
+        if repository.is_hidden && !actor.is_authenticated() {
+            continue;
+        }
         if !authz::repository_access(state, actor, &repository.name)
             .await?
             .can_pull
@@ -833,11 +838,13 @@ async fn patch(
         "UPDATE repositories SET \
              description = COALESCE(?, description), \
              is_public = COALESCE(?, is_public), \
+             is_hidden = COALESCE(?, is_hidden), \
              updated_at = ? \
          WHERE id = ?",
     )
     .bind(normalize(payload.description))
     .bind(payload.is_public)
+    .bind(payload.is_hidden)
     .bind(Utc::now())
     .bind(repository.id)
     .execute(&state.db)

@@ -109,7 +109,9 @@ export function NamespacePage() {
     {
       key: 'visibility',
       header: 'Visibility',
-      render: (repo) => <VisibilityLabel isPublic={repo.is_public} />,
+      render: (repo) => (
+        <VisibilityLabel isPublic={repo.is_public} isHidden={repo.is_hidden} />
+      ),
     },
     {
       key: 'tags',

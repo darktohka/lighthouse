@@ -41,7 +41,7 @@ backoff for operations that can still collide.
 |---|---|
 | `namespaces` | users and workspaces share one unique naming pool |
 | `namespace_members` | extra members of a workspace |
-| `repositories` | images, keyed by full path with namespace FK |
+| `repositories` | images, keyed by full path with namespace FK; carries `is_hidden` |
 
 ### Content
 | Table | Purpose |
@@ -149,6 +149,9 @@ Migrations run in filename order at startup.
 - `0004_service_account_ip_ranges.sql` creates `service_account_ip_ranges` for
   per-service-account IP allowlists, with a unique `(service_account_id, cidr)`
   index.
+- `0006_repository_hidden.sql` adds the `repositories.is_hidden` column
+  (default `0`) backing the unlisted-repository flag; repositories created before
+  the migration stay visible.
 
 ## Maintenance
 

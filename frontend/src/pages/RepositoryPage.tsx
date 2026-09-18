@@ -19,6 +19,7 @@ import {
 import { Table, type TableColumn } from '../components/primitives/Table'
 import { VisibilityLabel } from '../components/VisibilityLabel'
 import { isApiError } from '../api/client'
+import { NotFoundPage } from './NotFoundPage'
 import {
   formatBytes,
   formatDateTime,
@@ -53,6 +54,10 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
     (signal) => repositoriesApi.tags(namespace, repo, page, PER_PAGE, { signal }),
     `repo-tags:${namespace}:${repo}:${page}`,
   )
+
+  if (isApiError(detailState.error) && detailState.error.status === 404) {
+    return <NotFoundPage />
+  }
 
   const detail = detailState.data
   const host = typeof window === 'undefined' ? '' : window.location.host
@@ -197,7 +202,10 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
         actions={
           detail ? (
             <span className="flex items-center gap-2">
-              <VisibilityLabel isPublic={detail.is_public} />
+              <VisibilityLabel
+                isPublic={detail.is_public}
+                isHidden={detail.is_hidden}
+              />
               {user ? (
                 <LinkButton
                   to={`/repositories/${encodeURIComponent(namespace)}/${repo

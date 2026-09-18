@@ -150,6 +150,7 @@ export const repositorySummarySchema = v.object({
   name: v.string(),
   description: v.nullable(v.string()),
   is_public: v.boolean(),
+  is_hidden: v.boolean(),
   tag_count: v.number(),
   size: v.number(),
   pull_count: v.number(),
@@ -195,6 +196,7 @@ export const repositoryDetailSchema = v.object({
   name: v.string(),
   description: v.nullable(v.string()),
   is_public: v.boolean(),
+  is_hidden: v.boolean(),
   tag_count: v.number(),
   size: v.number(),
   pull_count: v.number(),
@@ -215,6 +217,7 @@ export type RepositoryDetail = v.InferOutput<typeof repositoryDetailSchema>
 export const updateRepositorySchema = v.object({
   description: v.optional(v.string()),
   is_public: v.optional(v.boolean()),
+  is_hidden: v.optional(v.boolean()),
 })
 export type UpdateRepository = v.InferOutput<typeof updateRepositorySchema>
 

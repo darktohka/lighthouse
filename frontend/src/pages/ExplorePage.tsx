@@ -272,7 +272,10 @@ export function ExplorePage() {
                           </p>
                         ) : null}
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
-                          <VisibilityLabel isPublic={item.is_public} />
+                          <VisibilityLabel
+                            isPublic={item.is_public}
+                            isHidden={item.is_hidden}
+                          />
                           <span>{item.tag_count} tags</span>
                           <span>{formatBytes(item.size)}</span>
                           <span>

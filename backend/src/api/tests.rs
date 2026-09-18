@@ -838,6 +838,101 @@ async fn private_repository_is_404_for_strangers() {
 }
 
 #[tokio::test]
+async fn hidden_repository_is_unlisted_for_anonymous() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/visible", "v1", b"{\"visible\":1}", b"layer-visible").await;
+    seed_image(&state, "alice/hidden", "v1", b"{\"hidden\":1}", b"layer-hidden").await;
+    sqlx::query("UPDATE repositories SET is_hidden = 1 WHERE name = 'alice/hidden' COLLATE NOCASE")
+        .execute(&state.db)
+        .await
+        .expect("hide repository");
+
+    let hidden = call(&app, Method::GET, "/api/repositories/alice/hidden", None, None).await;
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+    let visible = call(&app, Method::GET, "/api/repositories/alice/visible", None, None).await;
+    assert_eq!(visible.status(), StatusCode::OK);
+
+    let anonymous_list = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces/alice/repositories",
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(anonymous_list["total"], 1);
+    let items = anonymous_list["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "alice/visible");
+
+    let owner_list = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces/alice/repositories",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(owner_list["total"], 2);
+
+    let hidden_tags = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/hidden/tags",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(hidden_tags.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn hiding_a_repository_persists_via_patch() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/visible", "v1", b"{\"cfg\":1}", b"layer-patch").await;
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        "/api/repositories/alice/visible",
+        Some(actor(&alice)),
+        Some(json!({ "is_hidden": true })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let patched = body_json(response).await;
+    assert_eq!(patched["is_hidden"], true);
+    assert_eq!(patched["is_public"], true, "hiding does not change visibility");
+
+    let hidden = call(&app, Method::GET, "/api/repositories/alice/visible", None, None).await;
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        "/api/repositories/alice/visible",
+        Some(actor(&alice)),
+        Some(json!({ "is_hidden": false })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let unhidden = body_json(response).await;
+    assert_eq!(unhidden["is_hidden"], false);
+
+    let visible = call(&app, Method::GET, "/api/repositories/alice/visible", None, None).await;
+    assert_eq!(visible.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn namespace_list_only_includes_visible_workspaces() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;

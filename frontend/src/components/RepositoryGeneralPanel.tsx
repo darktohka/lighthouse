@@ -27,6 +27,7 @@ export function RepositoryGeneralPanel({
 }: RepositoryGeneralPanelProps) {
   const [description, setDescription] = useState(detail.description ?? '')
   const [isPublic, setIsPublic] = useState(detail.is_public)
+  const [isHidden, setIsHidden] = useState(detail.is_hidden)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [saved, setSaved] = useState<string | null>(null)
@@ -39,7 +40,11 @@ export function RepositoryGeneralPanel({
     setSaved(null)
     setSaving(true)
     void repositoriesApi
-      .update(namespace, repo, { description: description.trim(), is_public: isPublic })
+      .update(namespace, repo, {
+        description: description.trim(),
+        is_public: isPublic,
+        is_hidden: isHidden,
+      })
       .then(
         () => {
           setSaving(false)
@@ -104,6 +109,12 @@ export function RepositoryGeneralPanel({
             hint="Public repositories are readable without authentication."
             checked={isPublic}
             onCheckedChange={setIsPublic}
+          />
+          <SwitchField
+            label="Hidden repository"
+            hint="Hidden repositories are excluded from public Explore and namespace browsing, and their page requires authentication. Authenticated users with access still see them."
+            checked={isHidden}
+            onCheckedChange={setIsHidden}
           />
           <Button variant="primary" disabled={saving} onClick={save}>
             {saving ? 'Saving…' : 'Save changes'}

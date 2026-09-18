@@ -113,7 +113,7 @@ returns `409 conflict` (`namespace_taken`). Reserved first segments
 | GET | `/namespaces/{name}/repositories?sort=updated\|size\|name&order=desc\|asc` | optional | list images in a namespace |
 | POST | `/namespaces/{name}/repositories` | required | create a repository before its first push (`{name, description?, is_public?}` → `RepositoryDetail`) |
 | GET | `/repositories/{namespace}/{*repo}` | optional | image detail |
-| PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility |
+| PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility / hidden |
 | DELETE | `/repositories/{namespace}/{*repo}` | required | delete the image and all its tags |
 | GET | `/repositories/{namespace}/{*repo}/tags` | optional | paginated tags |
 | GET | `/repositories/{namespace}/{*repo}/tags/{tag}` | optional | tag detail |
@@ -124,7 +124,7 @@ returns `409 conflict` (`namespace_taken`). Reserved first segments
 | POST | `/tags/batch-delete` | required | `{items:[{repository,tag}]}` → `{deleted:n}` |
 
 ```
-RepositorySummary { id, namespace, path, name, description, is_public,
+RepositorySummary { id, namespace, path, name, description, is_public, is_hidden,
                     tag_count, size, pull_count, updated_at }
 RepositoryDetail  { ...RepositorySummary, manifest_count, platform_count,
                     total_size, unique_size, shared_size, created_at,
@@ -147,6 +147,12 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
 - `can_pull` / `can_push` report the calling actor's effective access to the
   repository (push implies pull); the UI uses them to offer reads to pullers and
   mutations only to pushers.
+- `is_hidden` marks a repository as unlisted. Hidden repositories are omitted
+  from anonymous listings (Explore, namespace repository lists and counts,
+  activity feed, profile public repository counts), and their detail, tag and
+  layer endpoints return `404` to unauthenticated callers. Authenticated callers
+  with access see them normally, and anonymous OCI `docker pull` authorization is
+  unaffected.
 - `size` is the sum of the compressed blob sizes referenced by the tag.
 - A tag's top-level `manifest`, `config` and `layers` describe the *combined*
   view: `layers` is the union of every reachable child manifest's blobs,
