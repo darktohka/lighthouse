@@ -101,8 +101,7 @@ async fn feed(
     let filtered: Vec<Activity> = rows
         .into_iter()
         .filter(|row| {
-            row.is_public
-                || actor.user_id == row.actor_user_id
+            actor.user_id == row.actor_user_id
                 || row
                     .repository_id
                     .is_some_and(|id| visible_repositories.contains(&id))

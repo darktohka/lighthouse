@@ -177,6 +177,8 @@ names (`alice/more/complicated/app`) and digests (`sha256:…`) survive intact.
 | `/login`, `/register` | Auth |
 | `/verify-email`, `/forgot-password`, `/reset-password` | Auth flows |
 | `/dashboard` | Dashboard (auth-gated by `RequireAuth`) |
+| `/new` | New workspace (auth-gated); starts public, may be switched private before create |
+| `/new/repository` | New repository before its first push (auth-gated): name, description and the public setting; defaults to the selected namespace's visibility |
 | `/:namespace` | Namespace repositories; redirects (replace) to `/users/{username}` for user accounts — including private personal namespaces, where a 404 from the namespace endpoint falls back to the public profile endpoint to confirm the account |
 | `/:namespace/*` | Repository, tag or layer (dispatched) — works for user, workspace and non-namespace repository paths |
 | `/users/:username` | Profile; hosts the personal namespace's description + visibility settings when `is_self` |
@@ -215,7 +217,8 @@ namespace.
 ## 7. What this wave ships
 
 Pages: Explore/landing, Login, Register, Verify e-mail, Forgot password, Reset
-password, Dashboard (repositories + activity timeline + counters), Namespace
+password, Dashboard (repositories + activity timeline + counters), New workspace,
+New repository, Namespace
 repositories, Repository detail (header, pull snippet, tag table with sizes /
 platform badges / pull counts / delete), Tag detail (Layers / Manifest / Config
 tabs with the recursive JSON viewer + layer table, defaulting to Layers, where a

@@ -48,6 +48,7 @@ import {
   type CreateAppPassword,
   type CreateGrant,
   type CreateNamespace,
+  type CreateRepository,
   type CreateServiceAccount,
   type CreateServiceAccountGrant,
   type CreateServiceAccountIpRange,
@@ -351,6 +352,14 @@ export const repositories = {
 
   detail(namespace: string, repo: string, options?: RequestOptions) {
     return api.get(repositoryApiPath(namespace, repo), repositoryDetailSchema, options)
+  },
+
+  create(namespace: string, body: CreateRepository) {
+    return api.post(
+      `${namespaceApiPath(namespace)}/repositories`,
+      repositoryDetailSchema,
+      body,
+    )
   },
 
   update(namespace: string, repo: string, body: UpdateRepository) {

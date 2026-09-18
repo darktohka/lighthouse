@@ -37,7 +37,7 @@ export function WorkspaceCreatePage() {
   const navigate = useNavigate()
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [isPublic, setIsPublic] = useState(false)
+  const [isPublic, setIsPublic] = useState(true)
   const [errors, setErrors] = useState<FieldErrors>({})
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -147,7 +147,7 @@ export function WorkspaceCreatePage() {
             />
             <SwitchField
               label="Public workspace"
-              hint="Public workspaces list their repositories in Explore."
+              hint="On by default. Public workspaces list their repositories in Explore."
               checked={isPublic}
               onCheckedChange={setIsPublic}
             />

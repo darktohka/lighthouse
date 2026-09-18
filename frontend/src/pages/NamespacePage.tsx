@@ -178,12 +178,20 @@ export function NamespacePage() {
             <span className="flex items-center gap-2">
               <VisibilityLabel isPublic={detail.is_public} />
               {user ? (
-                <LinkButton
-                  to={`/namespaces/${encodeURIComponent(namespace)}/settings`}
-                  size="sm"
-                >
-                  Settings
-                </LinkButton>
+                <>
+                  <LinkButton
+                    to={`/new/repository?namespace=${encodeURIComponent(namespace)}`}
+                    size="sm"
+                  >
+                    New repository
+                  </LinkButton>
+                  <LinkButton
+                    to={`/namespaces/${encodeURIComponent(namespace)}/settings`}
+                    size="sm"
+                  >
+                    Settings
+                  </LinkButton>
+                </>
               ) : null}
             </span>
           ) : null

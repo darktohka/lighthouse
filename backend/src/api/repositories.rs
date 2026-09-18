@@ -618,7 +618,7 @@ async fn build_tag_detail(
     })
 }
 
-async fn build_detail(
+pub(crate) async fn build_detail(
     state: &AppState,
     actor: &AuthContext,
     repository: &Repository,

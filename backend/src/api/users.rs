@@ -130,6 +130,8 @@ async fn build_profile(
     .await?;
     let namespace = namespace.unwrap_or_else(|| user.username.clone());
 
+    let is_self = actor.user_id == Some(user.id);
+
     let repository_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM repositories r \
          JOIN namespaces n ON n.id = r.namespace_id \
@@ -142,21 +144,40 @@ async fn build_profile(
     let public_repository_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM repositories r \
          JOIN namespaces n ON n.id = r.namespace_id \
-         WHERE n.owner_user_id = ? AND n.kind = 'user' AND r.is_public = 1",
+         WHERE n.owner_user_id = ? AND n.kind = 'user' AND n.is_public = 1 AND r.is_public = 1",
     )
     .bind(user.id)
     .fetch_one(&state.db)
     .await?;
 
-    let total_pulls: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(ps.pulls), 0) FROM pull_stats ps \
-         JOIN repositories r ON r.id = ps.repository_id \
-         JOIN namespaces n ON n.id = r.namespace_id \
-         WHERE n.owner_user_id = ? AND n.kind = 'user'",
-    )
-    .bind(user.id)
-    .fetch_one(&state.db)
-    .await?;
+    let repository_count = if is_self {
+        repository_count
+    } else {
+        public_repository_count
+    };
+
+    let total_pulls: i64 = if is_self {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(ps.pulls), 0) FROM pull_stats ps \
+             JOIN repositories r ON r.id = ps.repository_id \
+             JOIN namespaces n ON n.id = r.namespace_id \
+             WHERE n.owner_user_id = ? AND n.kind = 'user'",
+        )
+        .bind(user.id)
+        .fetch_one(&state.db)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(ps.pulls), 0) FROM pull_stats ps \
+             JOIN repositories r ON r.id = ps.repository_id \
+             JOIN namespaces n ON n.id = r.namespace_id \
+             WHERE n.owner_user_id = ? AND n.kind = 'user' \
+               AND n.is_public = 1 AND r.is_public = 1",
+        )
+        .bind(user.id)
+        .fetch_one(&state.db)
+        .await?
+    };
 
     let follower_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE followed_user_id = ?")
@@ -199,7 +220,7 @@ async fn build_profile(
         follower_count,
         following_count,
         is_following,
-        is_self: actor.user_id == Some(user.id),
+        is_self,
     })
 }
 

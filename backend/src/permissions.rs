@@ -2,8 +2,11 @@
 //!
 //! Resolution for [`repository_access`] is first-match-wins: namespace
 //! ownership/​membership, then an explicit repository grant, then an explicit
-//! namespace grant, then public visibility (pull only). Service-account grants
-//! participate at the repository and namespace grant steps. Push implies pull.
+//! namespace grant, then public visibility (pull only). Public visibility
+//! requires *both* the repository and its namespace to be public; a private
+//! repository is never exposed even under a public namespace. Service-account
+//! grants participate at the repository and namespace grant steps. Push implies
+//! pull.
 
 #![allow(dead_code)]
 
@@ -263,7 +266,7 @@ pub async fn repository_access(
     }
 
     let public = repository.as_ref().is_some_and(|repo| repo.is_public)
-        || namespace
+        && namespace
             .as_ref()
             .is_some_and(|namespace| namespace.is_public);
     if public {
@@ -420,7 +423,7 @@ mod tests {
     async fn public_namespace_grants_pull_only() {
         let (_dir, state) = test_state().await;
         let namespace_id = create_namespace(&state, "team", None, true).await;
-        create_repository(&state, namespace_id, "team/app", false, None).await;
+        create_repository(&state, namespace_id, "team/app", true, None).await;
 
         let access = repository_access(&state, &anonymous(), "team/app")
             .await
@@ -435,6 +438,34 @@ mod tests {
             .await
             .expect_err("push denied");
         assert_eq!(denied.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn private_repository_in_public_namespace_is_not_publicly_visible() {
+        let (_dir, state) = test_state().await;
+        let namespace_id = create_namespace(&state, "team", None, true).await;
+        create_repository(&state, namespace_id, "team/app", false, None).await;
+
+        assert_eq!(
+            repository_access(&state, &anonymous(), "team/app")
+                .await
+                .expect("access"),
+            Access::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn public_repository_in_private_namespace_is_not_publicly_visible() {
+        let (_dir, state) = test_state().await;
+        let namespace_id = create_namespace(&state, "team", None, false).await;
+        create_repository(&state, namespace_id, "team/app", true, None).await;
+
+        assert_eq!(
+            repository_access(&state, &anonymous(), "team/app")
+                .await
+                .expect("access"),
+            Access::default()
+        );
     }
 
     #[tokio::test]

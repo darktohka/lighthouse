@@ -373,8 +373,8 @@ client cannot loop refetching tokens. Registry tokens are accepted only by
 `/v2`; the control-plane extractors reject them, so a token cached by `docker`
 cannot act as a web session.
 
-Anonymous tokens can pull public repositories and tags; private repositories
-return `403 DENIED`.
+Anonymous tokens can pull repositories that are public inside a public namespace
+and their tags; everything else returns `403 DENIED`.
 
 ### Service-account IP allowlists
 
@@ -396,9 +396,9 @@ wrong token or app password and `last_used_at` is not updated.
 | Registry refresh-token redemption | `401 invalid_grant` |
 | Registry bearer token already presented to `/v2` | `403 DENIED`; the token is demoted to an anonymous registry token, matching the existing no-challenge behaviour that stops Docker from looping |
 
-Public repositories remain anonymously pullable by design, so a restricted
-account's request for public content is equivalent to anonymous access rather
-than a hard failure.
+Repository content that is publicly pullable (public repository in a public
+namespace) remains anonymously readable by design, so a restricted account's
+request for it is equivalent to anonymous access rather than a hard failure.
 
 Ranges are managed through the control plane (`docs/API.md` §6). `ServiceAccount`
 gains `ip_ranges`, `POST /api/service-accounts` accepts an optional

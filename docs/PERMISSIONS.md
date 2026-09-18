@@ -40,15 +40,21 @@ repository row, then evaluates rules **first match wins**:
 | 1 | `namespaces.owner_user_id == actor.user_id`, or a `namespace_members` row | **pull + push** |
 | 2 | `repository_permissions` grant for the actor on the repository (`subject_type='user'` + `subject_user_id`, or `subject_type='anonymous'` when anonymous), or a repository-scoped `service_account_grants` row | grant flags, with **push implying pull** |
 | 3 | `namespace_permissions` grant for the actor on the repository's namespace, or a namespace-scoped `service_account_grants` row | grant flags, with **push implying pull** |
-| 4 | `repositories.is_public = 1` **or** `namespaces.is_public = 1` | **pull only** |
+| 4 | `repositories.is_public = 1` **and** `namespaces.is_public = 1` | **pull only** |
 | 5 | otherwise | no access |
 
 Notes:
 
 - Grants only *add* access; they never revoke. Ownership (rule 1) therefore beats
   a pull-only repository grant.
-- Rule 4 is evaluated even when the repository row is absent, so a public
-  namespace exposes names under it for pull.
+- A repository is publicly pullable only when its namespace is public too. A
+  repository under a private namespace is never visible to actors without an
+  explicit grant, regardless of the repository's own `is_public` flag. When the
+  repository row is absent (a push would create it), rule 4 cannot match: only
+  rules 1–3 can authorize a push to a new name.
+- Namespaces are public by default, and a repository created by a push inherits
+  its namespace's visibility at that moment. Changing a namespace's visibility
+  later masks its non-public content without rewriting repository flags.
 - Service accounts resolve through `service_account_grants` at rules 2 and 3.
   They do **not** inherit their owner's ownership or membership — explicit
   grants are the whole model.

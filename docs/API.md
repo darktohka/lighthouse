@@ -35,8 +35,11 @@ Errors use the envelope:
   repository endpoints place the full name in a capture-all segment and the
   namespace is always the first path segment.
 - Visibility: a private namespace is invisible unless the caller is the owner, a
-  member, or holds a grant. A public namespace exposes only public repositories
-  plus everything the caller may pull.
+  member, or holds a grant, and **none** of its repositories are visible to other
+  callers regardless of their own `is_public`. A public namespace exposes only
+  its public repositories, plus everything the caller may pull through a grant.
+  Namespaces are public by default, and a repository created by a push inherits
+  its namespace's visibility at creation time.
 
 ---
 
@@ -104,6 +107,7 @@ returns `409 conflict` (`namespace_taken`). Reserved first segments
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/namespaces/{name}/repositories?sort=updated\|size\|name&order=desc\|asc` | optional | list images in a namespace |
+| POST | `/namespaces/{name}/repositories` | required | create a repository before its first push (`{name, description?, is_public?}` → `RepositoryDetail`) |
 | GET | `/repositories/{namespace}/{*repo}` | optional | image detail |
 | PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility |
 | DELETE | `/repositories/{namespace}/{*repo}` | required | delete the image and all its tags |

@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::auth::middleware::{Auth, Authenticated};
 use crate::error::{ApiError, ApiResult};
-use crate::models::{Namespace, User};
+use crate::models::{Namespace, Repository, User};
 use crate::oci::reference;
 use crate::permissions;
 use crate::state::{AppState, AuthContext};
@@ -33,6 +33,15 @@ struct CreateNamespace {
 
 #[derive(Debug, Deserialize)]
 struct UpdateNamespace {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    is_public: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRepository {
+    name: String,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -62,7 +71,7 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/namespaces/{name}/repositories",
-            get(repositories_in_namespace),
+            get(repositories_in_namespace).post(create_repository),
         )
         .route(
             "/api/namespaces/{name}/members",
@@ -91,18 +100,29 @@ pub(crate) async fn namespace_view(
     namespace: &Namespace,
 ) -> ApiResult<NamespaceView> {
     let access = permissions::namespace_access(state, actor, &namespace.name).await?;
-    let repository_count: i64 = if access.can_pull {
+    let repository_count: i64 = if access.can_push {
         sqlx::query_scalar("SELECT COUNT(*) FROM repositories WHERE namespace_id = ?")
             .bind(namespace.id)
             .fetch_one(&state.db)
             .await?
+    } else if access.can_pull {
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM repositories WHERE namespace_id = ?")
+                .bind(namespace.id)
+                .fetch_all(&state.db)
+                .await?;
+        let mut count = 0i64;
+        for name in names {
+            if permissions::repository_access(state, actor, &name)
+                .await?
+                .can_pull
+            {
+                count += 1;
+            }
+        }
+        count
     } else {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM repositories WHERE namespace_id = ? AND is_public = 1",
-        )
-        .bind(namespace.id)
-        .fetch_one(&state.db)
-        .await?
+        0
     };
 
     let owner = match namespace.owner_user_id {
@@ -205,7 +225,7 @@ async fn create(
     .bind(&name)
     .bind(user_id)
     .bind(normalize(request.description))
-    .bind(request.is_public.unwrap_or(false))
+    .bind(request.is_public.unwrap_or(true))
     .bind(now)
     .bind(now)
     .execute(&state.db)
@@ -432,6 +452,82 @@ async fn remove_member(
             .await?;
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn create_repository(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Path(name): Path<String>,
+    Json(request): Json<CreateRepository>,
+) -> ApiResult<Response> {
+    let repo_path = request.name.trim().trim_matches('/').to_string();
+    if repo_path.is_empty() {
+        return Err(ApiError::bad_request("repository name required"));
+    }
+    let full = format!("{name}/{repo_path}");
+    if !reference::validate_repository_name(&full) {
+        return Err(ApiError::bad_request("invalid repository name"));
+    }
+
+    let access = permissions::repository_access(&state, &ctx, &full).await?;
+    if !access.can_pull && !access.can_push {
+        return Err(ApiError::not_found("namespace not found"));
+    }
+    if !access.can_push {
+        return Err(ApiError::forbidden("push access required"));
+    }
+
+    let namespace = load_namespace(&state.db, &name)
+        .await?
+        .ok_or_else(|| ApiError::not_found("namespace not found"))?;
+    let is_public = request.is_public.unwrap_or(namespace.is_public);
+
+    let now = Utc::now();
+    let path = full.split_once('/').map(|(_, path)| path).unwrap_or(&full);
+    let inserted = match sqlx::query(
+        "INSERT INTO repositories \
+         (namespace_id, name, path, description, is_public, created_by, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(namespace.id)
+    .bind(&full)
+    .bind(path)
+    .bind(normalize(request.description))
+    .bind(is_public)
+    .bind(ctx.user_id)
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    {
+        Ok(inserted) => inserted,
+        Err(err) => {
+            if matches!(&err, sqlx::Error::Database(db) if db.is_unique_violation()) {
+                return Err(ApiError::conflict("repository already exists"));
+            }
+            return Err(err.into());
+        }
+    };
+
+    let repository = sqlx::query_as::<_, Repository>("SELECT * FROM repositories WHERE id = ?")
+        .bind(inserted.last_insert_rowid())
+        .fetch_one(&state.db)
+        .await?;
+
+    super::record_activity(
+        &state.db,
+        ctx.user_id,
+        Some(namespace.id),
+        Some(repository.id),
+        "repository.created",
+        &format!("created repository {}", repository.name),
+        Some(json!({ "repository": repository.name.clone() })),
+        repository.is_public,
+    )
+    .await;
+
+    let detail = super::repositories::build_detail(&state, &ctx, &repository).await?;
+    Ok((StatusCode::CREATED, Json(detail)).into_response())
 }
 
 /// `?page=` / `?per_page=` plus the repository sort controls. axum permits only

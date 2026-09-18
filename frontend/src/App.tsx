@@ -13,6 +13,7 @@ import { NamespaceSettingsPage } from './pages/NamespaceSettingsPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { RegisterPage } from './pages/RegisterPage'
+import { RepositoryCreatePage } from './pages/RepositoryCreatePage'
 import { RepositoryRouteView } from './pages/RepositoryRouteView'
 import { RepositorySettingsRouteView } from './pages/RepositorySettingsRouteView'
 import { ResetPasswordPage } from './pages/ResetPasswordPage'
@@ -70,6 +71,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <WorkspaceCreatePage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="new/repository"
+            element={
+              <RequireAuth>
+                <RepositoryCreatePage />
               </RequireAuth>
             }
           />

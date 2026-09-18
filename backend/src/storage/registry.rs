@@ -51,24 +51,26 @@ impl Registry {
             None => (name, ""),
         };
 
-        let namespace_id: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM namespaces WHERE name = ? COLLATE NOCASE LIMIT 1")
+        let namespace_row: Option<(i64, bool)> =
+            sqlx::query_as("SELECT id, is_public FROM namespaces WHERE name = ? COLLATE NOCASE LIMIT 1")
                 .bind(namespace)
                 .fetch_optional(&self.db)
                 .await?;
-        let namespace_id = namespace_id.ok_or_else(|| RegistryError::name_unknown(name))?;
+        let (namespace_id, namespace_is_public) =
+            namespace_row.ok_or_else(|| RegistryError::name_unknown(name))?;
 
         let now = Utc::now();
         let repository = db::with_busy_retry(|| async {
             sqlx::query(
                 "INSERT INTO repositories \
                  (namespace_id, name, path, description, is_public, created_by, created_at, updated_at) \
-                 VALUES (?, ?, ?, NULL, 0, NULL, ?, ?) \
+                 VALUES (?, ?, ?, NULL, ?, NULL, ?, ?) \
                  ON CONFLICT DO NOTHING",
             )
             .bind(namespace_id)
             .bind(name)
             .bind(path)
+            .bind(namespace_is_public)
             .bind(now)
             .bind(now)
             .execute(&self.db)
@@ -775,6 +777,38 @@ mod tests {
         let (_dir, registry) = test_registry().await;
         let err = registry.ensure_repository("Bad/Name").await.unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::NameInvalid);
+    }
+
+    #[tokio::test]
+    async fn ensure_repository_inherits_namespace_visibility() {
+        let (_dir, registry) = test_registry().await;
+        let now = Utc::now();
+        for (name, is_public) in [("public-team", true), ("private-team", false)] {
+            sqlx::query(
+                "INSERT INTO namespaces \
+                 (name, kind, owner_user_id, description, is_public, created_at, updated_at) \
+                 VALUES (?, 'workspace', NULL, NULL, ?, ?, ?)",
+            )
+            .bind(name)
+            .bind(is_public)
+            .bind(now)
+            .bind(now)
+            .execute(registry.db())
+            .await
+            .expect("insert namespace");
+
+            let repository = registry
+                .ensure_repository(&format!("{name}/app"))
+                .await
+                .expect("create repository");
+            assert_eq!(repository.is_public, is_public);
+
+            let again = registry
+                .ensure_repository(&format!("{name}/app"))
+                .await
+                .expect("idempotent");
+            assert_eq!(again.is_public, is_public);
+        }
     }
 
     #[tokio::test]

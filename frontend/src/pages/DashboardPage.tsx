@@ -8,6 +8,7 @@ import { ActivityTimeline } from '../components/ActivityTimeline'
 import { PageHeader } from '../components/PageHeader'
 import { Pagination } from '../components/Pagination'
 import { Box, BoxHeader } from '../components/primitives/Box'
+import { LinkButton } from '../components/primitives/Button'
 import {
   EmptyState,
   ErrorState,
@@ -142,6 +143,11 @@ export function DashboardPage() {
       <PageHeader
         title={user ? `Welcome back, ${user.username}` : 'Dashboard'}
         description="Your repositories and recent registry activity."
+        actions={
+          <LinkButton to="/new/repository" size="sm">
+            New repository
+          </LinkButton>
+        }
       />
 
       {loading && !data ? <LoadingState label="Loading dashboard…" /> : null}

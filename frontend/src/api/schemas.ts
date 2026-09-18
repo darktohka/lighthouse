@@ -215,6 +215,13 @@ export const updateRepositorySchema = v.object({
 })
 export type UpdateRepository = v.InferOutput<typeof updateRepositorySchema>
 
+export const createRepositorySchema = v.object({
+  name: v.string(),
+  description: v.optional(v.string()),
+  is_public: v.optional(v.boolean()),
+})
+export type CreateRepository = v.InferOutput<typeof createRepositorySchema>
+
 export const tagSummarySchema = v.object({
   name: v.string(),
   digest: v.string(),
@@ -726,6 +733,28 @@ export const createWorkspaceFormSchema = v.object({
 })
 export type CreateWorkspaceForm = v.InferOutput<
   typeof createWorkspaceFormSchema
+>
+
+export const createRepositoryFormSchema = v.object({
+  namespace: v.pipe(v.string(), v.nonEmpty('Choose a namespace')),
+  name: v.pipe(
+    v.string(),
+    v.nonEmpty('Choose a repository name'),
+    v.maxLength(200, 'Names are at most 200 characters'),
+    v.regex(
+      /^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/,
+      'Use lowercase letters, numbers, dots, dashes, underscores or slashes',
+    ),
+    v.check(
+      (value) => !value.includes('//'),
+      'Remove repeated slashes',
+    ),
+  ),
+  description: v.optional(v.string()),
+  is_public: v.boolean(),
+})
+export type CreateRepositoryForm = v.InferOutput<
+  typeof createRepositoryFormSchema
 >
 
 // ---------------------------------------------------------------------------

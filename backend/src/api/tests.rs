@@ -420,6 +420,82 @@ async fn detail_reports_effective_actor_access() {
 }
 
 #[tokio::test]
+async fn create_tagless_repository_endpoint() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let bob = create_user(&state, "bob").await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/namespaces/alice/repositories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "brand-new", "description": "  fresh  ", "is_public": false })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let detail = body_json(response).await;
+    assert_eq!(detail["name"], "alice/brand-new");
+    assert_eq!(detail["path"], "brand-new");
+    assert_eq!(detail["description"], "fresh");
+    assert_eq!(detail["is_public"], false);
+    assert_eq!(detail["tag_count"], 0);
+    assert_eq!(detail["can_push"], true);
+
+    let inherited = call(
+        &app,
+        Method::POST,
+        "/api/namespaces/alice/repositories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "inherits-namespace" })),
+    )
+    .await;
+    assert_eq!(inherited.status(), StatusCode::CREATED);
+    let inherited = body_json(inherited).await;
+    assert_eq!(inherited["is_public"], true);
+
+    let duplicate = call(
+        &app,
+        Method::POST,
+        "/api/namespaces/alice/repositories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "brand-new" })),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+    let invalid = call(
+        &app,
+        Method::POST,
+        "/api/namespaces/alice/repositories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "Bad/Name" })),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let empty = call(
+        &app,
+        Method::POST,
+        "/api/namespaces/alice/repositories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "  " })),
+    )
+    .await;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let denied = call(
+        &app,
+        Method::POST,
+        "/api/namespaces/alice/repositories",
+        Some(actor(&bob)),
+        Some(json!({ "name": "intruder" })),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn unique_and_shared_sizes_when_tags_share_layer() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
@@ -591,6 +667,10 @@ async fn private_repository_is_404_for_strangers() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
     let bob = create_user(&state, "bob").await;
+    sqlx::query("UPDATE namespaces SET is_public = 0 WHERE name = 'alice' COLLATE NOCASE")
+        .execute(&state.db)
+        .await
+        .expect("private namespace");
     seed_image(&state, "alice/secret", "latest", b"config", b"layer").await;
 
     let owner = call(
@@ -1476,6 +1556,10 @@ async fn raw_blob_and_manifest_endpoints() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
     let bob = create_user(&state, "bob").await;
+    sqlx::query("UPDATE namespaces SET is_public = 0 WHERE name = 'alice' COLLATE NOCASE")
+        .execute(&state.db)
+        .await
+        .expect("private namespace");
 
     let config = br#"{"os":"linux","architecture":"amd64"}"#.to_vec();
     let (manifest_digest, layer_digest) =

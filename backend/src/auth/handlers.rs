@@ -308,7 +308,7 @@ async fn register(
     let user_id = inserted.last_insert_rowid();
     sqlx::query(
         "INSERT INTO namespaces (name, kind, owner_user_id, description, is_public, created_at, updated_at) \
-         VALUES (?, 'user', ?, NULL, 0, ?, ?)",
+         VALUES (?, 'user', ?, NULL, 1, ?, ?)",
     )
     .bind(&username)
     .bind(user_id)

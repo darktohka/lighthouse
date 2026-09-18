@@ -1515,8 +1515,39 @@ async fn catalog_requires_auth_and_paginates() {
 }
 
 #[tokio::test]
+async fn catalog_hides_repositories_the_actor_cannot_pull() {
+    let (_dir, state, app) = harness().await;
+    push_blob(&app, "darktohka/alpha", b"a").await;
+    sqlx::query("UPDATE namespaces SET is_public = 0 WHERE name = ? COLLATE NOCASE")
+        .bind(USER)
+        .execute(&state.db)
+        .await
+        .expect("private namespace");
+    create_user(&state, "bob").await;
+
+    let owner = send(&app, Method::GET, "/v2/_catalog", Some(USER), &[], &[]).await;
+    assert_eq!(owner.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(owner).await["repositories"],
+        serde_json::json!(["darktohka/alpha"])
+    );
+
+    let stranger = send(&app, Method::GET, "/v2/_catalog", Some("bob"), &[], &[]).await;
+    assert_eq!(stranger.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(stranger).await["repositories"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
 async fn private_repository_requires_authentication() {
     let (_dir, state, app) = harness().await;
+    sqlx::query("UPDATE namespaces SET is_public = 0 WHERE name = ? COLLATE NOCASE")
+        .bind(USER)
+        .execute(&state.db)
+        .await
+        .expect("private namespace");
     let content = b"secret-blob".to_vec();
     let digest = push_blob(&app, "darktohka/site", &content).await;
 

@@ -6,6 +6,8 @@ use axum::response::Response;
 
 use crate::auth::middleware::Auth;
 use crate::error::RegistryError;
+use crate::models::Repository;
+use crate::permissions;
 use crate::state::{AppState, AuthContext};
 
 pub async fn get(
@@ -38,10 +40,30 @@ async fn list(
     let page = super::parse_page_size(&query)?;
     let last = super::query_first(&query, "last");
 
-    let mut repositories = state
-        .registry
-        .list_repository_names(page + 1, last)
-        .await?;
+    let candidates =
+        sqlx::query_as::<_, Repository>("SELECT * FROM repositories ORDER BY name COLLATE NOCASE")
+            .fetch_all(&state.db)
+            .await?;
+
+    let mut visible: Vec<String> = Vec::new();
+    for repository in candidates {
+        if permissions::repository_access(state, actor, &repository.name)
+            .await
+            .map_err(|err| RegistryError::internal(err.message))?
+            .can_pull
+        {
+            visible.push(repository.name);
+        }
+    }
+
+    let mut repositories: Vec<String> = visible
+        .into_iter()
+        .filter(|name| match last {
+            Some(last) => name.to_ascii_lowercase() > last.to_ascii_lowercase(),
+            None => true,
+        })
+        .take(page + 1)
+        .collect();
 
     let mut link = None;
     if repositories.len() > page {
