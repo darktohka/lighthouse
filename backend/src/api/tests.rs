@@ -1816,6 +1816,92 @@ async fn layer_composed_cache_reuses_and_respects_invalidation() {
 }
 
 #[tokio::test]
+async fn layer_listing_cache_reuses_and_respects_invalidation() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[LayerEntry::File("a.txt", b"a", 0o644)]);
+    let upper = layer_archive_with(&[LayerEntry::File("b.txt", b"b", 0o644)]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let uri = format!(
+        "{}?mode=aggregate&manifest={manifest}",
+        tree_path("alice/img", &target)
+    );
+
+    let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = body_bytes(response).await;
+    assert!(
+        state.listing_cache.len() >= 1,
+        "the rendered listing is cached"
+    );
+
+    for layer in &layers {
+        let path = state.storage.blob_path(layer);
+        tokio::fs::write(&path, b"not a tar")
+            .await
+            .expect("corrupt blob");
+    }
+    let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a repeat listing is served from the cache without rescanning"
+    );
+    let second = body_bytes(response).await;
+    assert_eq!(first, second, "the cached listing is byte-identical");
+
+    state.layer_cache.invalidate(&layers[0]);
+    let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalidating a layer index must not leave a stale listing"
+    );
+}
+
+#[tokio::test]
+async fn layer_single_listing_cache_reuses_and_respects_invalidation() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let layer = layer_archive();
+    let (_, layer_digest) = seed_image(&state, "alice/img", "latest", b"config", &layer).await;
+    let digest = layer_digest.to_string();
+    let tree_uri = format!("/api/repositories/alice/img/layers/{digest}/tree");
+
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = body_bytes(response).await;
+    assert!(
+        state.listing_cache.len() >= 1,
+        "the single-mode listing is cached"
+    );
+
+    let blob_path = state.storage.blob_path(&layer_digest);
+    tokio::fs::write(&blob_path, b"not a tar")
+        .await
+        .expect("corrupt blob");
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a repeat single listing is served from the cache"
+    );
+    let second = body_bytes(response).await;
+    assert_eq!(first, second, "the cached listing is byte-identical");
+
+    state.layer_cache.invalidate(&layer_digest);
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalidating a layer index must not leave a stale listing"
+    );
+}
+
+#[tokio::test]
 async fn layer_changes_cache_reuses_and_respects_invalidation() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;

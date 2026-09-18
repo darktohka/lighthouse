@@ -66,6 +66,12 @@ pub struct Config {
 
     /// Estimated byte budget for the in-memory layer index cache.
     pub layer_cache_max_bytes: usize,
+    /// Estimated byte budget for the cumulative-overlay cache.
+    pub composed_cache_bytes: usize,
+    /// Estimated byte budget for the diff-classification cache.
+    pub changes_cache_bytes: usize,
+    /// Estimated byte budget for the rendered directory-listing cache.
+    pub listing_cache_bytes: usize,
     /// Seconds a cached layer index is served before it is rebuilt.
     pub layer_cache_ttl_secs: u64,
     /// Maximum decompressed bytes the layer browser scans for one request.
@@ -180,6 +186,9 @@ impl Config {
             max_blob_size: env::var("MAX_BLOB_SIZE").ok().and_then(|v| v.parse().ok()),
 
             layer_cache_max_bytes: env_parse("LAYER_CACHE_MAX_BYTES", 256 * 1024 * 1024)?,
+            composed_cache_bytes: env_parse("COMPOSED_CACHE_BYTES", 64 * 1024 * 1024)?,
+            changes_cache_bytes: env_parse("CHANGES_CACHE_BYTES", 16 * 1024 * 1024)?,
+            listing_cache_bytes: env_parse("LISTING_CACHE_BYTES", 16 * 1024 * 1024)?,
             layer_cache_ttl_secs: env_parse("LAYER_CACHE_TTL_SECS", 900)?,
             layer_max_scan_bytes,
             layer_max_entries,

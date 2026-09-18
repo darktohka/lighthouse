@@ -24,6 +24,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 use tar::EntryType;
@@ -32,7 +33,8 @@ use crate::auth::middleware::Auth;
 use crate::config::effective_layer_scan_bytes;
 use crate::error::{ApiError, ApiResult};
 use crate::layer_cache::{
-    CachedEntry, Change, Changes, ComposedKey, ComposedLayer, EntryKind, LayerIndex,
+    CachedEntry, Change, Changes, ComposedKey, ComposedLayer, EntryKind, LayerIndex, ListingKey,
+    child_dir_sizes,
 };
 use crate::models::Blob;
 use crate::oci::digest::Digest;
@@ -68,6 +70,24 @@ fn bytes_response(status: StatusCode, body: Vec<u8>, content_type: &str) -> Resp
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
     apply_headers(response, content_type, None)
+}
+
+/// A `200 application/json` response built from already-serialized bytes,
+/// without copying them. Byte-identical to what `Json(entries)` would produce.
+fn json_bytes_response(body: Bytes) -> Response {
+    let mut response = Response::new(Body::from(body));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// Serializes a listing level once, for caching and for the response body.
+fn listing_body(entries: &[LayerTreeEntry]) -> ApiResult<Bytes> {
+    serde_json::to_vec(entries)
+        .map(Bytes::from)
+        .map_err(|_| ApiError::internal("layer listing serialization failed"))
 }
 
 fn apply_headers(
@@ -445,6 +465,13 @@ fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> 
             }
         }
     }
+    let dir_sizes = child_dir_sizes(
+        index
+            .entries()
+            .iter()
+            .map(|(entry_path, entry)| (entry_path.as_str(), entry)),
+        path,
+    );
 
     let mut names: Vec<String> = children.keys().cloned().collect();
     names.sort();
@@ -462,7 +489,7 @@ fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> 
                 format!("{path}/{name}")
             };
             let size = match data.kind {
-                EntryKind::Dir => index.dir_size(&full_path),
+                EntryKind::Dir => dir_sizes.get(&name).copied().unwrap_or(0),
                 _ => data.size,
             };
             let (link_resolved, link_kind) = match data.kind {
@@ -930,6 +957,15 @@ impl TreeMode {
         }
     }
 
+    fn as_str(self) -> &'static str {
+        match self {
+            TreeMode::Single => "single",
+            TreeMode::Aggregate => "aggregate",
+            TreeMode::Diff => "diff",
+            TreeMode::AggregateDiff => "aggregate-diff",
+        }
+    }
+
     fn colors(self) -> bool {
         matches!(self, TreeMode::Diff | TreeMode::AggregateDiff)
     }
@@ -1072,7 +1108,7 @@ async fn resolve_ordered_layers(
 async fn cumulative_overlay(
     state: &AppState,
     manifest_digest: &Digest,
-    layers: &[Digest],
+    layers: &Arc<Vec<Digest>>,
     position: usize,
 ) -> ApiResult<Arc<ComposedLayer>> {
     let target: ComposedKey = (manifest_digest.clone(), position);
@@ -1088,14 +1124,16 @@ async fn cumulative_overlay(
         }
         let upper = build_layer_index(state, layer).await?;
         let base = Arc::clone(&current);
-        let layer_digest = layer.clone();
+        let composed_layers = Arc::clone(layers);
+        let position = index as u32;
         current = state
             .composed_cache
             .get_or_build(&key, move || {
                 Ok(Arc::new(ComposedLayer::compose(
                     &base,
                     &upper,
-                    &layer_digest,
+                    position,
+                    composed_layers,
                 )))
             })
             .await?;
@@ -1105,7 +1143,7 @@ async fn cumulative_overlay(
 
 struct Child {
     entry: CachedEntry,
-    source: Option<Digest>,
+    source: Option<u32>,
     removed: bool,
 }
 
@@ -1123,12 +1161,12 @@ fn list_level_composed(
     };
     let mut children: HashMap<String, Child> = HashMap::new();
 
-    for (entry_path, data) in final_layer.entries() {
-        if entry_path.as_str() == path {
+    for (entry_path, node) in final_layer.iter() {
+        if entry_path == path {
             continue;
         }
         let rest = if path.is_empty() {
-            entry_path.as_str()
+            entry_path
         } else if let Some(rest) = entry_path.strip_prefix(&prefix) {
             rest
         } else {
@@ -1149,25 +1187,27 @@ fn list_level_composed(
                 children.insert(
                     rest.to_string(),
                     Child {
-                        entry: data.clone(),
-                        source: final_layer.source(entry_path).cloned(),
+                        entry: node.entry.clone(),
+                        source: node.source,
                         removed: false,
                     },
                 );
             }
         }
     }
+    let dir_sizes = child_dir_sizes(final_layer.entries(), path);
 
+    let mut lower_dir_sizes: HashMap<String, i64> = HashMap::new();
     if mode.shows_ghosts() {
         // Every direct child name present in the lower overlay, whether it was
         // an explicit entry or a directory synthesized from a deeper path.
-        let mut lower_heads: HashMap<String, Option<String>> = HashMap::new();
-        for entry_path in lower_layer.entries().keys() {
-            if entry_path.as_str() == path {
+        let mut lower_heads: HashMap<String, Option<(CachedEntry, Option<u32>)>> = HashMap::new();
+        for (entry_path, node) in lower_layer.iter() {
+            if entry_path == path {
                 continue;
             }
             let rest = if path.is_empty() {
-                entry_path.as_str()
+                entry_path
             } else if let Some(rest) = entry_path.strip_prefix(&prefix) {
                 rest
             } else {
@@ -1176,26 +1216,24 @@ fn list_level_composed(
             if rest.is_empty() {
                 continue;
             }
-            let head = rest.split_once('/').map_or(rest, |(head, _)| head);
-            let explicit = (rest == head).then(|| entry_path.clone());
-            let slot = lower_heads.entry(head.to_string()).or_insert(None);
-            if explicit.is_some() {
-                *slot = explicit;
+            match rest.split_once('/') {
+                Some((head, _)) => {
+                    lower_heads.entry(head.to_string()).or_insert(None);
+                }
+                None => {
+                    lower_heads.insert(rest.to_string(), Some((node.entry.clone(), node.source)));
+                }
             }
         }
+        lower_dir_sizes = child_dir_sizes(lower_layer.entries(), path);
         for (head, explicit) in lower_heads {
-            let full_path = child_path(path, &head);
-            if final_layer.contains_path(&full_path) {
+            if children.contains_key(&head) {
                 continue;
             }
             let child = match explicit {
-                Some(entry_path) => Child {
-                    entry: lower_layer
-                        .entries()
-                        .get(&entry_path)
-                        .cloned()
-                        .ok_or_else(|| ApiError::internal("composed overlay entry missing"))?,
-                    source: lower_layer.source(&entry_path).cloned(),
+                Some((entry, source)) => Child {
+                    entry,
+                    source,
                     removed: true,
                 },
                 None => Child {
@@ -1233,9 +1271,9 @@ fn list_level_composed(
         let size = match child.entry.kind {
             EntryKind::Dir => {
                 if child.removed {
-                    lower_layer.dir_size(&full_path)
+                    lower_dir_sizes.get(&name).copied().unwrap_or(0)
                 } else {
-                    final_layer.dir_size(&full_path)
+                    dir_sizes.get(&name).copied().unwrap_or(0)
                 }
             }
             _ => child.entry.size,
@@ -1259,6 +1297,16 @@ fn list_level_composed(
             }
             _ => (None, None),
         };
+        let source_digest = child
+            .source
+            .and_then(|index| {
+                if child.removed {
+                    lower_layer.source_at(index)
+                } else {
+                    final_layer.source_at(index)
+                }
+            })
+            .map(ToString::to_string);
         entries.push(LayerTreeEntry {
             name,
             path: full_path,
@@ -1269,7 +1317,7 @@ fn list_level_composed(
             link_resolved,
             link_kind,
             change: change.map(|change| change.as_str().to_string()),
-            source_digest: child.source.as_ref().map(ToString::to_string),
+            source_digest,
         });
     }
     Ok(entries)
@@ -1287,9 +1335,23 @@ pub async fn layer_tree(
     let (_repository, _blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
 
     if mode == TreeMode::Single {
+        let key = ListingKey {
+            scope: parsed.to_string(),
+            position: u32::MAX,
+            path: path.clone(),
+            mode: mode.as_str(),
+        };
+        if let Some(body) = state.listing_cache.get(&key) {
+            return Ok(json_bytes_response(body));
+        }
+        let generation = state.listing_cache.generation_token();
         let index = build_layer_index(&state, &parsed).await?;
         let entries = run_blocking(move || list_level(&index, &path)).await?;
-        return Ok(Json(entries).into_response());
+        let body = listing_body(&entries)?;
+        state
+            .listing_cache
+            .insert_with_generation(key, body.clone(), generation);
+        return Ok(json_bytes_response(body));
     }
 
     let manifest_ref = query
@@ -1299,7 +1361,7 @@ pub async fn layer_tree(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request("manifest is required for this mode"))?;
     let (repository, manifest) = resolve_manifest(&state, &actor, &repo_name, manifest_ref).await?;
-    let layers = resolve_ordered_layers(&state, &manifest, &parsed).await?;
+    let layers = Arc::new(resolve_ordered_layers(&state, &manifest, &parsed).await?);
     let position = layers
         .iter()
         .position(|layer| layer == &parsed)
@@ -1317,6 +1379,17 @@ pub async fn layer_tree(
     }
 
     let manifest_digest = Digest::parse(&manifest.digest).map_err(ApiError::from)?;
+    let key = ListingKey {
+        scope: manifest_digest.to_string(),
+        position: position as u32,
+        path: path.clone(),
+        mode: mode.as_str(),
+    };
+    if let Some(body) = state.listing_cache.get(&key) {
+        return Ok(json_bytes_response(body));
+    }
+    let generation = state.listing_cache.generation_token();
+
     let final_layer = cumulative_overlay(&state, &manifest_digest, &layers, position).await?;
     let mut changes: Option<Arc<Changes>> = None;
     let lower_layer = if mode.shows_ghosts() {
@@ -1345,7 +1418,11 @@ pub async fn layer_tree(
     })
     .await?;
 
-    Ok(Json(entries).into_response())
+    let body = listing_body(&entries)?;
+    state
+        .listing_cache
+        .insert_with_generation(key, body.clone(), generation);
+    Ok(json_bytes_response(body))
 }
 
 pub async fn layer_file(

@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::layer_cache::{ChangesCache, ComposedLayerCache, LayerCacheConfig, LayerIndexCache};
+use crate::layer_cache::{
+    ChangesCache, ComposedLayerCache, LayerCacheConfig, LayerIndexCache, ListingCache,
+};
 use crate::ratelimit::Limiters;
 use crate::storage::Storage;
 use crate::storage::registry::Registry;
@@ -71,6 +73,8 @@ pub struct AppState {
     /// Diff classifications keyed by `(manifest_digest, layer_position)`; see
     /// [`crate::layer_cache::ChangesCache`].
     pub changes_cache: Arc<ChangesCache>,
+    /// Rendered directory listings; see [`crate::layer_cache::ListingCache`].
+    pub listing_cache: Arc<ListingCache>,
 }
 
 impl AppState {
@@ -81,16 +85,32 @@ impl AppState {
 
         let registry = Arc::new(Registry::new(db.clone(), Arc::clone(&storage)));
         let limiters = Arc::new(Limiters::new(&config));
-        let cache_config = LayerCacheConfig {
+        let ttl = Duration::from_secs(config.layer_cache_ttl_secs);
+        let layer_cache = Arc::new(LayerIndexCache::new(LayerCacheConfig {
             max_bytes: config.layer_cache_max_bytes,
-            ttl: Duration::from_secs(config.layer_cache_ttl_secs),
-        };
-        let layer_cache = Arc::new(LayerIndexCache::new(cache_config));
+            ttl,
+        }));
         let composed_cache = Arc::new(ComposedLayerCache::new(
-            cache_config,
+            LayerCacheConfig {
+                max_bytes: config.composed_cache_bytes,
+                ttl,
+            },
             layer_cache.generation(),
         ));
-        let changes_cache = Arc::new(ChangesCache::new(cache_config, layer_cache.generation()));
+        let changes_cache = Arc::new(ChangesCache::new(
+            LayerCacheConfig {
+                max_bytes: config.changes_cache_bytes,
+                ttl,
+            },
+            layer_cache.generation(),
+        ));
+        let listing_cache = Arc::new(ListingCache::new(
+            LayerCacheConfig {
+                max_bytes: config.listing_cache_bytes,
+                ttl,
+            },
+            layer_cache.generation(),
+        ));
 
         Ok(Self {
             config: Arc::new(config),
@@ -101,6 +121,22 @@ impl AppState {
             layer_cache,
             composed_cache,
             changes_cache,
+            listing_cache,
         })
+    }
+
+    /// Runs periodic upkeep on every cache and the rate limiters: drops TTL-
+    /// expired entries, drops entries derived from a stale layer-index
+    /// generation, and discards idle rate-limit buckets. Called from a background
+    /// task so memory does not stay resident between requests.
+    pub fn maintain(&self) {
+        self.layer_cache.sweep_expired();
+        self.composed_cache.sweep_expired();
+        self.composed_cache.sweep_stale_generation();
+        self.changes_cache.sweep_expired();
+        self.changes_cache.sweep_stale_generation();
+        self.listing_cache.sweep_expired();
+        self.listing_cache.sweep_stale_generation();
+        self.limiters.retain_recent();
     }
 }
