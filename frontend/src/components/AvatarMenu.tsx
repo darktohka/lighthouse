@@ -1,49 +1,50 @@
-import { ChevronDownIcon, SignOutIcon } from '@primer/octicons-react'
-import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { ChevronDownIcon, SignOutIcon } from "@primer/octicons-react";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
-import { useAuth } from '../lib/auth-context'
-import { cx } from '../lib/cx'
-import { LibravatarAvatar } from './LibravatarAvatar'
+import { useAuth } from "../lib/auth-context";
+import { cx } from "../lib/cx";
+import { LibravatarAvatar } from "./LibravatarAvatar";
 
 export function AvatarMenu() {
-  const { user, logout } = useAuth()
-  const navigate = useNavigate()
-  const [open, setOpen] = useState(false)
-  const containerRef = useRef<HTMLDivElement>(null)
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!open) return
+    if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
-      const target = event.target
+      const target = event.target;
       if (
         containerRef.current &&
         target instanceof Node &&
         !containerRef.current.contains(target)
       ) {
-        setOpen(false)
+        setOpen(false);
       }
-    }
+    };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown)
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener('mousedown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [open])
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
-  if (!user) return null
+  if (!user) return null;
 
   const displayName =
-    [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username
+    [user.first_name, user.last_name].filter(Boolean).join(" ") ||
+    user.username;
 
   const handleLogout = () => {
-    setOpen(false)
-    void logout().then(() => navigate('/login'))
-  }
+    setOpen(false);
+    void logout().then(() => navigate("/login"));
+  };
 
   return (
     <div ref={containerRef} className="relative">
@@ -99,22 +100,6 @@ export function AvatarMenu() {
           </Link>
           <Link
             role="menuitem"
-            to="/settings?tab=service-accounts"
-            onClick={() => setOpen(false)}
-            className={menuItemClass}
-          >
-            Service accounts
-          </Link>
-          <Link
-            role="menuitem"
-            to="/settings?tab=app-passwords"
-            onClick={() => setOpen(false)}
-            className={menuItemClass}
-          >
-            App passwords
-          </Link>
-          <Link
-            role="menuitem"
             to="/settings"
             onClick={() => setOpen(false)}
             className={menuItemClass}
@@ -126,7 +111,7 @@ export function AvatarMenu() {
             type="button"
             role="menuitem"
             onClick={handleLogout}
-            className={cx(menuItemClass, 'w-full text-left text-danger')}
+            className={cx(menuItemClass, "w-full text-left text-danger")}
           >
             <SignOutIcon size={14} aria-hidden="true" />
             Sign out
@@ -134,8 +119,8 @@ export function AvatarMenu() {
         </div>
       ) : null}
     </div>
-  )
+  );
 }
 
 const menuItemClass =
-  'flex items-center gap-2 px-3 py-1.5 text-sm text-foreground hover:bg-neutral-subtle'
+  "flex items-center gap-2 px-3 py-1.5 text-sm text-foreground hover:bg-neutral-subtle";

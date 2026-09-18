@@ -60,9 +60,8 @@ export function ExplorePage() {
   const { data, error, loading, reload } = useAsync<ExploreData>(
     async (signal) => {
       const page = await namespacesApi.list(1, 60, { signal })
-      const publicNamespaces = page.items.filter((item) => item.is_public)
       const repoPages = await Promise.all(
-        publicNamespaces.slice(0, MAX_NAMESPACES_SCANNED).map(async (item) => {
+        page.items.slice(0, MAX_NAMESPACES_SCANNED).map(async (item) => {
           try {
             const repos = await repositoriesApi.list(
               item.name,
@@ -71,7 +70,7 @@ export function ExplorePage() {
               undefined,
               { signal },
             )
-            return repos.items.filter((repo) => repo.is_public)
+            return repos.items
           } catch {
             return []
           }
@@ -112,14 +111,13 @@ export function ExplorePage() {
     [sortedRepositories, page],
   )
 
-  const publicNamespaceCount =
-    data?.namespaces.filter((item) => item.is_public).length ?? 0
+  const namespaceCount = data?.namespaces.length ?? 0
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Explore"
-        description="Public namespaces and repositories on this registry."
+        description="Namespaces and repositories you can access."
       />
 
       {loading && !data ? <LoadingState label="Loading registry…" /> : null}
@@ -136,17 +134,17 @@ export function ExplorePage() {
             />
           ) : null}
 
-          <section aria-labelledby="public-namespaces">
+          <section aria-labelledby="namespaces">
             <div className="mb-3 flex items-center gap-2">
-              <h2 id="public-namespaces" className="text-base font-semibold">
-                Public namespaces
+              <h2 id="namespaces" className="text-base font-semibold">
+                Namespaces
               </h2>
               <CounterLabel>{filtered.namespaces.length}</CounterLabel>
             </div>
             {filtered.namespaces.length === 0 ? (
               <EmptyState
-                title="No public namespaces"
-                description="Nothing has been shared publicly yet."
+                title="No namespaces"
+                description="You don't have access to any namespaces yet."
                 icon={<GlobeIcon size={24} aria-hidden="true" />}
               />
             ) : (
@@ -191,23 +189,23 @@ export function ExplorePage() {
             )}
           </section>
 
-          <section aria-labelledby="public-repositories">
+          <section aria-labelledby="repositories">
             <div className="mb-3 flex items-center gap-2">
-              <h2 id="public-repositories" className="text-base font-semibold">
-                Public repositories
+              <h2 id="repositories" className="text-base font-semibold">
+                Repositories
               </h2>
               <CounterLabel>{filtered.repositories.length}</CounterLabel>
             </div>
-            {publicNamespaceCount > MAX_NAMESPACES_SCANNED ? (
+            {namespaceCount > MAX_NAMESPACES_SCANNED ? (
               <p className="mb-2 text-xs text-muted">
                 Showing repositories from the first {MAX_NAMESPACES_SCANNED}{' '}
-                public namespaces.
+                namespaces.
               </p>
             ) : null}
             {filtered.repositories.length === 0 ? (
               <EmptyState
-                title="No public repositories"
-                description="Push an image and make its repository public to see it here."
+                title="No repositories"
+                description="Push an image to a namespace and it will show up here."
                 icon={<RepoIcon size={24} aria-hidden="true" />}
               />
             ) : (

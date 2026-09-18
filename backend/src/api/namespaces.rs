@@ -91,7 +91,7 @@ pub(crate) async fn namespace_view(
     namespace: &Namespace,
 ) -> ApiResult<NamespaceView> {
     let access = permissions::namespace_access(state, actor, &namespace.name).await?;
-    let repository_count: i64 = if access.can_push {
+    let repository_count: i64 = if access.can_pull {
         sqlx::query_scalar("SELECT COUNT(*) FROM repositories WHERE namespace_id = ?")
             .bind(namespace.id)
             .fetch_one(&state.db)

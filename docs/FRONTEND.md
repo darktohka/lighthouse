@@ -233,7 +233,7 @@ descending) and paginated. The profile (`UserRepositories`) and workspace
 (default `updated`/`desc`), resetting to page 1 when the sort changes; their
 headers use the shared `TableSortHeader` / `TableColumn.sortDirection` pair so
 `aria-sort` tracks the active column. The dashboard ("Your repositories") and
-Explore ("Public repositories") payloads arrive whole, so they sort and paginate
+Explore ("Repositories") payloads arrive whole, so they sort and paginate
 **client-side** with `src/lib/repositorySort.ts` (dashboard 25 per page, Explore
 12 per page, both reusing the same default directions). Explore has no table
 headers, so it exposes a labelled `<select>` plus an ascending/descending toggle
@@ -250,8 +250,9 @@ and re-sorts/re-pages the filtered result after the search filter is applied.
 - **Pull statistics UI** — `docs/API.md` describes `GET …/pulls?days=` but not
   its response body, so it is bound as opaque JSON and rendered nowhere yet.
 - **Global repository search** — there is no cross-namespace repository search
-  endpoint, so Explore lists public namespaces and then fetches repositories for
-  the first eight public ones; a namespace-scoped report notes this.
+  endpoint, so Explore lists the namespaces the caller can pull from and then
+  fetches repositories for the first eight of them; a namespace-scoped report
+  notes this.
 - **Captcha transport** — `docs/AUTH.md` mounts `pow-captcha-axum` under
   `/api/auth/captcha` (`/challenge`, `/redeem`, …). `src/routes.rs` currently
   only implements `GET /api/auth/captcha`; the React widget targets the
