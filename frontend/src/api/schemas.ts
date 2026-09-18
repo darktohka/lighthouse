@@ -96,7 +96,8 @@ export const heatmapDaySchema = v.object({
 export type HeatmapDay = v.InferOutput<typeof heatmapDaySchema>
 
 export const heatmapSchema = v.object({
-  year: v.number(),
+  start: v.string(),
+  end: v.string(),
   days: v.array(heatmapDaySchema),
   total: v.number(),
 })

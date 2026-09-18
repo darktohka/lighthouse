@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::{Auth, Authenticated};
@@ -67,7 +67,7 @@ struct SearchQuery {
 #[derive(Debug, Deserialize)]
 struct HeatmapQuery {
     #[serde(default)]
-    year: Option<i32>,
+    end: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,7 +78,8 @@ struct HeatmapDay {
 
 #[derive(Debug, Serialize)]
 struct Heatmap {
-    year: i32,
+    start: String,
+    end: String,
     days: Vec<HeatmapDay>,
     total: i64,
 }
@@ -291,17 +292,32 @@ async fn heatmap(
     Query(query): Query<HeatmapQuery>,
 ) -> ApiResult<Response> {
     let user = find_user_by_username(&state, &username).await?;
-    let year = query.year.unwrap_or_else(|| Utc::now().year());
+
+    let end = match &query.end {
+        Some(raw) => NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map_err(|_| ApiError::bad_request("invalid end date"))?,
+        None => Utc::now().date_naive(),
+    };
+
+    // Snap `end` forward to the Saturday of its week (0 = Sun .. 6 = Sat).
+    let offset = 6 - end.weekday().num_days_from_sunday();
+    let window_end = end + Duration::days(offset as i64);
+    let window_start = window_end - Duration::days(363);
+
+    let start_str = window_start.format("%Y-%m-%d").to_string();
+    let end_str = window_end.format("%Y-%m-%d").to_string();
 
     let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     let activity_days = sqlx::query_as::<_, (String, i64)>(
         "SELECT substr(created_at, 1, 10) AS day, COUNT(*) \
-         FROM activity WHERE actor_user_id = ? AND substr(created_at, 1, 4) = ? \
+         FROM activity WHERE actor_user_id = ? \
+         AND substr(created_at, 1, 10) BETWEEN ? AND ? \
          GROUP BY day",
     )
     .bind(user.id)
-    .bind(year.to_string())
+    .bind(&start_str)
+    .bind(&end_str)
     .fetch_all(&state.db)
     .await?;
     for (day, count) in activity_days {
@@ -310,37 +326,40 @@ async fn heatmap(
 
     let pull_days = sqlx::query_as::<_, (String, i64)>(
         "SELECT substr(created_at, 1, 10) AS day, COUNT(*) \
-         FROM pull_events WHERE user_id = ? AND substr(created_at, 1, 4) = ? \
+         FROM pull_events WHERE user_id = ? \
+         AND substr(created_at, 1, 10) BETWEEN ? AND ? \
          GROUP BY day",
     )
     .bind(user.id)
-    .bind(year.to_string())
+    .bind(&start_str)
+    .bind(&end_str)
     .fetch_all(&state.db)
     .await?;
     for (day, count) in pull_days {
         *counts.entry(day).or_insert(0) += count;
     }
 
-    let start = NaiveDate::from_ymd_opt(year, 1, 1)
-        .ok_or_else(|| ApiError::bad_request("invalid year"))?;
-    let end = NaiveDate::from_ymd_opt(year, 12, 31)
-        .ok_or_else(|| ApiError::bad_request("invalid year"))?;
-
     let mut days = Vec::new();
     let mut total = 0i64;
-    let mut cursor = start;
+    let mut cursor = window_start;
     loop {
         let date = cursor.format("%Y-%m-%d").to_string();
         let count = counts.get(&date).copied().unwrap_or(0);
         total += count;
         days.push(HeatmapDay { date, count });
-        if cursor >= end {
+        if cursor >= window_end {
             break;
         }
-        cursor = cursor.succ_opt().unwrap_or(end);
+        cursor = cursor.succ_opt().unwrap_or(window_end);
     }
 
-    Ok(Json(Heatmap { year, days, total }).into_response())
+    Ok(Json(Heatmap {
+        start: start_str,
+        end: end_str,
+        days,
+        total,
+    })
+    .into_response())
 }
 
 async fn followers(

@@ -1589,17 +1589,47 @@ async fn user_profile_and_heatmap() {
     );
     assert!(profile.get("password_hash").is_none());
 
-    let year = chrono::Utc::now().format("%Y").to_string();
+    let today = chrono::Utc::now().date_naive();
+    let end_param = today.format("%Y-%m-%d").to_string();
     let response = call(
         &app,
         Method::GET,
-        &format!("/api/users/alice/heatmap?year={year}"),
+        &format!("/api/users/alice/heatmap?end={end_param}"),
         Some(actor(&alice)),
         None,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let heatmap = body_json(response).await;
-    assert_eq!(heatmap["year"].as_i64().unwrap_or(0).to_string(), year);
-    assert!(!heatmap["days"].as_array().expect("days").is_empty());
+
+    let start = chrono::NaiveDate::parse_from_str(
+        heatmap["start"].as_str().expect("start"),
+        "%Y-%m-%d",
+    )
+    .expect("start parses");
+    let end =
+        chrono::NaiveDate::parse_from_str(heatmap["end"].as_str().expect("end"), "%Y-%m-%d")
+            .expect("end parses");
+    use chrono::Datelike;
+    assert_eq!(start.weekday(), chrono::Weekday::Sun);
+    assert_eq!(end.weekday(), chrono::Weekday::Sat);
+
+    let days = heatmap["days"].as_array().expect("days");
+    assert_eq!(days.len(), 364);
+    assert_eq!(days.first().expect("first")["date"], heatmap["start"]);
+    assert_eq!(days.last().expect("last")["date"], heatmap["end"]);
+    assert!(heatmap["total"].is_number());
+    assert!(heatmap.get("year").is_none());
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/users/alice/heatmap",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let heatmap = body_json(response).await;
+    assert_eq!(heatmap["days"].as_array().expect("days").len(), 364);
 }

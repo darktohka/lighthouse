@@ -17,8 +17,8 @@ export function ProfilePage() {
   const params = useParams()
   const username = params.username ?? ''
   const { user } = useAuth()
-  const currentYear = new Date().getFullYear()
-  const [year, setYear] = useState(currentYear)
+  const todayIso = new Date().toISOString().slice(0, 10)
+  const [endDate, setEndDate] = useState(todayIso)
   const [reloadToken, setReloadToken] = useState(0)
 
   const profileState = useAsync(
@@ -29,9 +29,9 @@ export function ProfilePage() {
   const heatmapState = useAsync(
     (signal) =>
       username
-        ? usersApi.heatmap(username, year, { signal })
+        ? usersApi.heatmap(username, endDate, { signal })
         : Promise.resolve(null),
-    `heatmap:${username}:${year}:${reloadToken}`,
+    `heatmap:${username}:${endDate}:${reloadToken}`,
   )
   const namespaceState = useAsync(
     (signal) =>
@@ -68,13 +68,13 @@ export function ProfilePage() {
             </BoxHeader>
             <div className="p-4">
               <Heatmap
-                year={year}
+                endDate={endDate}
                 data={heatmapState.data}
                 loading={heatmapState.loading}
                 error={heatmapState.error}
                 onRetry={heatmapState.reload}
-                onYearChange={setYear}
-                maxYear={currentYear}
+                onWindowChange={setEndDate}
+                maxEnd={todayIso}
               />
             </div>
           </Box>

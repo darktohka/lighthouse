@@ -50,83 +50,104 @@ function levelFor(count: number, max: number): number {
   return 1
 }
 
-function isLeapYear(year: number): boolean {
-  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+function shiftIsoDate(iso: string, days: number): string {
+  const base = Date.parse(`${iso}T00:00:00Z`)
+  return new Date(base + days * 86_400_000).toISOString().slice(0, 10)
 }
 
-function buildGrid(year: number, days: readonly HeatmapDay[]) {
+function formatDay(iso: string): string {
+  const date = new Date(`${iso}T00:00:00Z`)
+  if (Number.isNaN(date.getTime())) return iso
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(date)
+}
+
+function buildGrid(start: string, end: string, days: readonly HeatmapDay[]) {
+  const totalDays =
+    Math.round(
+      (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) /
+        86_400_000,
+    ) + 1
+  const weeks = totalDays / 7
   const byDate = new Map(days.map((day) => [day.date, day.count]))
-  const startWeekday = new Date(Date.UTC(year, 0, 1)).getUTCDay()
-  const dayCount = isLeapYear(year) ? 366 : 365
-  const weeks = Math.ceil((startWeekday + dayCount) / 7)
   const max = days.reduce((acc, day) => Math.max(acc, day.count), 0)
 
   const cells: PlacedCell[] = []
   const monthLabels: Array<{ week: number; label: string }> = []
-  for (let index = 0; index < dayCount; index += 1) {
-    const date = new Date(Date.UTC(year, 0, 1 + index))
-    const iso = date.toISOString().slice(0, 10)
-    const count = byDate.get(iso) ?? 0
-    const slot = startWeekday + index
+  for (let index = 0; index < totalDays; index += 1) {
+    const date = shiftIsoDate(start, index)
+    const count = byDate.get(date) ?? 0
+    const week = Math.floor(index / 7)
+    const weekday = index % 7
     cells.push({
-      date: iso,
+      date,
       count,
       level: levelFor(count, max),
-      week: Math.floor(slot / 7),
-      weekday: slot % 7,
+      week,
+      weekday,
     })
-    if (iso.slice(8, 10) === '01') {
-      monthLabels.push({ week: Math.floor(slot / 7), label: MONTHS[date.getUTCMonth()] })
+    if (index === 0 || date.slice(8, 10) === '01') {
+      monthLabels.push({
+        week,
+        label: MONTHS[Number(date.slice(5, 7)) - 1],
+      })
     }
   }
   return { weeks, cells, monthLabels }
 }
 
 export type HeatmapProps = {
-  year: number
+  endDate: string
   data: HeatmapData | null
   loading: boolean
   error: Error | null
   onRetry: () => void
-  onYearChange: (year: number) => void
-  maxYear: number
+  onWindowChange: (nextEnd: string) => void
+  maxEnd: string
 }
 
 export function Heatmap({
-  year,
+  endDate,
   data,
   loading,
   error,
   onRetry,
-  onYearChange,
-  maxYear,
+  onWindowChange,
+  maxEnd,
 }: HeatmapProps) {
-  const grid = data ? buildGrid(data.year, data.days) : null
+  const grid = data ? buildGrid(data.start, data.end, data.days) : null
+  const canGoNext = shiftIsoDate(endDate, 364) <= maxEnd
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold">
-          {data ? `${formatNumber(data.total)} contributions in ${data.year}` : 'Contributions'}
+          {data
+            ? `${formatNumber(data.total)} contributions · ${formatDay(data.start)} – ${formatDay(data.end)}`
+            : 'Contributions'}
         </h3>
         <div className="flex items-center gap-1">
           <Button
             size="sm"
-            disabled={year <= 2000}
+            disabled={Number(endDate.slice(0, 4)) <= 2026}
             aria-label="Previous year"
-            onClick={() => onYearChange(year - 1)}
+            onClick={() => onWindowChange(shiftIsoDate(endDate, -364))}
             leadingIcon={<ChevronLeftIcon size={14} aria-hidden="true" />}
           >
-            {year - 1}
+            {Number(endDate.slice(0, 4)) - 1}
           </Button>
           <Button
             size="sm"
-            disabled={year >= maxYear}
+            disabled={!canGoNext}
             aria-label="Next year"
-            onClick={() => onYearChange(year + 1)}
+            onClick={() => onWindowChange(shiftIsoDate(endDate, 364))}
             trailingIcon={<ChevronRightIcon size={14} aria-hidden="true" />}
           >
-            {year + 1}
+            {Number(endDate.slice(0, 4)) + 1}
           </Button>
         </div>
       </div>
@@ -139,7 +160,7 @@ export function Heatmap({
           <div className="overflow-x-auto pb-1 scrollbar-thin">
             <div
               role="img"
-              aria-label={`Contribution heatmap for ${data.year}`}
+              aria-label={`Contribution heatmap from ${data.start} to ${data.end}`}
               className="grid w-max"
               style={{
                 gap: GAP,

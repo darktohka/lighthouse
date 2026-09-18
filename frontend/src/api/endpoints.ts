@@ -233,9 +233,9 @@ export const users = {
     return api.patch('/users/me', userProfileSchema, body)
   },
 
-  heatmap(username: string, year?: number, options?: RequestOptions) {
+  heatmap(username: string, end?: string, options?: RequestOptions) {
     return api.get(
-      `/users/${encodeURIComponent(username)}/heatmap${buildQuery({ year })}`,
+      `/users/${encodeURIComponent(username)}/heatmap${buildQuery({ end })}`,
       heatmapSchema,
       options,
     )

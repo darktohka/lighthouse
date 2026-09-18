@@ -46,7 +46,7 @@ Errors use the envelope:
 |---|---|---|---|
 | GET | `/users/{username}` | optional | profile |
 | PATCH | `/users/me` | required | update own profile |
-| GET | `/users/{username}/heatmap?year=YYYY` | optional | daily contribution counts |
+| GET | `/users/{username}/heatmap?end=YYYY-MM-DD` | optional | daily contribution counts |
 | GET | `/users/{username}/followers` | optional | paginated `UserSummary` |
 | GET | `/users/{username}/following` | optional | paginated `UserSummary` |
 | POST | `/users/{username}/follow` | required | follow (204) |
@@ -60,12 +60,15 @@ UserProfile   { id, username, first_name, last_name, bio, company, location,
                 repository_count, public_repository_count, total_pulls,
                 follower_count, following_count, is_following, is_self }
 HeatmapDay    { date, count }
-Heatmap       { year, days: [HeatmapDay], total }
+Heatmap       { start, end, days: [HeatmapDay], total }
 UpdateProfile { first_name?, last_name?, bio?, company?, location?, website?, theme? }
 ```
 
 `avatar_url` is resolved by the frontend from `LIBRAVATAR_BASE_URL` + the
 SHA-256 of the e-mail unless the user supplied an explicit override.
+
+The heatmap window is the trailing 52 whole weeks (Sunday -> Saturday) ending
+on the Saturday of `end`'s week; `end` defaults to today.
 
 ---
 

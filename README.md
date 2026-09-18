@@ -41,8 +41,8 @@ statistics, storage analytics and an in-browser layer filesystem viewer.
   (`Bearer`, `Basic` or both), push implies pull.
 - **Control plane** — dashboard and activity timeline, image and tag detail with
   sizes and platforms, JSON manifest/config browsing,
-  in-browser layer filesystem, storage analytics, profile pages with a yearly
-  contribution heatmap and follows.
+  in-browser layer filesystem, storage analytics, profile pages with a rolling
+  52-week contribution heatmap and follows.
 - **Operations** — daily-rotated logs with per-request IP/user-agent/timestamp,
   in-memory rate limiting, proof-of-work captcha, graceful SIGINT/SIGTERM
   shutdown, `scratch`-based image, multi-arch CI.
