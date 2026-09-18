@@ -57,7 +57,7 @@ Errors use the envelope:
 | GET | `/users/search?q=&limit=` | optional | username autocomplete (delegations) |
 
 ```
-UserSummary   { id, username, first_name, last_name, avatar_url }
+UserSummary   { id, username, first_name, last_name, avatar_url, avatar_hash }
 UserProfile   { id, username, first_name, last_name, bio, company, location,
                 website, avatar_url, avatar_hash, created_at, namespace,
                 repository_count, public_repository_count, total_pulls,
@@ -71,7 +71,8 @@ UpdateProfile { first_name?, last_name?, bio?, company?, location?, website?, th
 SHA-256 of the e-mail unless the user supplied an explicit override.
 `avatar_hash` is the lowercase hex SHA-256 of the trimmed, lowercased e-mail and
 is public: it lets unauthenticated visitors and other users render the Libravatar
-for any profile. The e-mail address itself is never returned by `UserProfile`.
+for any profile or user summary. The e-mail address itself is never returned by
+`UserProfile` or `UserSummary`.
 
 The heatmap window is the trailing 52 whole weeks (Sunday -> Saturday) ending
 on the Saturday of `end`'s week; `end` defaults to today.

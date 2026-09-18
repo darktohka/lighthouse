@@ -31,6 +31,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::db::Db;
 use crate::error::{ApiError, ApiResult};
@@ -106,6 +107,14 @@ pub struct UserSummary {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Lowercase hex SHA-256 of the normalized e-mail (Libravatar key).
+    pub avatar_hash: String,
+}
+
+/// Lowercase hex SHA-256 of the normalized e-mail, the public Libravatar
+/// identifier. The e-mail itself is never exposed.
+pub(crate) fn avatar_hash(email: &str) -> String {
+    hex::encode(Sha256::digest(email.trim().to_lowercase().as_bytes()))
 }
 
 impl From<&User> for UserSummary {
@@ -116,6 +125,7 @@ impl From<&User> for UserSummary {
             first_name: user.first_name.clone(),
             last_name: user.last_name.clone(),
             avatar_url: user.avatar_url.clone(),
+            avatar_hash: avatar_hash(&user.email),
         }
     }
 }

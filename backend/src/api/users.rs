@@ -8,14 +8,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
 use crate::auth::middleware::{Auth, Authenticated};
 use crate::error::{ApiError, ApiResult};
 use crate::models::User;
 use crate::state::{AppState, AuthContext};
 
-use super::{PageQuery, Pagination, UserSummary, load_user};
+use super::{PageQuery, Pagination, UserSummary, avatar_hash, load_user};
 
 #[derive(Debug, Serialize)]
 struct UserProfile {
@@ -98,12 +96,6 @@ pub fn router() -> Router<AppState> {
             "/api/users/{username}/follow",
             post(follow).delete(unfollow),
         )
-}
-
-/// Lowercase hex SHA-256 of the normalized e-mail, the public Libravatar
-/// identifier. The e-mail itself is never exposed.
-fn avatar_hash(email: &str) -> String {
-    hex::encode(Sha256::digest(email.trim().to_lowercase().as_bytes()))
 }
 
 fn normalize(value: Option<String>) -> Option<String> {

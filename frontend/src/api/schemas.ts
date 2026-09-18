@@ -50,6 +50,7 @@ export const userSummarySchema = v.object({
   first_name: v.nullable(v.string()),
   last_name: v.nullable(v.string()),
   avatar_url: v.nullable(v.string()),
+  avatar_hash: v.string(),
 })
 export type UserSummary = v.InferOutput<typeof userSummarySchema>
 
