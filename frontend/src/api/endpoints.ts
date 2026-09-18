@@ -468,16 +468,29 @@ export const blobs = {
   },
 }
 
+export type LayerTreeMode = 'single' | 'aggregate' | 'diff' | 'aggregate-diff'
+
+export type LayerTreeQuery = {
+  path?: string
+  mode?: LayerTreeMode
+  /** Image manifest digest; required by every mode other than `single`. */
+  manifest?: string
+}
+
 export const layers = {
   tree(
     namespace: string,
     repo: string,
     digest: string,
-    path: string | undefined,
+    query: LayerTreeQuery,
     options?: RequestOptions,
   ) {
     return api.get(
-      `${repositoryApiPath(namespace, repo)}/layers/${encodeURIComponent(digest)}/tree${buildQuery({ path })}`,
+      `${repositoryApiPath(namespace, repo)}/layers/${encodeURIComponent(digest)}/tree${buildQuery({
+        path: query.path,
+        mode: query.mode,
+        manifest: query.manifest,
+      })}`,
       layerTreeSchema,
       options,
     )

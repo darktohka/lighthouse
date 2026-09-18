@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::layer_cache::{LayerCacheConfig, LayerIndexCache};
+use crate::layer_cache::{ComposedLayerCache, LayerCacheConfig, LayerIndexCache};
 use crate::ratelimit::Limiters;
 use crate::storage::Storage;
 use crate::storage::registry::Registry;
@@ -65,6 +65,9 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub limiters: Arc<Limiters>,
     pub layer_cache: Arc<LayerIndexCache>,
+    /// Cumulative overlays keyed by `(manifest_digest, layer_position)`; see
+    /// [`crate::layer_cache::ComposedLayerCache`].
+    pub composed_cache: Arc<ComposedLayerCache>,
 }
 
 impl AppState {
@@ -75,10 +78,15 @@ impl AppState {
 
         let registry = Arc::new(Registry::new(db.clone(), Arc::clone(&storage)));
         let limiters = Arc::new(Limiters::new(&config));
-        let layer_cache = Arc::new(LayerIndexCache::new(LayerCacheConfig {
+        let cache_config = LayerCacheConfig {
             max_bytes: config.layer_cache_max_bytes,
             ttl: Duration::from_secs(config.layer_cache_ttl_secs),
-        }));
+        };
+        let layer_cache = Arc::new(LayerIndexCache::new(cache_config));
+        let composed_cache = Arc::new(ComposedLayerCache::new(
+            cache_config,
+            layer_cache.generation(),
+        ));
 
         Ok(Self {
             config: Arc::new(config),
@@ -87,6 +95,7 @@ impl AppState {
             registry,
             limiters,
             layer_cache,
+            composed_cache,
         })
     }
 }

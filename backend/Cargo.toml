@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.6.0"
-async-compression = { version = "0.4.47", features = ["tokio", "gzip", "zstd"] }
+async-compression = { version = "0.4.48", features = ["tokio", "gzip", "zstd"] }
 axum = { version = "0.8.9", features = ["macros", "http2"] }
 base64 = "0.23.1"
 bytes = "1.12.1"

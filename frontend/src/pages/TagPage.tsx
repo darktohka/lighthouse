@@ -52,6 +52,23 @@ function defaultPlatformDigest(
   return (preferred ?? details[0])?.digest ?? null
 }
 
+function owningPlatformDigest(
+  detail: TagDetail,
+  scope: PlatformDetail | null,
+  layer: LayerInfo,
+): string {
+  const matches = detail.platform_details.filter((item) =>
+    item.layers.some(
+      (edge) => edge.digest === layer.digest && edge.role === layer.role,
+    ),
+  )
+  const scoped =
+    scope === null
+      ? undefined
+      : matches.find((item) => item.digest === scope.digest)
+  return (scoped ?? matches[0])?.digest ?? detail.digest
+}
+
 function tabClass(active: boolean): string {
   return cx(
     '-mb-px border-b-2 px-3 py-1.5 text-sm font-medium',
@@ -80,55 +97,6 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
     setTab('config')
   }
 
-  const layerColumns: TableColumn<LayerInfo>[] = [
-    {
-      key: 'role',
-      header: 'Role',
-      render: (layer) => (
-        <Label variant={layer.role === 'config' ? 'accent' : 'muted'}>
-          {layer.role}
-        </Label>
-      ),
-    },
-    {
-      key: 'digest',
-      header: 'Digest',
-      render: (layer) => (
-        <span className="font-mono text-xs" title={layer.digest}>
-          {shortDigest(layer.digest)}
-        </span>
-      ),
-    },
-    {
-      key: 'media_type',
-      header: 'Media type',
-      render: (layer) => (
-        <span className="break-all font-mono text-xs">{layer.media_type}</span>
-      ),
-    },
-    {
-      key: 'size',
-      header: 'Size',
-      align: 'right',
-      render: (layer) => formatBytes(layer.size),
-    },
-    {
-      key: 'actions',
-      header: <span className="sr-only">Actions</span>,
-      align: 'right',
-      render: (layer) =>
-        layer.role === 'config' ? (
-          <Button size="sm" onClick={() => browseConfig(layer.digest)}>
-            Browse
-          </Button>
-        ) : (
-          <LinkButton size="sm" to={layerRoute(namespace, repo, layer.digest)}>
-            Browse
-          </LinkButton>
-        ),
-    },
-  ]
-
   function renderTagDetail(detail: TagDetail) {
     const platformDetails = detail.platform_details
     const scope =
@@ -146,6 +114,60 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
     const layersCaption = active
       ? `Layers for ${formatPlatform(active.os, active.architecture, active.variant)}`
       : 'Layers referenced by this tag'
+
+    const layerColumns: TableColumn<LayerInfo>[] = [
+      {
+        key: 'role',
+        header: 'Role',
+        render: (layer) => (
+          <Label variant={layer.role === 'config' ? 'accent' : 'muted'}>
+            {layer.role}
+          </Label>
+        ),
+      },
+      {
+        key: 'digest',
+        header: 'Digest',
+        render: (layer) => (
+          <span className="font-mono text-xs" title={layer.digest}>
+            {shortDigest(layer.digest)}
+          </span>
+        ),
+      },
+      {
+        key: 'media_type',
+        header: 'Media type',
+        render: (layer) => (
+          <span className="break-all font-mono text-xs">{layer.media_type}</span>
+        ),
+      },
+      {
+        key: 'size',
+        header: 'Size',
+        align: 'right',
+        render: (layer) => formatBytes(layer.size),
+      },
+      {
+        key: 'actions',
+        header: <span className="sr-only">Actions</span>,
+        align: 'right',
+        render: (layer) =>
+          layer.role === 'config' ? (
+            <Button size="sm" onClick={() => browseConfig(layer.digest)}>
+              Browse
+            </Button>
+          ) : (
+            <LinkButton
+              size="sm"
+              to={layerRoute(namespace, repo, layer.digest, {
+                manifest: owningPlatformDigest(detail, active, layer),
+              })}
+            >
+              Browse
+            </LinkButton>
+          ),
+      },
+    ]
 
     return (
       <>

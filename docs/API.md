@@ -150,7 +150,10 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   one entry per child manifest (`digest` is the child's digest, `os`/
   `architecture`/`variant` its platform, and `manifest`/`config`/`layers` that
   child's own data). A plain image manifest yields a single entry. The UI uses
-  this to offer an "All platforms" vs per-arch view.
+  this to offer an "All platforms" vs per-arch view. `layers` always follows the
+  order each manifest declares in its own `layers` array, never digest order; the
+  combined view concatenates each child manifest's order (platform by platform)
+  and deduplicates by digest, with the config blob first.
 - `unique_size` is the storage owned by the entity — every blob for which its
   earliest referencing tag (by `tags.created_at`) lives here; `shared_size` is
   `size - unique_size`, bytes an earlier tag already owned. Reuse between tags
@@ -178,13 +181,15 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
 | GET | `/repositories/{namespace}/{*repo}/manifests/{digest}/references` | optional | referenced descriptors |
 | GET | `/blobs/{digest}` | optional | raw blob bytes (`application/octet-stream`) |
 | GET | `/blobs/{digest}/json` | optional | blob parsed as JSON (config blobs) |
-| GET | `/repositories/{namespace}/{*repo}/layers/{digest}/tree?path=` | optional | directory listing inside the layer tar |
+| GET | `/repositories/{namespace}/{*repo}/layers/{digest}/tree?path=&mode=&manifest=` | optional | directory listing inside the layer tar (single layer, overlay or diff) |
 | GET | `/repositories/{namespace}/{*repo}/layers/{digest}/file?path=` | optional | one file's bytes (`Content-Type` guessed) |
 | GET | `/repositories/{namespace}/{*repo}/layers/{digest}/download` | optional | raw layer archive |
 
 ```
 LayerTreeEntry { name, path, kind: "file"|"dir"|"symlink", size,
-                 mode, link_target, link_resolved, link_kind }
+                 mode, link_target, link_resolved, link_kind,
+                 change: "new"|"modified"|"removed"|null,
+                 source_digest: string|null }
 LayerReference { digest, media_type, size, role }
 ```
 
@@ -194,6 +199,21 @@ is built and served from the cache. For a symlink, `link_resolved` is the
 normalized layer path it points at (following chains) and `link_kind` is the
 resolved entry's kind (`file`/`dir`); both are `null` for a dangling or cyclic
 link and for every non-symlink entry.
+
+`tree` accepts `mode=single|aggregate|diff|aggregate-diff` (default `single`)
+and `manifest={digest|tag}`. `single` is the plain single-layer browse and
+reports `change` and `source_digest` as `null`. `aggregate` overlays the
+manifest's ordered layers from the first through the requested layer; `diff`
+returns only what that layer changes relative to everything below it, with
+removed paths shown as ghosts; `aggregate-diff` is the full overlay with change
+colouring plus the ghosts. `change` is `new`, `modified` or `removed`
+(ghost) in the diff modes and `null` in `single`/`aggregate`; `source_digest` is
+the digest of the layer supplying the entry, so a file can be previewed through
+`/layers/{source_digest}/file`. Every non-`single` mode requires `manifest`,
+which must be a manifest of this repository and whose ordered layer list must
+contain the requested layer (a shared layer is disambiguated by the manifest).
+Missing `manifest` is `400 bad_request`; a layer not in the resolved manifest is
+`404 not_found`. See `docs/LAYER_BROWSER.md` §4.
 
 Layer archives are decompressed transparently for browsing — `tar`,
 `tar+gzip` and `tar+zstd` are supported, selected by the layer media type. Paths

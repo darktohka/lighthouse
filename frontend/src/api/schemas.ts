@@ -448,6 +448,10 @@ export type Dashboard = v.InferOutput<typeof dashboardSchema>
 export const layerTreeEntryKindSchema = v.picklist(['file', 'dir', 'symlink'])
 export type LayerTreeEntryKind = v.InferOutput<typeof layerTreeEntryKindSchema>
 
+/** Diff marker for an entry in the `diff` / `aggregate-diff` tree modes. */
+export const layerChangeSchema = v.picklist(['new', 'modified', 'removed'])
+export type LayerChange = v.InferOutput<typeof layerChangeSchema>
+
 export const layerTreeEntrySchema = v.object({
   name: v.string(),
   path: v.string(),
@@ -461,6 +465,16 @@ export const layerTreeEntrySchema = v.object({
   link_resolved: v.nullable(v.string()),
   /** Kind of the resolved symlink target; null for a dangling/cyclic link. */
   link_kind: v.nullable(v.picklist(['file', 'dir'])),
+  /**
+   * How this entry differs from the layers below it. Null/absent in `single`
+   * and `aggregate` modes; set by `diff` and `aggregate-diff`.
+   */
+  change: v.optional(v.nullable(layerChangeSchema), null),
+  /**
+   * Digest of the layer that provides this entry's bytes (the owning layer in
+   * aggregate/diff modes). Null/absent in `single` mode.
+   */
+  source_digest: v.optional(v.nullable(v.string()), null),
 })
 export type LayerTreeEntry = v.InferOutput<typeof layerTreeEntrySchema>
 

@@ -133,12 +133,24 @@ export function tagRoute(
   return `${repoRoute(namespace, repo)}/tags/${encodeSegment(tag)}`
 }
 
+export type LayerRouteOptions = {
+  path?: string
+  /** Image manifest digest; the aggregate/diff views require it. */
+  manifest?: string
+  /** Active layer-browser tab. */
+  tab?: string
+}
+
 export function layerRoute(
   namespace: string,
   repo: string,
   digest: string,
-  path?: string,
+  options?: LayerRouteOptions,
 ): string {
   const base = `${repoRoute(namespace, repo)}/layers/${encodeSegment(digest)}`
-  return path ? `${base}${buildQuery({ path })}` : base
+  return `${base}${buildQuery({
+    path: options?.path,
+    manifest: options?.manifest,
+    tab: options?.tab,
+  })}`
 }

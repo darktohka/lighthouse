@@ -224,7 +224,15 @@ platform badges / pull counts / delete), Tag detail (Layers / Manifest / Config
 tabs with the recursive JSON viewer + layer table, defaulting to Layers, where a
 config row's Browse button opens the Config tab), Layer browser (breadcrumbs,
 directory listing, inline text preview, binary download, large-layer notice) and
-a 404 page.
+a 404 page. The layer browser has four deep-linked tabs (`?tab=`) — Layer,
+Aggregated, Diff and Aggregated Difference — mapped to the `single`,
+`aggregate`, `diff` and `aggregate-diff` tree modes. The three non-`single`
+modes read `?manifest=`; tag pages thread it from the platform detail that owns
+each layer (falling back to the tag's own digest). Diff modes colour the name
+and icon for `new`/`modified`/`removed` green/orange/red with a legend, strike
+through removed files (not previewable), and preview files through the entry's
+`source_digest` so aggregate previews read the owning layer. Switching tabs
+resets the browsed path.
 
 Auth uses `pow-captcha-react`; `GET /api/auth/captcha` decides whether the
 widget is rendered (a `204` means captcha is disabled and nothing is shown).

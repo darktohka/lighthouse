@@ -205,8 +205,12 @@ async fn dispatch(
             let name = full_name(&namespace, &path)?;
             require_method(&method, Method::GET)?;
             let query = crate::oci::query_pairs(req.uri().query());
-            let path = crate::oci::query_first(&query, "path").map(str::to_string);
-            layers::layer_tree(state, actor, name, digest, path).await
+            let tree = layers::TreeQuery {
+                path: crate::oci::query_first(&query, "path").map(str::to_string),
+                mode: crate::oci::query_first(&query, "mode").map(str::to_string),
+                manifest: crate::oci::query_first(&query, "manifest").map(str::to_string),
+            };
+            layers::layer_tree(state, actor, name, digest, tree).await
         }
         Endpoint::LayerFile(path, digest) => {
             let name = full_name(&namespace, &path)?;
@@ -467,6 +471,51 @@ async fn manifest_blob_edges(
     Ok(edges)
 }
 
+/// Assigns each layer digest a position from a manifest's declared `layers`
+/// array, skipping digests already ranked so repeated entries keep the first
+/// position. Used to build an index's combined order from its children.
+fn extend_layer_rank(rank: &mut HashMap<String, usize>, manifest: &Value) {
+    let Some(layers) = manifest.get("layers").and_then(Value::as_array) else {
+        return;
+    };
+    for entry in layers {
+        let Some(digest) = entry.get("digest").and_then(Value::as_str) else {
+            continue;
+        };
+        if !rank.contains_key(digest) {
+            let next = rank.len();
+            rank.insert(digest.to_string(), next);
+        }
+    }
+}
+
+/// The layer digests a manifest declares, mapped to their position in its
+/// `layers` array. The manifest is content-addressed and immutable, so this
+/// order is stable.
+fn manifest_layer_rank(manifest: &Value) -> HashMap<String, usize> {
+    let mut rank = HashMap::new();
+    extend_layer_rank(&mut rank, manifest);
+    rank
+}
+
+/// Orders blob edges so the config blob comes first and layers follow `rank`
+/// (the manifest's declared order). A blob the manifest does not name sorts
+/// last, preserving its previous relative order. The sort is stable.
+fn order_edges(
+    mut edges: Vec<(String, Option<String>, i64, String)>,
+    rank: &HashMap<String, usize>,
+) -> Vec<(String, Option<String>, i64, String)> {
+    let position = |digest: &str, role: &str| -> usize {
+        if role == "config" {
+            0
+        } else {
+            rank.get(digest).map_or(usize::MAX, |index| index + 1)
+        }
+    };
+    edges.sort_by_key(|(digest, _, _, role)| position(digest, role));
+    edges
+}
+
 async fn config_and_layers(
     state: &AppState,
     edges: Vec<(String, Option<String>, i64, String)>,
@@ -535,6 +584,59 @@ async fn build_tag_detail(
     access: authz::Access,
 ) -> ApiResult<TagDetail> {
     let summary = build_tag_summary(state, repository_id, tag, manifest, sizes).await?;
+    let manifest_json = serde_json::from_slice(&manifest.content).unwrap_or(Value::Null);
+
+    // Layers are listed in the manifest's declared order, never by digest. For
+    // an index the combined order is each child's order, platform by platform,
+    // deduplicated.
+    let (platform_details, combined_rank) = if media_types::is_index_type(&manifest.media_type) {
+        let mut details = Vec::with_capacity(summary.platforms.len());
+        let mut rank: HashMap<String, usize> = HashMap::new();
+        for platform in &summary.platforms {
+            let digest = Digest::parse(&platform.digest).map_err(ApiError::from)?;
+            let Some(child) = state.registry.manifest(&digest).await? else {
+                continue;
+            };
+            let child_manifest = serde_json::from_slice(&child.content).unwrap_or(Value::Null);
+            extend_layer_rank(&mut rank, &child_manifest);
+            let child_edges = order_edges(
+                manifest_blob_edges(state, child.id).await?,
+                &manifest_layer_rank(&child_manifest),
+            );
+            let (child_config, child_layers) = config_and_layers(state, child_edges).await;
+            details.push(PlatformDetail {
+                os: platform.os.clone(),
+                architecture: platform.architecture.clone(),
+                variant: platform.variant.clone(),
+                digest: child.digest.clone(),
+                media_type: child.media_type.clone(),
+                size: child.size,
+                manifest: child_manifest,
+                config: child_config,
+                layers: child_layers,
+            });
+        }
+        (details, rank)
+    } else {
+        let platform = summary.platforms.first();
+        let rank = manifest_layer_rank(&manifest_json);
+        let tag_edges = order_edges(manifest_blob_edges(state, manifest.id).await?, &rank);
+        let (tag_config, tag_layers) = config_and_layers(state, tag_edges).await;
+        (
+            vec![PlatformDetail {
+                os: platform.map(|p| p.os.clone()).unwrap_or_default(),
+                architecture: platform.map(|p| p.architecture.clone()).unwrap_or_default(),
+                variant: platform.and_then(|p| p.variant.clone()),
+                digest: manifest.digest.clone(),
+                media_type: manifest.media_type.clone(),
+                size: manifest.size,
+                manifest: manifest_json.clone(),
+                config: tag_config,
+                layers: tag_layers,
+            }],
+            rank,
+        )
+    };
 
     let edges = sqlx::query_as::<_, (String, Option<String>, i64, String)>(
         "WITH RECURSIVE reach(manifest_id) AS ( \
@@ -551,50 +653,7 @@ async fn build_tag_detail(
     .bind(manifest.id)
     .fetch_all(&state.db)
     .await?;
-
-    let (config, layers) = config_and_layers(state, edges).await;
-
-    let manifest_json = serde_json::from_slice(&manifest.content).unwrap_or(Value::Null);
-
-    let platform_details = if media_types::is_index_type(&manifest.media_type) {
-        let mut details = Vec::with_capacity(summary.platforms.len());
-        for platform in &summary.platforms {
-            let digest = Digest::parse(&platform.digest).map_err(ApiError::from)?;
-            let Some(child) = state.registry.manifest(&digest).await? else {
-                continue;
-            };
-            let child_edges = manifest_blob_edges(state, child.id).await?;
-            let (child_config, child_layers) = config_and_layers(state, child_edges).await;
-            let child_manifest = serde_json::from_slice(&child.content).unwrap_or(Value::Null);
-            details.push(PlatformDetail {
-                os: platform.os.clone(),
-                architecture: platform.architecture.clone(),
-                variant: platform.variant.clone(),
-                digest: child.digest.clone(),
-                media_type: child.media_type.clone(),
-                size: child.size,
-                manifest: child_manifest,
-                config: child_config,
-                layers: child_layers,
-            });
-        }
-        details
-    } else {
-        let platform = summary.platforms.first();
-        let tag_edges = manifest_blob_edges(state, manifest.id).await?;
-        let (tag_config, tag_layers) = config_and_layers(state, tag_edges).await;
-        vec![PlatformDetail {
-            os: platform.map(|p| p.os.clone()).unwrap_or_default(),
-            architecture: platform.map(|p| p.architecture.clone()).unwrap_or_default(),
-            variant: platform.and_then(|p| p.variant.clone()),
-            digest: manifest.digest.clone(),
-            media_type: manifest.media_type.clone(),
-            size: manifest.size,
-            manifest: manifest_json.clone(),
-            config: tag_config,
-            layers: tag_layers,
-        }]
-    };
+    let (config, layers) = config_and_layers(state, order_edges(edges, &combined_rank)).await;
 
     Ok(TagDetail {
         summary,

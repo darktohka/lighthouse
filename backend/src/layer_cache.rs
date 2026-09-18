@@ -19,7 +19,7 @@
 //! Concurrent misses for the same digest are collapsed onto one build, so a
 //! cold layer is decompressed once even under a burst of requests.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -92,13 +92,25 @@ pub struct LayerIndex {
     /// Recursive uncompressed size per directory path, precomputed at build
     /// time. The root is omitted, and a path absent here is not a directory.
     dir_sizes: HashMap<String, i64>,
+    /// Subtree roots this layer removes: a `.wh.<name>` target path and the
+    /// directory made opaque by `.wh..wh..opq`. Removal covers the whole
+    /// subtree, so no entry under a root survives in a later overlay even when
+    /// its intermediate directories never appeared as explicit tar headers.
+    deletes: HashSet<String>,
     weight: usize,
 }
 
 impl LayerIndex {
-    /// Wraps an already-merged path map, computing the recursive directory
-    /// totals and the weight once.
+    /// Wraps an already-merged path map with no deletions, computing the
+    /// recursive directory totals and the weight once.
     pub fn from_entries(entries: HashMap<String, CachedEntry>) -> Self {
+        Self::with_deletes(entries, HashSet::new())
+    }
+
+    /// Wraps an already-merged path map together with the subtree roots this
+    /// layer removes, computing the recursive directory totals and the weight
+    /// once.
+    pub fn with_deletes(entries: HashMap<String, CachedEntry>, deletes: HashSet<String>) -> Self {
         let dir_sizes = directory_sizes(&entries);
         let entry_weight = entries
             .iter()
@@ -108,16 +120,26 @@ impl LayerIndex {
             .keys()
             .map(|path| path.len() + DIR_SIZE_OVERHEAD_BYTES)
             .sum::<usize>();
+        let delete_weight = deletes
+            .iter()
+            .map(|path| path.len() + ENTRY_OVERHEAD_BYTES)
+            .sum::<usize>();
         Self {
             entries,
             dir_sizes,
-            weight: entry_weight + dir_weight,
+            deletes,
+            weight: entry_weight + dir_weight + delete_weight,
         }
     }
 
     /// The merged path map, keyed by normalized path.
     pub fn entries(&self) -> &HashMap<String, CachedEntry> {
         &self.entries
+    }
+
+    /// The subtree roots this layer removes.
+    pub fn deletes(&self) -> &HashSet<String> {
+        &self.deletes
     }
 
     /// Estimated heap footprint of this index in bytes.
@@ -146,34 +168,336 @@ impl LayerIndex {
     /// chains. Returns the normalized path and the final entry's kind, or
     /// `None` when the link is dangling, cyclic, or escapes the layer.
     pub fn resolve_link(&self, link_path: &str, target: &str) -> Option<(String, EntryKind)> {
-        let mut current = normalize_link_target(parent_directory(link_path), target)?;
-        for _ in 0..MAX_SYMLINK_DEPTH {
-            match self.entry_kind(&current)? {
-                EntryKind::Symlink => {
-                    let next = self.entries.get(&current)?.link_target.as_deref()?;
-                    current = normalize_link_target(parent_directory(&current), next)?;
-                }
-                kind => return Some((current, kind)),
+        resolve_link_in(&self.entries, link_path, target)
+    }
+}
+
+/// Resolves a symlink against a path map, following chains to a concrete entry.
+fn resolve_link_in(
+    entries: &HashMap<String, CachedEntry>,
+    link_path: &str,
+    target: &str,
+) -> Option<(String, EntryKind)> {
+    let mut current = normalize_link_target(parent_directory(link_path), target)?;
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        match entry_kind_in(entries, &current)? {
+            EntryKind::Symlink => {
+                let next = entries.get(&current)?.link_target.as_deref()?;
+                current = normalize_link_target(parent_directory(&current), next)?;
             }
+            kind => return Some((current, kind)),
         }
-        None
+    }
+    None
+}
+
+/// The kind at `path`, recognizing directories that exist only as a prefix of
+/// deeper entries.
+fn entry_kind_in(entries: &HashMap<String, CachedEntry>, path: &str) -> Option<EntryKind> {
+    if let Some(entry) = entries.get(path) {
+        return Some(entry.kind);
+    }
+    if path.is_empty() {
+        return Some(EntryKind::Dir);
+    }
+    let prefix = format!("{path}/");
+    entries
+        .keys()
+        .any(|candidate| candidate.starts_with(&prefix))
+        .then_some(EntryKind::Dir)
+}
+
+/// True when `path` itself or any of its ancestors is a delete root.
+fn removed_by(path: &str, deletes: &HashSet<String>) -> bool {
+    if deletes.is_empty() {
+        return false;
+    }
+    if deletes.contains("") {
+        return true;
+    }
+    let mut candidate = path;
+    loop {
+        if deletes.contains(candidate) {
+            return true;
+        }
+        match candidate.rsplit_once('/') {
+            Some((parent, _)) => candidate = parent,
+            None => return false,
+        }
+    }
+}
+
+/// Collects every directory path implied by a path map: explicit directory
+/// entries and the ancestors of every entry, so a directory that exists only as
+/// a prefix is represented too.
+fn ancestor_dirs(entries: &HashMap<String, CachedEntry>, dirs: &mut HashSet<String>) {
+    for (path, entry) in entries {
+        if entry.kind == EntryKind::Dir {
+            dirs.insert(path.clone());
+        }
+        add_ancestors(path, dirs);
+    }
+}
+
+/// Inserts every ancestor directory of `path` into `target`.
+fn add_ancestors(path: &str, target: &mut HashSet<String>) {
+    let mut cursor = path;
+    while let Some((parent, _)) = cursor.rsplit_once('/') {
+        target.insert(parent.to_string());
+        cursor = parent;
+    }
+}
+
+/// Two entries are unchanged only when every observable attribute matches; a
+/// re-added identical file therefore carries no colour.
+fn same_entry(a: &CachedEntry, b: &CachedEntry) -> bool {
+    a.kind == b.kind && a.size == b.size && a.mode == b.mode && a.link_target == b.link_target
+}
+
+/// How one path changed in the upper overlay relative to everything below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    New,
+    Modified,
+    Removed,
+}
+
+impl Change {
+    /// The wire value used by the layer browser API.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Change::New => "new",
+            Change::Modified => "modified",
+            Change::Removed => "removed",
+        }
+    }
+}
+
+/// The cumulative overlay of a manifest's layers up to one position: the
+/// whiteout-resolved path map, its recursive directory totals, and the digest
+/// of the layer that last supplied each path.
+#[derive(Debug, Default)]
+pub struct ComposedLayer {
+    entries: HashMap<String, CachedEntry>,
+    dir_sizes: HashMap<String, i64>,
+    /// Every directory path implied by `entries`, including empty explicit
+    /// directories, so a listing can tell a present directory from a ghost.
+    dirs: HashSet<String>,
+    sources: HashMap<String, Digest>,
+    weight: usize,
+}
+
+impl ComposedLayer {
+    /// An empty overlay, the identity for [`ComposedLayer::compose`].
+    pub fn empty() -> Self {
+        Self::default()
     }
 
-    /// The kind at `path`, recognizing directories that exist only as a prefix
-    /// of deeper entries.
-    fn entry_kind(&self, path: &str) -> Option<EntryKind> {
-        if let Some(entry) = self.entries.get(path) {
-            return Some(entry.kind);
+    /// Removes every path removed by `upper` and inserts `upper`'s entries on
+    /// top, recording `upper_digest` as the source of each inserted path.
+    pub fn compose(base: &ComposedLayer, upper: &LayerIndex, upper_digest: &Digest) -> Self {
+        let mut entries: HashMap<String, CachedEntry> = HashMap::new();
+        let mut sources: HashMap<String, Digest> = HashMap::new();
+        for (path, entry) in &base.entries {
+            if removed_by(path, upper.deletes()) {
+                continue;
+            }
+            entries.insert(path.clone(), entry.clone());
+            if let Some(source) = base.sources.get(path) {
+                sources.insert(path.clone(), source.clone());
+            }
         }
-        if path.is_empty() {
-            return Some(EntryKind::Dir);
+        for (path, entry) in upper.entries() {
+            entries.insert(path.clone(), entry.clone());
+            sources.insert(path.clone(), upper_digest.clone());
         }
-        let prefix = format!("{path}/");
-        self.entries
-            .keys()
-            .any(|candidate| candidate.starts_with(&prefix))
-            .then_some(EntryKind::Dir)
+        Self::from_parts(entries, sources)
     }
+
+    fn from_parts(entries: HashMap<String, CachedEntry>, sources: HashMap<String, Digest>) -> Self {
+        let dir_sizes = directory_sizes(&entries);
+        let mut dirs: HashSet<String> = HashSet::new();
+        ancestor_dirs(&entries, &mut dirs);
+        let entry_weight = entries
+            .iter()
+            .map(|(path, entry)| path.len() + entry.weight())
+            .sum::<usize>();
+        let dir_weight = dir_sizes
+            .keys()
+            .map(|path| path.len() + DIR_SIZE_OVERHEAD_BYTES)
+            .sum::<usize>();
+        let source_weight = sources
+            .keys()
+            .map(|path| path.len() + ENTRY_OVERHEAD_BYTES)
+            .sum::<usize>();
+        let dirs_weight = dirs
+            .iter()
+            .map(|path| path.len() + DIR_SIZE_OVERHEAD_BYTES)
+            .sum::<usize>();
+        Self {
+            entries,
+            dir_sizes,
+            dirs,
+            sources,
+            weight: entry_weight + dir_weight + source_weight + dirs_weight,
+        }
+    }
+
+    /// The cumulative merged path map.
+    pub fn entries(&self) -> &HashMap<String, CachedEntry> {
+        &self.entries
+    }
+
+    /// The digest of the layer that last supplied `path`, when known.
+    pub fn source(&self, path: &str) -> Option<&Digest> {
+        self.sources.get(path)
+    }
+
+    /// Recursive uncompressed byte total below `path`.
+    pub fn dir_size(&self, path: &str) -> i64 {
+        self.dir_sizes.get(path).copied().unwrap_or(0)
+    }
+
+    /// True when `path` is a directory in this overlay, explicitly or as the
+    /// prefix of a deeper entry.
+    pub fn is_dir(&self, path: &str) -> bool {
+        self.entries
+            .get(path)
+            .is_some_and(|entry| entry.kind == EntryKind::Dir)
+            || self.dirs.contains(path)
+    }
+
+    /// True when this overlay holds `path` itself or any path beneath it.
+    pub fn contains_path(&self, path: &str) -> bool {
+        self.entries.contains_key(path) || self.dirs.contains(path)
+    }
+
+    /// Estimated heap footprint of this overlay in bytes.
+    pub fn weight(&self) -> usize {
+        self.weight
+    }
+
+    /// Number of merged paths.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Resolves a symlink against this overlay's path map.
+    pub fn resolve_link(&self, link_path: &str, target: &str) -> Option<(String, EntryKind)> {
+        resolve_link_in(&self.entries, link_path, target)
+    }
+}
+
+/// Per-path change classification of a cumulative overlay against the overlay
+/// one layer below it. Holds an entry for every changed non-directory path and
+/// every directory whose descendant rollup is non-null.
+#[derive(Debug, Default)]
+pub struct Changes {
+    changes: HashMap<String, Change>,
+}
+
+impl Changes {
+    pub fn get(&self, path: &str) -> Option<Change> {
+        self.changes.get(path).copied()
+    }
+}
+
+/// Classifies every path in `final_layer` relative to `lower_layer`. Directory
+/// colour is derived from descendants, never from a synthesized directory's
+/// placeholder mode.
+pub fn classify(final_layer: &ComposedLayer, lower_layer: &ComposedLayer) -> Changes {
+    let mut dirs: HashSet<String> = HashSet::new();
+    ancestor_dirs(&final_layer.entries, &mut dirs);
+    ancestor_dirs(&lower_layer.entries, &mut dirs);
+
+    let mut lower_dirs: HashSet<String> = HashSet::new();
+    ancestor_dirs(&lower_layer.entries, &mut lower_dirs);
+
+    let mut final_desc: HashSet<String> = HashSet::new();
+    for path in final_layer.entries.keys() {
+        add_ancestors(path, &mut final_desc);
+    }
+    let mut lower_desc: HashSet<String> = HashSet::new();
+    for path in lower_layer.entries.keys() {
+        add_ancestors(path, &mut lower_desc);
+    }
+
+    let mut changes: HashMap<String, Change> = HashMap::new();
+
+    // A path that is a directory in one layer and a leaf in the other is a type
+    // modification; it never participates in directory rollup.
+    let mut conflicts: HashSet<String> = HashSet::new();
+    for (path, final_entry) in &final_layer.entries {
+        if let Some(lower_entry) = lower_layer.entries.get(path) {
+            if (final_entry.kind == EntryKind::Dir) != (lower_entry.kind == EntryKind::Dir) {
+                changes.insert(path.clone(), Change::Modified);
+                conflicts.insert(path.clone());
+            }
+        }
+    }
+    for path in &conflicts {
+        dirs.remove(path);
+    }
+
+    for (path, final_entry) in &final_layer.entries {
+        if conflicts.contains(path) || final_entry.kind == EntryKind::Dir {
+            continue;
+        }
+        match lower_layer.entries.get(path) {
+            None => {
+                changes.insert(path.clone(), Change::New);
+            }
+            Some(lower_entry) => {
+                if !same_entry(final_entry, lower_entry) {
+                    changes.insert(path.clone(), Change::Modified);
+                }
+            }
+        }
+    }
+    for (path, lower_entry) in &lower_layer.entries {
+        if conflicts.contains(path) || final_layer.entries.contains_key(path) {
+            continue;
+        }
+        if lower_entry.kind == EntryKind::Dir {
+            continue;
+        }
+        changes.insert(path.clone(), Change::Removed);
+    }
+
+    let mut any_change: HashSet<String> = HashSet::new();
+    for path in changes.keys() {
+        add_ancestors(path, &mut any_change);
+    }
+
+    // Deepest directories first, so a child directory's rollup is known before
+    // its parent aggregates it. Same-depth directories are never ancestors of
+    // one another, so their relative order does not matter.
+    let mut ordered: Vec<&String> = dirs.iter().collect();
+    ordered.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    for path in ordered {
+        let final_d = final_desc.contains(path);
+        let lower_d = lower_desc.contains(path);
+        let change =
+            if lower_dirs.contains(path) && !final_d && !final_layer.entries.contains_key(path) {
+                Some(Change::Removed)
+            } else if final_d && !lower_d {
+                Some(Change::New)
+            } else if any_change.contains(path) {
+                Some(Change::Modified)
+            } else {
+                None
+            };
+        if let Some(change) = change {
+            changes.insert(path.clone(), change);
+            add_ancestors(path, &mut any_change);
+        }
+    }
+
+    Changes { changes }
 }
 
 /// Folds every non-directory entry's size into each of its ancestor
@@ -298,6 +622,9 @@ pub struct LayerIndexCache {
     inner: Mutex<Inner>,
     /// Number of expired-entry sweeps performed.
     sweeps: AtomicU64,
+    /// Bumped whenever an index is invalidated, so caches derived from indices
+    /// (the composed-overlay cache) can refuse entries built before the change.
+    generation: Arc<AtomicU64>,
 }
 
 impl LayerIndexCache {
@@ -306,7 +633,15 @@ impl LayerIndexCache {
             config,
             inner: Mutex::new(Inner::default()),
             sweeps: AtomicU64::new(0),
+            generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// The shared generation counter, incremented by [`Self::invalidate`] and
+    /// [`Self::clear`]. A derived cache checks it to avoid serving data built
+    /// from an index that has since been dropped.
+    pub fn generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.generation)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -403,18 +738,23 @@ impl LayerIndexCache {
         result
     }
 
-    /// Drops the cached index for `digest`, e.g. after its blob is removed.
+    /// Drops the cached index for `digest`, e.g. after its blob is removed, and
+    /// advances the generation so no derived overlay serves pre-invalidation
+    /// data.
     pub fn invalidate(&self, digest: &Digest) {
         self.lock().remove(digest);
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Drops every cached index.
+    /// Drops every cached index and advances the generation.
     pub fn clear(&self) {
         let mut inner = self.lock();
         inner.entries.clear();
         inner.order.clear();
         inner.weight = 0;
         inner.next_expires = None;
+        drop(inner);
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Drops every index older than the TTL.
@@ -494,6 +834,251 @@ impl LayerIndexCache {
         }
         for digest in &expired {
             inner.remove(digest);
+        }
+        inner.next_expires = next;
+    }
+}
+
+/// Key of one cumulative overlay: the manifest it belongs to and the 0-based
+/// position of the last layer included. The position is part of the key because
+/// a manifest may repeat a layer digest; each position is a distinct aggregate.
+pub type ComposedKey = (Digest, usize);
+
+struct ComposedEntry {
+    layer: Arc<ComposedLayer>,
+    inserted_at: Instant,
+    seq: u64,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct ComposedInner {
+    entries: HashMap<ComposedKey, ComposedEntry>,
+    order: BTreeMap<u64, ComposedKey>,
+    inflight: HashMap<ComposedKey, Arc<tokio::sync::Mutex<()>>>,
+    clock: u64,
+    weight: usize,
+    next_expires: Option<Instant>,
+}
+
+impl ComposedInner {
+    fn remove(&mut self, key: &ComposedKey) -> Option<Arc<ComposedLayer>> {
+        let entry = self.entries.remove(key)?;
+        self.order.remove(&entry.seq);
+        self.weight = self.weight.saturating_sub(entry.layer.weight());
+        Some(entry.layer)
+    }
+
+    fn touch(&mut self, key: &ComposedKey) -> Option<u64> {
+        let old_seq = self.entries.get(key)?.seq;
+        self.clock += 1;
+        let next = self.clock;
+        self.order.remove(&old_seq);
+        self.order.insert(next, key.clone());
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.seq = next;
+        }
+        Some(next)
+    }
+}
+
+/// Concurrent, bounded, self-expiring cache of cumulative layer overlays.
+///
+/// Entries are keyed by `(manifest_digest, layer_position)` and stamped with
+/// the [`LayerIndexCache`] generation at build time; a lookup whose generation
+/// is stale is a miss, so invalidating a layer index can never leave a composed
+/// overlay serving data derived from it.
+pub struct ComposedLayerCache {
+    config: LayerCacheConfig,
+    inner: Mutex<ComposedInner>,
+    sweeps: AtomicU64,
+    generation: Arc<AtomicU64>,
+}
+
+impl ComposedLayerCache {
+    pub fn new(config: LayerCacheConfig, generation: Arc<AtomicU64>) -> Self {
+        Self {
+            config,
+            inner: Mutex::new(ComposedInner::default()),
+            sweeps: AtomicU64::new(0),
+            generation,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ComposedInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Returns a cached overlay, dropping it first when its generation is stale
+    /// or its TTL has elapsed.
+    pub fn get(&self, key: &ComposedKey) -> Option<Arc<ComposedLayer>> {
+        let now = Instant::now();
+        let mut inner = self.lock();
+        self.sweep_if_due(&mut inner, now);
+        let generation = self.current_generation();
+        if inner
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.generation != generation)
+        {
+            inner.remove(key);
+        }
+        if self.is_expired(inner.entries.get(key), now) {
+            inner.remove(key);
+            return None;
+        }
+        inner.touch(key);
+        inner.entries.get(key).map(|entry| Arc::clone(&entry.layer))
+    }
+
+    /// Stores an overlay, evicting least-recently-used entries to stay in
+    /// budget.
+    pub fn insert(&self, key: ComposedKey, layer: Arc<ComposedLayer>) {
+        let generation = self.current_generation();
+        self.insert_with_generation(key, layer, generation);
+    }
+
+    fn insert_with_generation(&self, key: ComposedKey, layer: Arc<ComposedLayer>, generation: u64) {
+        let weight = layer.weight();
+        if weight > self.config.max_bytes {
+            tracing::debug!(weight, "composed overlay exceeds cache budget; not cached");
+            return;
+        }
+        let mut inner = self.lock();
+        inner.remove(&key);
+        inner.clock += 1;
+        let seq = inner.clock;
+        let inserted_at = Instant::now();
+        let expires = inserted_at + self.config.ttl;
+        inner.weight += weight;
+        inner.entries.insert(
+            key.clone(),
+            ComposedEntry {
+                layer,
+                inserted_at,
+                seq,
+                generation,
+            },
+        );
+        inner.order.insert(seq, key);
+        inner.next_expires = Some(match inner.next_expires {
+            Some(current) => current.min(expires),
+            None => expires,
+        });
+        self.evict_to_budget(&mut inner);
+    }
+
+    /// Returns the cached overlay for `key`, building it with `build` on a miss.
+    pub async fn get_or_build<F>(
+        &self,
+        key: &ComposedKey,
+        build: F,
+    ) -> ApiResult<Arc<ComposedLayer>>
+    where
+        F: FnOnce() -> ApiResult<Arc<ComposedLayer>> + Send + 'static,
+    {
+        if let Some(layer) = self.get(key) {
+            return Ok(layer);
+        }
+
+        let slot = self.build_lock(key);
+        let _guard = slot.lock().await;
+
+        if let Some(layer) = self.get(key) {
+            self.finish_build(key);
+            return Ok(layer);
+        }
+
+        let generation = self.current_generation();
+        let result = match tokio::task::spawn_blocking(build).await {
+            Ok(Ok(layer)) => {
+                self.insert_with_generation(key.clone(), Arc::clone(&layer), generation);
+                Ok(layer)
+            }
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
+                tracing::error!(error = %err, "composed overlay build panicked");
+                Err(ApiError::internal("layer reader failed"))
+            }
+        };
+        self.finish_build(key);
+        result
+    }
+
+    /// Number of cached overlays (introspection for tests and metrics).
+    pub fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    /// Estimated total bytes of cached overlays.
+    pub fn weight(&self) -> usize {
+        self.lock().weight
+    }
+
+    /// Number of expired-entry sweeps performed.
+    pub fn sweep_count(&self) -> u64 {
+        self.sweeps.load(Ordering::SeqCst)
+    }
+
+    fn is_expired(&self, entry: Option<&ComposedEntry>, now: Instant) -> bool {
+        entry.is_some_and(|entry| now.duration_since(entry.inserted_at) >= self.config.ttl)
+    }
+
+    fn build_lock(&self, key: &ComposedKey) -> Arc<tokio::sync::Mutex<()>> {
+        let mut inner = self.lock();
+        Arc::clone(
+            inner
+                .inflight
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    fn finish_build(&self, key: &ComposedKey) {
+        self.lock().inflight.remove(key);
+    }
+
+    fn evict_to_budget(&self, inner: &mut ComposedInner) {
+        while inner.weight > self.config.max_bytes {
+            let victim = inner.order.iter().next().map(|(_, key)| key.clone());
+            match victim {
+                Some(victim) => {
+                    inner.remove(&victim);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn sweep_if_due(&self, inner: &mut ComposedInner, now: Instant) {
+        let due = inner.next_expires.is_some_and(|next| now >= next);
+        if !due {
+            return;
+        }
+        self.sweep_expired_locked(inner, now);
+    }
+
+    fn sweep_expired_locked(&self, inner: &mut ComposedInner, now: Instant) {
+        self.sweeps.fetch_add(1, Ordering::SeqCst);
+        let ttl = self.config.ttl;
+        let mut next: Option<Instant> = None;
+        let mut expired: Vec<ComposedKey> = Vec::new();
+        for (key, entry) in inner.entries.iter() {
+            if now.duration_since(entry.inserted_at) >= ttl {
+                expired.push(key.clone());
+            } else {
+                let expires = entry.inserted_at + ttl;
+                next = Some(next.map_or(expires, |current| current.min(expires)));
+            }
+        }
+        for key in &expired {
+            inner.remove(key);
         }
         inner.next_expires = next;
     }

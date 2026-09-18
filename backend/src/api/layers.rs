@@ -13,7 +13,7 @@
 //! [`crate::layer_cache`]; only the first `tree` request for a digest pays the
 //! decompression cost.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
@@ -31,7 +31,9 @@ use tar::EntryType;
 use crate::auth::middleware::Auth;
 use crate::config::effective_layer_scan_bytes;
 use crate::error::{ApiError, ApiResult};
-use crate::layer_cache::{CachedEntry, EntryKind, LayerIndex};
+use crate::layer_cache::{
+    CachedEntry, Change, Changes, ComposedKey, ComposedLayer, EntryKind, LayerIndex,
+};
 use crate::models::Blob;
 use crate::oci::digest::Digest;
 use crate::oci::media_types;
@@ -284,17 +286,19 @@ fn entry_kind(entry_type: EntryType) -> EntryKind {
 }
 
 /// Reads the archive through the entry stream, applying the whiteout and
-/// repeated-path rules, and returns the merged path map.
+/// repeated-path rules, and returns the merged path map plus the subtree roots
+/// this layer removes.
 fn merge_entries(
     reader: Box<dyn Read + Send>,
     max_scan_bytes: u64,
     max_entries: u64,
-) -> ApiResult<HashMap<String, CachedEntry>> {
+) -> ApiResult<(HashMap<String, CachedEntry>, HashSet<String>)> {
     let mut archive = tar::Archive::new(CappedReader {
         inner: reader,
         remaining: max_scan_bytes,
     });
     let mut merged: HashMap<String, CachedEntry> = HashMap::new();
+    let mut deletes: HashSet<String> = HashSet::new();
     let mut pending_long_name: Option<Vec<u8>> = None;
     let mut count = 0u64;
 
@@ -337,6 +341,7 @@ fn merge_entries(
         let name = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
         if name == ".wh..wh..opq" {
             let directory = parent_of(&path);
+            deletes.insert(directory.clone());
             let stale: Vec<String> = merged
                 .keys()
                 .filter(|key| parent_of(key) == directory)
@@ -354,6 +359,7 @@ fn merge_entries(
             } else {
                 format!("{directory}/{stripped}")
             };
+            deletes.insert(target.clone());
             merged.remove(&target);
             continue;
         }
@@ -380,7 +386,7 @@ fn merge_entries(
         );
     }
 
-    Ok(merged)
+    Ok((merged, deletes))
 }
 
 #[derive(Serialize)]
@@ -398,6 +404,12 @@ struct LayerTreeEntry {
     /// For a symlink: the resolved entry's kind (`file`/`dir`); `None` when the
     /// link is dangling or cyclic.
     link_kind: Option<String>,
+    /// `"new"`, `"modified"` or `"removed"` in a diff mode; `null` otherwise
+    /// (including `single` and plain `aggregate`).
+    change: Option<String>,
+    /// Digest of the layer supplying the entry, for the aggregate modes; the
+    /// frontend previews the file through `/layers/{source_digest}/file`.
+    source_digest: Option<String>,
 }
 
 fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> {
@@ -474,6 +486,8 @@ fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> 
                 link_target: data.link_target.as_deref().map(str::to_string),
                 link_resolved,
                 link_kind,
+                change: None,
+                source_digest: None,
             })
         })
         .collect())
@@ -845,35 +859,434 @@ async fn layer_blob(
     Ok((repository, blob, parsed))
 }
 
+/// Query parameters accepted by the layer `tree` endpoint.
+pub struct TreeQuery {
+    pub path: Option<String>,
+    pub mode: Option<String>,
+    pub manifest: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeMode {
+    Single,
+    Aggregate,
+    Diff,
+    AggregateDiff,
+}
+
+impl TreeMode {
+    fn parse(raw: Option<&str>) -> ApiResult<Self> {
+        match raw.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("single") => Ok(TreeMode::Single),
+            Some("aggregate") => Ok(TreeMode::Aggregate),
+            Some("diff") => Ok(TreeMode::Diff),
+            Some("aggregate-diff") => Ok(TreeMode::AggregateDiff),
+            Some(_) => Err(ApiError::bad_request(
+                "mode must be `single`, `aggregate`, `diff` or `aggregate-diff`",
+            )),
+        }
+    }
+
+    fn colors(self) -> bool {
+        matches!(self, TreeMode::Diff | TreeMode::AggregateDiff)
+    }
+
+    fn shows_ghosts(self) -> bool {
+        matches!(self, TreeMode::Diff | TreeMode::AggregateDiff)
+    }
+
+    fn filters_unchanged(self) -> bool {
+        matches!(self, TreeMode::Diff)
+    }
+}
+
+/// Builds (or returns the cached) merged index for one layer blob.
+async fn build_layer_index(state: &AppState, digest: &Digest) -> ApiResult<Arc<LayerIndex>> {
+    if let Some(index) = state.layer_cache.get(digest) {
+        return Ok(index);
+    }
+    let file = open_blob(state, digest).await?;
+    let std_file = file.into_std().await;
+    let max_scan_bytes = effective_layer_scan_bytes(state.config.layer_max_scan_bytes);
+    let max_entries = state.config.layer_max_entries;
+    let digest = digest.clone();
+    state
+        .layer_cache
+        .get_or_build(&digest, move || {
+            let reader = decompressed(std_file)?;
+            let (merged, deletes) = merge_entries(reader, max_scan_bytes, max_entries)?;
+            Ok(Arc::new(LayerIndex::with_deletes(merged, deletes)))
+        })
+        .await
+}
+
+fn child_path(path: &str, name: &str) -> String {
+    if path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{path}/{name}")
+    }
+}
+
+/// The ordered layer digests declared by an image manifest body.
+fn manifest_layer_digests(content: &[u8]) -> Vec<Digest> {
+    let Ok(value) = serde_json::from_slice::<Value>(content) else {
+        return Vec::new();
+    };
+    value
+        .get("layers")
+        .and_then(Value::as_array)
+        .map(|layers| {
+            layers
+                .iter()
+                .filter_map(|entry| entry.get("digest").and_then(Value::as_str))
+                .filter_map(|digest| Digest::parse(digest).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The child manifest digests of an index, preferring the descriptor array in
+/// the body and falling back to the recorded graph edges.
+async fn index_children(
+    state: &AppState,
+    manifest: &crate::models::Manifest,
+) -> ApiResult<Vec<Digest>> {
+    if let Ok(value) = serde_json::from_slice::<Value>(&manifest.content) {
+        if let Some(entries) = value.get("manifests").and_then(Value::as_array) {
+            let digests: Vec<Digest> = entries
+                .iter()
+                .filter_map(|entry| entry.get("digest").and_then(Value::as_str))
+                .filter_map(|digest| Digest::parse(digest).ok())
+                .collect();
+            if !digests.is_empty() {
+                return Ok(digests);
+            }
+        }
+    }
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT m.digest FROM manifest_children mc \
+         JOIN manifests m ON m.id = mc.child_manifest_id \
+         WHERE mc.parent_manifest_id = ? ORDER BY m.digest",
+    )
+    .bind(manifest.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut digests = Vec::new();
+    for raw in rows {
+        if let Ok(digest) = Digest::parse(&raw) {
+            digests.push(digest);
+        }
+    }
+    Ok(digests)
+}
+
+/// Resolves the ordered layer digests that place `target` within a manifest.
+///
+/// An image manifest owns one ordering. An index does not, so each child image
+/// manifest is inspected and the one whose layer list contains `target` wins:
+/// exactly one match is usable, several are ambiguous (`400`), and none is a
+/// missing layer (`404`).
+async fn resolve_ordered_layers(
+    state: &AppState,
+    manifest: &crate::models::Manifest,
+    target: &Digest,
+) -> ApiResult<Vec<Digest>> {
+    if !media_types::is_index_type(&manifest.media_type) {
+        let layers = manifest_layer_digests(&manifest.content);
+        if !layers.contains(target) {
+            return Err(not_found("layer not found in manifest"));
+        }
+        return Ok(layers);
+    }
+
+    let mut matches = Vec::new();
+    for child_digest in index_children(state, manifest).await? {
+        let Some(child) = state
+            .registry
+            .manifest(&child_digest)
+            .await
+            .map_err(ApiError::from)?
+        else {
+            continue;
+        };
+        let layers = manifest_layer_digests(&child.content);
+        if layers.contains(target) {
+            matches.push(layers);
+        }
+    }
+    match matches.len() {
+        0 => Err(not_found("layer not found in manifest")),
+        1 => Ok(matches.pop().expect("exactly one match")),
+        _ => Err(ApiError::bad_request(
+            "layer is referenced by several manifests in the index; pass a single image manifest",
+        )),
+    }
+}
+
+/// Returns the cumulative overlay of `layers[0..=position]`, building and
+/// caching each intermediate step.
+async fn cumulative_overlay(
+    state: &AppState,
+    manifest_digest: &Digest,
+    layers: &[Digest],
+    position: usize,
+) -> ApiResult<Arc<ComposedLayer>> {
+    let mut current: Arc<ComposedLayer> = Arc::new(ComposedLayer::empty());
+    for (index, layer) in layers.iter().enumerate().take(position + 1) {
+        let key: ComposedKey = (manifest_digest.clone(), index);
+        if let Some(hit) = state.composed_cache.get(&key) {
+            current = hit;
+            continue;
+        }
+        let upper = build_layer_index(state, layer).await?;
+        let base = Arc::clone(&current);
+        let layer_digest = layer.clone();
+        current = state
+            .composed_cache
+            .get_or_build(&key, move || {
+                Ok(Arc::new(ComposedLayer::compose(
+                    &base,
+                    &upper,
+                    &layer_digest,
+                )))
+            })
+            .await?;
+    }
+    Ok(current)
+}
+
+struct Child {
+    entry: CachedEntry,
+    source: Option<Digest>,
+    removed: bool,
+}
+
+fn list_level_composed(
+    final_layer: &ComposedLayer,
+    lower_layer: &ComposedLayer,
+    path: &str,
+    changes: Option<&Changes>,
+    mode: TreeMode,
+) -> ApiResult<Vec<LayerTreeEntry>> {
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    let mut children: HashMap<String, Child> = HashMap::new();
+
+    for (entry_path, data) in final_layer.entries() {
+        if entry_path.as_str() == path {
+            continue;
+        }
+        let rest = if path.is_empty() {
+            entry_path.as_str()
+        } else if let Some(rest) = entry_path.strip_prefix(&prefix) {
+            rest
+        } else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        match rest.split_once('/') {
+            Some((head, _)) => {
+                children.entry(head.to_string()).or_insert_with(|| Child {
+                    entry: CachedEntry::directory(),
+                    source: None,
+                    removed: false,
+                });
+            }
+            None => {
+                children.insert(
+                    rest.to_string(),
+                    Child {
+                        entry: data.clone(),
+                        source: final_layer.source(entry_path).cloned(),
+                        removed: false,
+                    },
+                );
+            }
+        }
+    }
+
+    if mode.shows_ghosts() {
+        // Every direct child name present in the lower overlay, whether it was
+        // an explicit entry or a directory synthesized from a deeper path.
+        let mut lower_heads: HashMap<String, Option<String>> = HashMap::new();
+        for entry_path in lower_layer.entries().keys() {
+            if entry_path.as_str() == path {
+                continue;
+            }
+            let rest = if path.is_empty() {
+                entry_path.as_str()
+            } else if let Some(rest) = entry_path.strip_prefix(&prefix) {
+                rest
+            } else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            let head = rest.split_once('/').map_or(rest, |(head, _)| head);
+            let explicit = (rest == head).then(|| entry_path.clone());
+            let slot = lower_heads.entry(head.to_string()).or_insert(None);
+            if explicit.is_some() {
+                *slot = explicit;
+            }
+        }
+        for (head, explicit) in lower_heads {
+            let full_path = child_path(path, &head);
+            if final_layer.contains_path(&full_path) {
+                continue;
+            }
+            let child = match explicit {
+                Some(entry_path) => Child {
+                    entry: lower_layer
+                        .entries()
+                        .get(&entry_path)
+                        .cloned()
+                        .ok_or_else(|| ApiError::internal("composed overlay entry missing"))?,
+                    source: lower_layer.source(&entry_path).cloned(),
+                    removed: true,
+                },
+                None => Child {
+                    entry: CachedEntry::directory(),
+                    source: None,
+                    removed: true,
+                },
+            };
+            children.entry(head).or_insert(child);
+        }
+    }
+
+    let mut names: Vec<String> = children.keys().cloned().collect();
+    names.sort();
+    if names.len() > MAX_TREE_ENTRIES {
+        return Err(too_large("directory has too many entries"));
+    }
+
+    let mut entries = Vec::new();
+    for name in names {
+        let Some(child) = children.get(&name) else {
+            continue;
+        };
+        let full_path = child_path(path, &name);
+        let change = if child.removed {
+            Some(Change::Removed)
+        } else if mode.colors() {
+            changes.and_then(|changes| changes.get(&full_path))
+        } else {
+            None
+        };
+        if mode.filters_unchanged() && change.is_none() {
+            continue;
+        }
+        let size = match child.entry.kind {
+            EntryKind::Dir => {
+                if child.removed {
+                    lower_layer.dir_size(&full_path)
+                } else {
+                    final_layer.dir_size(&full_path)
+                }
+            }
+            _ => child.entry.size,
+        };
+        let (link_resolved, link_kind) = match child.entry.kind {
+            EntryKind::Symlink => {
+                let resolver = if child.removed {
+                    lower_layer
+                } else {
+                    final_layer
+                };
+                match child
+                    .entry
+                    .link_target
+                    .as_deref()
+                    .and_then(|target| resolver.resolve_link(&full_path, target))
+                {
+                    Some((resolved, kind)) => (Some(resolved), Some(kind.as_str().to_string())),
+                    None => (None, None),
+                }
+            }
+            _ => (None, None),
+        };
+        entries.push(LayerTreeEntry {
+            name,
+            path: full_path,
+            kind: child.entry.kind.as_str().to_string(),
+            size,
+            mode: child.entry.mode,
+            link_target: child.entry.link_target.as_deref().map(str::to_string),
+            link_resolved,
+            link_kind,
+            change: change.map(|change| change.as_str().to_string()),
+            source_digest: child.source.as_ref().map(ToString::to_string),
+        });
+    }
+    Ok(entries)
+}
+
 pub async fn layer_tree(
     state: AppState,
     actor: AuthContext,
     repo_name: String,
     digest: String,
-    path: Option<String>,
+    query: TreeQuery,
 ) -> ApiResult<Response> {
+    let mode = TreeMode::parse(query.mode.as_deref())?;
+    let path = sanitize_request_path(query.path.as_deref().unwrap_or_default())?;
     let (_repository, _blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
-    let path = sanitize_request_path(path.as_deref().unwrap_or_default())?;
 
-    let index = match state.layer_cache.get(&parsed) {
-        Some(index) => index,
-        None => {
-            let file = open_blob(&state, &parsed).await?;
-            let std_file = file.into_std().await;
-            let max_scan_bytes = effective_layer_scan_bytes(state.config.layer_max_scan_bytes);
-            let max_entries = state.config.layer_max_entries;
-            state
-                .layer_cache
-                .get_or_build(&parsed, move || {
-                    let reader = decompressed(std_file)?;
-                    let merged = merge_entries(reader, max_scan_bytes, max_entries)?;
-                    Ok(Arc::new(LayerIndex::from_entries(merged)))
-                })
-                .await?
+    if mode == TreeMode::Single {
+        let index = build_layer_index(&state, &parsed).await?;
+        let entries = run_blocking(move || list_level(&index, &path)).await?;
+        return Ok(Json(entries).into_response());
+    }
+
+    let manifest_ref = query
+        .manifest
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("manifest is required for this mode"))?;
+    let (repository, manifest) = resolve_manifest(&state, &actor, &repo_name, manifest_ref).await?;
+    let layers = resolve_ordered_layers(&state, &manifest, &parsed).await?;
+    let position = layers
+        .iter()
+        .position(|layer| layer == &parsed)
+        .ok_or_else(|| not_found("layer not found in manifest"))?;
+
+    for layer in &layers[..=position] {
+        if !state
+            .registry
+            .blob_in_repository(repository.id, layer)
+            .await
+            .map_err(ApiError::from)?
+        {
+            return Err(not_found("layer not found in repository"));
         }
+    }
+
+    let manifest_digest = Digest::parse(&manifest.digest).map_err(ApiError::from)?;
+    let final_layer = cumulative_overlay(&state, &manifest_digest, &layers, position).await?;
+    let mut changes: Option<Changes> = None;
+    let lower_layer = if mode.shows_ghosts() {
+        let lower = match position.checked_sub(1) {
+            Some(lower) => cumulative_overlay(&state, &manifest_digest, &layers, lower).await?,
+            None => Arc::new(ComposedLayer::empty()),
+        };
+        changes = Some(crate::layer_cache::classify(&final_layer, &lower));
+        lower
+    } else {
+        Arc::new(ComposedLayer::empty())
     };
 
-    let entries = run_blocking(move || list_level(&index, &path)).await?;
+    let entries = run_blocking(move || {
+        list_level_composed(&final_layer, &lower_layer, &path, changes.as_ref(), mode)
+    })
+    .await?;
 
     Ok(Json(entries).into_response())
 }

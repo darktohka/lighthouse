@@ -14,7 +14,7 @@ part of the OCI module; this document covers the `/api` browsing endpoints.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/repositories/{ns}/{*repo}/layers/{digest}/tree?path=` | One directory level of the layer. |
+| GET | `/api/repositories/{ns}/{*repo}/layers/{digest}/tree?path=&mode=&manifest=` | One directory level of the layer (single layer, overlay or diff). |
 | GET | `/api/repositories/{ns}/{*repo}/layers/{digest}/file?path=` | A single file's bytes (`Content-Type` guessed). |
 | GET | `/api/repositories/{ns}/{*repo}/layers/{digest}/download` | The raw, still-compressed layer archive. |
 | GET | `/api/repositories/{ns}/{*repo}/manifests/{digest}` | Raw manifest / index JSON. |
@@ -23,10 +23,12 @@ part of the OCI module; this document covers the `/api` browsing endpoints.
 | GET | `/api/blobs/{digest}/json` | A blob parsed as JSON (config blobs). |
 
 `tree` returns `[{ name, path, kind: "file"|"dir"|"symlink", size, mode,
-link_target, link_resolved, link_kind }]`; `mode` is the raw tar mode (e.g. `420`
-for `0644`). `size` is the uncompressed byte count for a file or symlink, and for
+link_target, link_resolved, link_kind, change, source_digest }]`; `mode` is the
+raw tar mode (e.g. `420`
+for `0644`). `change` and `source_digest` are `null` in `single` mode; §4
+describes the overlay and diff modes. `size` is the uncompressed byte count for a file or symlink, and for
 a directory the recursive total of every sized descendant, computed once when the
-index is built (§6). For a symlink, `link_resolved` is the normalized layer path
+index is built (§7). For a symlink, `link_resolved` is the normalized layer path
 the link points at — following symlink chains, with `.`/`..` folded and `..` never
 escaping the layer root — and `link_kind` is the resolved entry's kind (`file` or
 `dir`); both are `null` when the link is dangling, cyclic, or escapes the layer,
@@ -96,7 +98,62 @@ ordinary container layers.
 
 ---
 
-## 4. Safety rules
+## 4. Overlay, diff and change classification
+
+`tree` is repository-scoped and accepts three query parameters:
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `path` | normalized relative path | Directory level to project (default: root). |
+| `mode` | `single` (default), `aggregate`, `diff`, `aggregate-diff` | Which view to return. |
+| `manifest` | manifest digest or tag | The manifest that orders the layers; required for every non-`single` mode. |
+
+- `single` browses one layer exactly as before and reports `change` and
+  `source_digest` as `null`.
+- `aggregate` overlays the manifest's ordered layers from the first up to and
+  including the requested layer. A `.wh.<name>` or `.wh..wh..opq` in any upper
+  layer removes the **whole subtree** it names, including deep paths whose
+  intermediate directories never appeared as explicit tar headers. Every
+  returned entry carries `source_digest`, the digest of the layer that last
+  supplied it, so the UI can preview a file through
+  `/layers/{source_digest}/file`; `change` stays `null`.
+- `diff` returns only the paths this layer adds, modifies or removes relative to
+  every layer below it, plus the ancestor directories needed to reach them.
+  Unchanged leaves are omitted. A path that existed below and is gone now is a
+  **ghost**: it is returned with the lower layer's metadata,
+  `change: "removed"`, and the `source_digest` of the layer that last held it.
+- `aggregate-diff` is the full overlay after this layer with colouring, plus the
+  ghosts, so removed paths stay visible.
+
+### Colour rules
+
+`change` is derived by comparing the cumulative overlay after the layer with the
+one below it:
+
+- `new` — present in the final overlay, absent below.
+- `modified` — present in both and not identical in kind, size, mode and link
+  target. An identical re-add is unchanged and carries no colour.
+- `removed` — present below, absent in the final overlay (a ghost).
+
+Directory colour is derived from descendants, never from the synthesized
+directory's placeholder mode: `removed` when it existed below and has no final
+entries left, `new` when it has final descendants but none existed below and
+nothing beneath it was removed, `modified` when it has any new, modified or
+removed descendant and is neither purely new nor purely removed, and `null`
+otherwise.
+
+### Manifest context
+
+`manifest` is resolved against the repository (visibility and membership are
+checked). For an image manifest the requested layer must occur in its ordered
+`layers` array. For an index the child image manifests are enumerated and the
+one whose layer list contains the requested layer is selected: exactly one match
+is used, several are ambiguous (`400`), and none is `404`. Omitting `manifest`
+for a non-`single` mode is `400`; a layer not in the resolved manifest is `404`.
+
+---
+
+## 5. Safety rules
 
 Every requested and archive path is sanitized before use:
 
@@ -117,7 +174,7 @@ cannot probe layer contents: a private repository's layers return `404`.
 
 ---
 
-## 5. Resource caps
+## 6. Resource caps
 
 Tar is a sequential format, so a malicious or accidental decompression bomb is a
 real concern. The browser enforces:
@@ -145,7 +202,7 @@ configured value is used unchanged. The remaining caps are fixed.
 
 ---
 
-## 6. Caching
+## 7. Caching
 
 A tar stream is sequential and has no central directory, so building the merged
 path map means decompressing the whole archive. `tree` memoizes that map per
@@ -171,6 +228,23 @@ lock, then observe the freshly cached index. Entries are dropped explicitly when
 their blob is removed — the garbage collector reports the digests it swept and
 the OCI blob delete invalidates directly. The database checks in step 1 mean a
 deleted layer can never be served from a stale entry regardless.
+
+### Composed overlays
+
+The overlay modes reuse the per-layer indices above and additionally cache each
+cumulative aggregate keyed by `(manifest_digest, layer_position)` in a second,
+identically bounded LRU+TTL cache (`LAYER_CACHE_MAX_BYTES` /
+`LAYER_CACHE_TTL_SECS`). Building position *n* reuses position *n-1* from that
+cache, so a manifest's overlays warm incrementally and a repeat request never
+rescans a layer. Manifests are content-addressed and immutable, so a cached
+overlay is only looked up **after** the manifest has been resolved and validated
+for the repository. If a manifest lists the same layer digest twice, each
+position is a distinct cache entry and each wins its own slot.
+
+The composed cache shares the layer-index cache's generation counter:
+`invalidate` and `clear` advance it, and an overlay stamped with an older
+generation is treated as a miss and rebuilt. A layer whose blob was removed can
+therefore never be served from a stale aggregate.
 
 `file` is not cached: returning a single file's bytes would still require
 decompressing everything before it, so it keeps its early-exit scan.

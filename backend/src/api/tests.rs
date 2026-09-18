@@ -113,6 +113,116 @@ fn image_manifest(
     .into_bytes()
 }
 
+/// An OCI image manifest with an explicit, ordered layer list.
+fn image_manifest_layers(
+    config: &str,
+    config_size: i64,
+    layers: &[(String, i64, String)],
+) -> Vec<u8> {
+    let descriptors: Vec<Value> = layers
+        .iter()
+        .map(|(digest, size, media_type)| {
+            json!({ "mediaType": media_type, "digest": digest, "size": size })
+        })
+        .collect();
+    json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_MANIFEST,
+        "config": {
+            "mediaType": media_types::OCI_IMAGE_CONFIG,
+            "digest": config,
+            "size": config_size,
+        },
+        "layers": descriptors,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Seeds an image with several gzip layers in order and returns its manifest
+/// digest plus the ordered layer digests.
+async fn seed_multilayer_image(
+    state: &AppState,
+    repo_name: &str,
+    tag: &str,
+    layers: &[Vec<u8>],
+) -> (Digest, Vec<Digest>) {
+    let repo = state
+        .registry
+        .ensure_repository(repo_name)
+        .await
+        .expect("repository");
+    let config = b"{\"cfg\":1}";
+    let config_digest = push_blob(state, repo.id, config, media_types::OCI_IMAGE_CONFIG).await;
+    let mut digests = Vec::new();
+    let mut descriptors = Vec::new();
+    for layer in layers {
+        let digest = push_blob(state, repo.id, layer, media_types::OCI_IMAGE_LAYER_GZIP).await;
+        descriptors.push((
+            digest.to_string(),
+            layer.len() as i64,
+            media_types::OCI_IMAGE_LAYER_GZIP.to_string(),
+        ));
+        digests.push(digest);
+    }
+    let manifest = image_manifest_layers(
+        &config_digest.to_string(),
+        config.len() as i64,
+        &descriptors,
+    );
+    let manifest_digest = Digest::from_bytes(&manifest);
+    state
+        .registry
+        .put_manifest(repo.id, media_types::OCI_IMAGE_MANIFEST, &manifest)
+        .await
+        .expect("put manifest");
+    state
+        .registry
+        .set_tag(repo.id, tag, &manifest_digest)
+        .await
+        .expect("set tag");
+    (manifest_digest, digests)
+}
+
+/// Seeds a multi-platform index over already-stored child image manifests.
+async fn seed_index(state: &AppState, repo_name: &str, tag: &str, children: &[Digest]) -> Digest {
+    let repo = state
+        .registry
+        .ensure_repository(repo_name)
+        .await
+        .expect("repository");
+    let descriptors: Vec<Value> = children
+        .iter()
+        .map(|digest| {
+            json!({
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": digest.to_string(),
+                "size": 0,
+                "platform": { "os": "linux", "architecture": "amd64" },
+            })
+        })
+        .collect();
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_INDEX,
+        "manifests": descriptors,
+    })
+    .to_string()
+    .into_bytes();
+    let digest = Digest::from_bytes(&manifest);
+    state
+        .registry
+        .put_manifest(repo.id, media_types::OCI_IMAGE_INDEX, &manifest)
+        .await
+        .expect("put index");
+    state
+        .registry
+        .set_tag(repo.id, tag, &digest)
+        .await
+        .expect("set index tag");
+    digest
+}
+
 async fn seed_image(
     state: &AppState,
     repo_name: &str,
@@ -229,6 +339,29 @@ fn zstd_layer_archive() -> Vec<u8> {
         builder.finish().expect("finish tar");
     }
     encoder.finish().expect("finish zstd")
+}
+
+/// One entry of a synthetic gzip layer archive.
+enum LayerEntry<'a> {
+    File(&'a str, &'a [u8], u32),
+    Symlink(&'a str, &'a str),
+}
+
+/// Builds a gzip-compressed tar from a concise, ordered entry list. `.wh.*`
+/// paths are ordinary files whose names encode the whiteout.
+fn layer_archive_with(entries: &[LayerEntry<'_>]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for entry in entries {
+        match entry {
+            LayerEntry::File(path, data, mode) => add_file(&mut builder, path, data, *mode),
+            LayerEntry::Symlink(path, target) => add_symlink(&mut builder, path, target),
+        }
+    }
+    builder.finish().expect("finish tar");
+    let tar = builder.into_inner().expect("tar bytes");
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&tar).expect("gzip write");
+    encoder.finish().expect("finish gzip")
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1254,596 @@ async fn layer_browsing_sniffs_zstd_declared_as_plain_tar() {
     assert_eq!(content, b"hello layer\n");
 }
 
+fn tree_path(repo: &str, digest: &str) -> String {
+    format!("/api/repositories/{repo}/layers/{digest}/tree")
+}
+
+fn tree_names(entries: &Value) -> Vec<String> {
+    entries
+        .as_array()
+        .expect("tree array")
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+fn tree_entry<'a>(entries: &'a Value, name: &str) -> &'a Value {
+    entries
+        .as_array()
+        .expect("tree array")
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .unwrap_or_else(|| panic!("entry {name} missing from {entries}"))
+}
+
+#[tokio::test]
+async fn layer_aggregate_whiteout_and_diff_ghost() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[
+        LayerEntry::File("etc/app.conf", b"conf", 0o644),
+        LayerEntry::File("etc/keep.txt", b"keep", 0o644),
+    ]);
+    let upper = layer_archive_with(&[LayerEntry::File("etc/.wh.app.conf", b"", 0o644)]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let base_digest = layers[0].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=etc&mode=aggregate&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(
+        tree_names(&tree),
+        vec!["keep.txt".to_string()],
+        "aggregate omits the whiteouted lower file"
+    );
+    let keep = tree_entry(&tree, "keep.txt");
+    assert!(keep["change"].is_null(), "plain aggregate has no colour");
+    assert_eq!(keep["source_digest"], base_digest);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=etc&mode=diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(
+        tree_names(&tree),
+        vec!["app.conf".to_string()],
+        "diff keeps only the removed leaf"
+    );
+    let ghost = tree_entry(&tree, "app.conf");
+    assert_eq!(ghost["change"], "removed");
+    assert_eq!(ghost["kind"], "file");
+    assert_eq!(ghost["source_digest"], base_digest);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=etc&mode=aggregate-diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(tree_entry(&tree, "app.conf")["change"], "removed");
+    assert!(
+        tree_entry(&tree, "keep.txt")["change"].is_null(),
+        "unchanged survivor is uncoloured"
+    );
+}
+
+#[tokio::test]
+async fn layer_aggregate_opaque_removes_deep_unheadered_path() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[LayerEntry::File("var/lib/deep/data.txt", b"deep", 0o644)]);
+    let upper = layer_archive_with(&[LayerEntry::File("var/.wh..wh..opq", b"", 0o644)]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=var&mode=aggregate&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert!(
+        tree.as_array().expect("tree").is_empty(),
+        "opaque var removes the whole deep subtree"
+    );
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=var&mode=diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    let lib = tree_entry(&tree, "lib");
+    assert_eq!(lib["change"], "removed");
+    assert_eq!(lib["kind"], "dir");
+}
+
+#[tokio::test]
+async fn layer_whiteout_dir_removes_lower_subtree() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[
+        LayerEntry::File("opt/dir/a.txt", b"a", 0o644),
+        LayerEntry::File("opt/dir/sub/b.txt", b"b", 0o644),
+    ]);
+    let upper = layer_archive_with(&[LayerEntry::File("opt/.wh.dir", b"", 0o644)]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=opt&mode=aggregate&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert!(
+        tree.as_array().expect("tree").is_empty(),
+        "a directory whiteout removes the entire subtree"
+    );
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=opt&mode=diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    let dir = tree_entry(&tree, "dir");
+    assert_eq!(dir["change"], "removed");
+    assert_eq!(dir["kind"], "dir");
+}
+
+#[tokio::test]
+async fn layer_whiteout_readd_is_unchanged_or_modified() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[
+        LayerEntry::File("data/same.txt", b"hello", 0o644),
+        LayerEntry::File("data/changed.txt", b"aaaa", 0o644),
+        LayerEntry::File("data/mode.txt", b"zzzz", 0o644),
+        LayerEntry::Symlink("data/link", "target-a"),
+    ]);
+    let upper = layer_archive_with(&[
+        LayerEntry::File("data/.wh.same.txt", b"", 0o644),
+        LayerEntry::File("data/same.txt", b"hello", 0o644),
+        LayerEntry::File("data/.wh.changed.txt", b"", 0o644),
+        LayerEntry::File("data/changed.txt", b"aaaaaa", 0o644),
+        LayerEntry::File("data/.wh.mode.txt", b"", 0o644),
+        LayerEntry::File("data/mode.txt", b"zzzz", 0o600),
+        LayerEntry::File("data/.wh.link", b"", 0o644),
+        LayerEntry::Symlink("data/link", "target-b"),
+    ]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=data&mode=aggregate-diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    let names = tree_names(&tree);
+    assert_eq!(names.len(), 4, "re-added paths stay present: {names:?}");
+    assert!(
+        tree_entry(&tree, "same.txt")["change"].is_null(),
+        "an identical re-add is unchanged"
+    );
+    assert_eq!(tree_entry(&tree, "changed.txt")["change"], "modified");
+    assert_eq!(
+        tree_entry(&tree, "mode.txt")["change"],
+        "modified",
+        "a mode-only change is a modification"
+    );
+    assert_eq!(tree_entry(&tree, "link")["change"], "modified");
+}
+
+#[tokio::test]
+async fn layer_aggregate_diff_directory_colors() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[
+        LayerEntry::File("mix/a.txt", b"a", 0o644),
+        LayerEntry::File("mix/old/b.txt", b"b", 0o644),
+        LayerEntry::File("stable/keep.txt", b"k", 0o644),
+    ]);
+    let upper = layer_archive_with(&[
+        LayerEntry::File("mix/.wh.old", b"", 0o644),
+        LayerEntry::File("mix/new.txt", b"n", 0o644),
+        LayerEntry::File("new/c.txt", b"c", 0o644),
+    ]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=aggregate-diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(tree_entry(&tree, "new")["change"], "new", "all-new folder");
+    assert_eq!(
+        tree_entry(&tree, "mix")["change"],
+        "modified",
+        "mixed folder"
+    );
+    assert!(
+        tree_entry(&tree, "stable")["change"].is_null(),
+        "all-unchanged folder"
+    );
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    let names = tree_names(&tree);
+    assert!(
+        names.contains(&"mix".to_string()),
+        "changed ancestor dir kept"
+    );
+    assert!(names.contains(&"new".to_string()));
+    assert!(
+        !names.contains(&"stable".to_string()),
+        "unchanged dir omitted from diff"
+    );
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=mix&mode=aggregate-diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    let old = tree_entry(&tree, "old");
+    assert_eq!(old["change"], "removed", "all-removed folder");
+    assert_eq!(old["kind"], "dir");
+    assert_eq!(tree_entry(&tree, "new.txt")["change"], "new");
+    assert!(tree_entry(&tree, "a.txt")["change"].is_null());
+}
+
+#[tokio::test]
+async fn layer_diff_first_layer_is_all_new() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[LayerEntry::File("etc/a.txt", b"a", 0o644)]);
+    let (manifest, layers) = seed_multilayer_image(&state, "alice/img", "latest", &[base]).await;
+    let manifest = manifest.to_string();
+    let target = layers[0].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(tree_entry(&tree, "etc")["change"], "new");
+    assert!(
+        tree_entry(&tree, "etc")["source_digest"].is_null(),
+        "a synthesized directory has no source layer"
+    );
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?path=etc&mode=diff&manifest={manifest}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let tree = body_json(response).await;
+    let file = tree_entry(&tree, "a.txt");
+    assert_eq!(file["change"], "new");
+    assert!(file["source_digest"].is_string());
+}
+
+#[tokio::test]
+async fn layer_tree_mode_validation_and_manifest_errors() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[LayerEntry::File("etc/a.txt", b"a", 0o644)]);
+    let (manifest, layers) = seed_multilayer_image(&state, "alice/img", "latest", &[base]).await;
+    let manifest = manifest.to_string();
+    let target = layers[0].to_string();
+    let tree_uri = tree_path("alice/img", &target);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=bogus"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=aggregate"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-single mode requires a manifest"
+    );
+
+    let repo_id = state
+        .registry
+        .find_repository("alice/img")
+        .await
+        .expect("find")
+        .expect("repository")
+        .id;
+    let orphan = push_blob(
+        &state,
+        repo_id,
+        b"orphan-layer-bytes",
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    )
+    .await;
+    let response = call(
+        &app,
+        Method::GET,
+        &format!(
+            "{}?mode=aggregate&manifest={manifest}",
+            tree_path("alice/img", &orphan.to_string())
+        ),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a layer outside the manifest is not browsable"
+    );
+}
+
+#[tokio::test]
+async fn layer_index_disambiguates_shared_layer() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base_a = layer_archive_with(&[LayerEntry::File("first.txt", b"a", 0o644)]);
+    let base_b = layer_archive_with(&[LayerEntry::File("second.txt", b"b", 0o644)]);
+    let shared = layer_archive_with(&[LayerEntry::File("shared.txt", b"s", 0o644)]);
+    let (m1, l1) = seed_multilayer_image(
+        &state,
+        "alice/multi",
+        "img1",
+        &[base_a.clone(), shared.clone()],
+    )
+    .await;
+    let (m2, l2) = seed_multilayer_image(&state, "alice/multi", "img2", &[base_b, shared]).await;
+    let shared_digest = l1[1].to_string();
+    let tree_uri = tree_path("alice/multi", &shared_digest);
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=aggregate&manifest={m1}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(
+        tree_names(&tree),
+        vec!["first.txt".to_string(), "shared.txt".to_string()]
+    );
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=aggregate&manifest={m2}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(
+        tree_names(&tree),
+        vec!["second.txt".to_string(), "shared.txt".to_string()]
+    );
+
+    let index_both = seed_index(&state, "alice/multi", "both", &[m1.clone(), m2.clone()]).await;
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=aggregate&manifest={index_both}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a layer shared by several index children is ambiguous"
+    );
+
+    let index_one = seed_index(&state, "alice/multi", "one", std::slice::from_ref(&m1)).await;
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("{tree_uri}?mode=aggregate&manifest={index_one}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tree = body_json(response).await;
+    assert_eq!(
+        tree_names(&tree),
+        vec!["first.txt".to_string(), "shared.txt".to_string()]
+    );
+
+    let missing = l2[0].to_string();
+    let response = call(
+        &app,
+        Method::GET,
+        &format!(
+            "{}?mode=aggregate&manifest={index_one}",
+            tree_path("alice/multi", &missing)
+        ),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a layer in no index child is not found"
+    );
+}
+
+#[tokio::test]
+async fn layer_composed_cache_reuses_and_respects_invalidation() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let base = layer_archive_with(&[LayerEntry::File("a.txt", b"a", 0o644)]);
+    let upper = layer_archive_with(&[LayerEntry::File("b.txt", b"b", 0o644)]);
+    let (manifest, layers) =
+        seed_multilayer_image(&state, "alice/img", "latest", &[base, upper]).await;
+    let manifest = manifest.to_string();
+    let target = layers[1].to_string();
+    let uri = format!(
+        "{}?mode=aggregate&manifest={manifest}",
+        tree_path("alice/img", &target)
+    );
+
+    let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.layer_cache.len(), 2, "both layer indices cached");
+    assert_eq!(
+        state.composed_cache.len(),
+        2,
+        "both cumulative positions cached"
+    );
+
+    for layer in &layers {
+        let path = state.storage.blob_path(layer);
+        tokio::fs::write(&path, b"not a tar")
+            .await
+            .expect("corrupt blob");
+    }
+    let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a repeat aggregate is served from the composed cache without rescanning"
+    );
+
+    state.layer_cache.invalidate(&layers[0]);
+    let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalidating a layer index must not leave a stale composed overlay"
+    );
+}
+
+#[tokio::test]
+async fn layer_single_mode_reports_null_change_fields() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let layer = layer_archive();
+    let (_manifest, layer_digest) =
+        seed_image(&state, "alice/img", "latest", b"config", &layer).await;
+    let digest = layer_digest.to_string();
+    let tree_uri = tree_path("alice/img", &digest);
+
+    for uri in [tree_uri.clone(), format!("{tree_uri}?mode=single")] {
+        let response = call(&app, Method::GET, &uri, Some(actor(&alice)), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let tree = body_json(response).await;
+        let entries = tree.as_array().expect("tree");
+        assert!(
+            entries.iter().any(|entry| entry["name"] == "etc"),
+            "single mode still lists the layer"
+        );
+        for entry in entries {
+            assert!(entry["change"].is_null(), "single mode has no change");
+            assert!(
+                entry["source_digest"].is_null(),
+                "single mode has no source digest"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Permissions and service accounts
 // ---------------------------------------------------------------------------
@@ -1739,4 +2462,63 @@ async fn user_profile_and_heatmap() {
     assert_eq!(response.status(), StatusCode::OK);
     let heatmap = body_json(response).await;
     assert_eq!(heatmap["days"].as_array().expect("days").len(), 364);
+}
+
+#[tokio::test]
+async fn tag_detail_layers_follow_manifest_order_not_digest_order() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    // Seed the manifest with layers in descending digest order, so the old
+    // digest-ordered query could never produce the same sequence.
+    let mut layers: Vec<(Digest, Vec<u8>)> = [
+        b"layer-a".to_vec(),
+        b"layer-b".to_vec(),
+        b"layer-c".to_vec(),
+    ]
+    .into_iter()
+    .map(|bytes| (Digest::from_bytes(&bytes), bytes))
+    .collect();
+    layers.sort_by_key(|(digest, _)| std::cmp::Reverse(digest.to_string()));
+    let ordered: Vec<Vec<u8>> = layers.iter().map(|(_, bytes)| bytes.clone()).collect();
+    let expected: Vec<String> = layers
+        .iter()
+        .map(|(digest, _)| digest.to_string())
+        .collect();
+
+    let (_, layer_digests) = seed_multilayer_image(&state, "alice/img", "release", &ordered).await;
+    let seeded: Vec<String> = layer_digests.iter().map(|d| d.to_string()).collect();
+    assert_eq!(seeded, expected, "manifest declares layers in this order");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/img/tags/release",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+
+    let layer_order = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .expect("layers")
+            .iter()
+            .filter(|layer| layer["role"] == "layer")
+            .map(|layer| layer["digest"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        layer_order(&tag["layers"]),
+        expected,
+        "combined layers follow the manifest, not digest order"
+    );
+    assert_eq!(
+        layer_order(&tag["platform_details"][0]["layers"]),
+        expected,
+        "platform layers follow the manifest, not digest order"
+    );
 }

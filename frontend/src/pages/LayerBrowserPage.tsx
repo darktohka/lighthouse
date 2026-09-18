@@ -10,10 +10,11 @@ import {
 import { useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
-import { layers } from '../api/endpoints'
-import type { LayerTreeEntry } from '../api/schemas'
+import { layers, type LayerTreeMode } from '../api/endpoints'
+import type { LayerChange, LayerTreeEntry } from '../api/schemas'
 import { CopyButton } from '../components/CopyButton'
 import { PageHeader } from '../components/PageHeader'
+import { TabNav, TabPanel } from '../components/Tabs'
 import { AnchorButton, Button } from '../components/primitives/Button'
 import { Box } from '../components/primitives/Box'
 import { Flash } from '../components/primitives/Flash'
@@ -37,6 +38,94 @@ const MAX_PREVIEW_CHARS = 200_000
 
 type LayerSortKey = 'name' | 'size'
 type LayerSortOrder = 'asc' | 'desc'
+
+type LayerTabId = 'layer' | 'aggregated' | 'diff' | 'aggregated-difference'
+
+const TABS: ReadonlyArray<{ id: LayerTabId; label: string }> = [
+  { id: 'layer', label: 'Layer' },
+  { id: 'aggregated', label: 'Aggregated' },
+  { id: 'diff', label: 'Diff' },
+  { id: 'aggregated-difference', label: 'Aggregated Difference' },
+]
+
+const TAB_TITLES: Record<LayerTabId, string> = {
+  layer: 'Layer browser',
+  aggregated: 'Aggregated layer view',
+  diff: 'Layer diff',
+  'aggregated-difference': 'Aggregated layer difference',
+}
+
+const MODE_FOR_TAB: Record<LayerTabId, LayerTreeMode> = {
+  layer: 'single',
+  aggregated: 'aggregate',
+  diff: 'diff',
+  'aggregated-difference': 'aggregate-diff',
+}
+
+const EMPTY_COPY: Record<LayerTabId, { title: string; description: string }> = {
+  layer: {
+    title: 'Empty directory',
+    description: 'There is nothing at this path in the layer.',
+  },
+  aggregated: {
+    title: 'Nothing at this path',
+    description:
+      'No file from this layer or its ancestors exists at this path.',
+  },
+  diff: {
+    title: 'No changes in this layer',
+    description: 'This layer adds, modifies or removes nothing at this path.',
+  },
+  'aggregated-difference': {
+    title: 'No changes in this layer',
+    description: 'This layer adds, modifies or removes nothing at this path.',
+  },
+}
+
+function isLayerTab(value: string): value is LayerTabId {
+  return TABS.some((item) => item.id === value)
+}
+
+function isDiffTab(tab: LayerTabId): boolean {
+  return tab === 'diff' || tab === 'aggregated-difference'
+}
+
+function changeTextColor(change: LayerChange | null): string | null {
+  switch (change) {
+    case 'new':
+      return 'text-success'
+    case 'modified':
+      return 'text-attention'
+    case 'removed':
+      return 'text-danger'
+    default:
+      return null
+  }
+}
+
+function ChangeLegend() {
+  const items: ReadonlyArray<{ label: string; dot: string }> = [
+    { label: 'New', dot: 'bg-success' },
+    { label: 'Modified', dot: 'bg-attention' },
+    { label: 'Removed', dot: 'bg-danger' },
+  ]
+  return (
+    <ul
+      aria-label="Change legend"
+      className="flex flex-wrap items-center gap-3 text-xs text-muted"
+    >
+      {items.map((item) => (
+        <li key={item.label} className="inline-flex items-center gap-1.5">
+          <span
+            aria-hidden="true"
+            className={cx('h-2.5 w-2.5 rounded-full', item.dot)}
+          />
+          {item.label}
+        </li>
+      ))}
+    </ul>
+  )
+}
 
 type PreviewResult =
   | { kind: 'text'; text: string; contentType: string; truncated: boolean }
@@ -253,6 +342,12 @@ export function LayerBrowserPage({
 }: LayerBrowserPageProps) {
   const [searchParams, setSearchParams] = useSearchParams()
   const path = searchParams.get('path') ?? ''
+  const manifest = searchParams.get('manifest')
+  const requestedTab = searchParams.get('tab')
+  const tab: LayerTabId =
+    requestedTab && isLayerTab(requestedTab) ? requestedTab : 'layer'
+  const mode = MODE_FOR_TAB[tab]
+  const manifestMissing = mode !== 'single' && manifest === null
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [sort, setSort] = useState<{ key: LayerSortKey; order: LayerSortOrder }>({
     key: 'name',
@@ -260,10 +355,32 @@ export function LayerBrowserPage({
   })
 
   const state = useAsync(
-    (signal) =>
-      layers.tree(namespace, repo, digest, path || undefined, { signal }),
-    `layer-tree:${namespace}:${repo}:${digest}:${path}`,
+    (signal): Promise<LayerTreeEntry[]> => {
+      if (manifestMissing) return Promise.resolve([])
+      return layers.tree(
+        namespace,
+        repo,
+        digest,
+        {
+          path: path.length > 0 ? path : undefined,
+          mode,
+          manifest: mode === 'single' ? undefined : (manifest ?? undefined),
+        },
+        { signal },
+      )
+    },
+    `layer-tree:${namespace}:${repo}:${digest}:${mode}:${manifest ?? ''}:${path}`,
   )
+
+  const changeTab = (id: string) => {
+    if (!isLayerTab(id)) return
+    const params = new URLSearchParams(searchParams)
+    if (id === 'layer') params.delete('tab')
+    else params.set('tab', id)
+    params.delete('path')
+    setSearchParams(params)
+    setSelectedFile(null)
+  }
 
   const goToPath = (next: string) => {
     const params = new URLSearchParams(searchParams)
@@ -337,12 +454,13 @@ export function LayerBrowserPage({
       ),
       className: 'w-6',
       render: (entry) => {
+        const changed = changeTextColor(entry.change)
         if (entry.kind === 'dir') {
           return (
             <FileDirectoryFillIcon
               size={16}
               aria-hidden="true"
-              className="text-accent"
+              className={changed ?? 'text-accent'}
             />
           )
         }
@@ -353,11 +471,17 @@ export function LayerBrowserPage({
             <LinkIcon
               size={16}
               aria-hidden="true"
-              className={clickable ? 'text-accent' : 'text-muted'}
+              className={changed ?? (clickable ? 'text-accent' : 'text-muted')}
             />
           )
         }
-        return <FileIcon size={16} aria-hidden="true" className="text-muted" />
+        return (
+          <FileIcon
+            size={16}
+            aria-hidden="true"
+            className={changed ?? 'text-muted'}
+          />
+        )
       },
     },
     {
@@ -372,12 +496,16 @@ export function LayerBrowserPage({
       ),
       sortDirection: sort.key === 'name' ? sort.order : undefined,
       render: (entry) => {
+        const changed = changeTextColor(entry.change)
         if (entry.kind === 'dir') {
           return (
             <button
               type="button"
               onClick={() => goToPath(entry.path)}
-              className="cursor-pointer font-mono text-accent hover:underline"
+              className={cx(
+                'cursor-pointer font-mono hover:underline',
+                changed ?? 'text-accent',
+              )}
             >
               {entry.name}/
             </button>
@@ -388,19 +516,37 @@ export function LayerBrowserPage({
           const resolved = entry.link_resolved
           const targetKind = entry.link_kind
           if (resolved === null || targetKind === null) {
-            return <span className="font-mono text-muted">{label}</span>
+            return (
+              <span className={cx('font-mono', changed ?? 'text-muted')}>
+                {label}
+              </span>
+            )
           }
           return (
             <button
               type="button"
               onClick={() => openLink(resolved, targetKind)}
               title={resolved}
-              className="cursor-pointer font-mono text-accent hover:underline"
+              className={cx(
+                'cursor-pointer font-mono hover:underline',
+                changed ?? 'text-accent',
+              )}
             >
               {label}
             </button>
           )
         }
+        if (entry.change === 'removed') {
+          return (
+            <span
+              className="font-mono text-danger line-through"
+              title="Removed in this layer — no contents to preview"
+            >
+              {entry.name}
+            </span>
+          )
+        }
+        const selected = selectedFile === entry.path
         return (
           <button
             type="button"
@@ -409,12 +555,11 @@ export function LayerBrowserPage({
                 current === entry.path ? null : entry.path,
               )
             }
-            aria-expanded={selectedFile === entry.path}
+            aria-expanded={selected}
             className={cx(
               'cursor-pointer font-mono hover:underline',
-              selectedFile === entry.path
-                ? 'font-semibold text-foreground'
-                : 'text-accent',
+              selected ? 'font-semibold' : '',
+              changed ?? (selected ? 'text-foreground' : 'text-accent'),
             )}
           >
             {entry.name}
@@ -483,9 +628,12 @@ export function LayerBrowserPage({
             / <span className="font-mono">{digest.slice(0, 18)}…</span>
           </>
         }
-        title="Layer browser"
+        title={TAB_TITLES[tab]}
         description={
-          <span className="font-mono text-xs break-all">{digest}</span>
+          <span className="font-mono text-xs break-all">
+            {digest}
+            {manifest ? ` · manifest ${manifest}` : ''}
+          </span>
         }
         actions={
           <AnchorButton
@@ -501,38 +649,57 @@ export function LayerBrowserPage({
 
       <LayerBreadcrumbs segments={segments} onNavigate={goToPath} />
 
-      <Box>
-        {state.loading && !state.data ? (
-          <LoadingState label="Listing layer…" />
-        ) : null}
-        {state.error ? (
-          <ErrorState error={state.error} onRetry={state.reload} />
-        ) : null}
-        {state.data ? (
-          <Table
-            columns={columns}
-            rows={rows}
-            rowKey={(entry) => `${entry.kind}:${entry.path}`}
-            caption={`Contents of /${path}`}
-            empty={
-              <EmptyState
-                title="Empty directory"
-                description="There is nothing at this path in the layer."
-              />
-            }
-            rowDetails={(entry) =>
-              entry.kind === 'file' && entry.path === selectedFile ? (
-                <FilePreview
-                  namespace={namespace}
-                  repo={repo}
-                  digest={digest}
-                  path={entry.path}
+      <TabNav label="Layer views" tabs={TABS} active={tab} onChange={changeTab} />
+
+      <TabPanel id={tab} active={tab}>
+        {manifestMissing ? (
+          <Flash variant="warning" title="Image context required">
+            The aggregated views overlay a layer on top of its ancestors, so
+            they need the digest of the image manifest that owns this layer.
+            Open the layer from a tag&rsquo;s Layers tab, or add a{' '}
+            <code>manifest</code> query parameter.
+          </Flash>
+        ) : (
+          <div className="space-y-3">
+            {isDiffTab(tab) ? <ChangeLegend /> : null}
+
+            <Box>
+              {state.loading ? (
+                <LoadingState label="Listing layer…" />
+              ) : null}
+              {!state.loading && state.error ? (
+                <ErrorState error={state.error} onRetry={state.reload} />
+              ) : null}
+              {!state.loading && !state.error && state.data ? (
+                <Table
+                  columns={columns}
+                  rows={rows}
+                  rowKey={(entry) => `${entry.kind}:${entry.path}`}
+                  caption={`Contents of /${path}`}
+                  empty={
+                    <EmptyState
+                      title={EMPTY_COPY[tab].title}
+                      description={EMPTY_COPY[tab].description}
+                    />
+                  }
+                  rowDetails={(entry) =>
+                    entry.kind === 'file' &&
+                    entry.change !== 'removed' &&
+                    entry.path === selectedFile ? (
+                      <FilePreview
+                        namespace={namespace}
+                        repo={repo}
+                        digest={entry.source_digest ?? digest}
+                        path={entry.path}
+                      />
+                    ) : null
+                  }
                 />
-              ) : null
-            }
-          />
-        ) : null}
-      </Box>
+              ) : null}
+            </Box>
+          </div>
+        )}
+      </TabPanel>
     </div>
   )
 }
