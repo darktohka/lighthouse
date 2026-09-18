@@ -8,6 +8,25 @@ Registry HTTP API V2**, and adds a full control plane on top: accounts, e-mail
 verification, workspaces, delegated access, service accounts, per-image pull
 statistics, storage analytics and an in-browser layer filesystem viewer.
 
+## Hosted instance
+
+A public Lighthouse instance runs at <https://lighthouse.tohka.us>. It is a
+regular deployment — register an account there and you get the same personal
+namespace, workspaces, delegations and browser UI described below.
+
+The server image is published multi-arch (`linux/amd64`, `linux/arm64`) to
+Docker Hub as [`darktohka/lighthouse`](https://hub.docker.com/r/darktohka/lighthouse),
+and mirrored to GHCR as `ghcr.io/darktohka/registry`:
+
+```bash
+docker pull darktohka/lighthouse:latest   # or pin a release, e.g. :1.2.3
+```
+
+Tags are `latest` and `sha-<short-sha>`, plus semver (`1.2.3`, `1.2`, `1`) for
+`v*` releases. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for running it.
+
+## Flow
+
 ```
 ┌──────────────┐   /v2/*    ┌─────────────────────────────────────┐
 │ docker push  │──────────▶ │  Axum  ·  OCI Distribution API      │
@@ -17,35 +36,6 @@ statistics, storage analytics and an in-browser layer filesystem viewer.
 │  Browser UI  │──────────▶ │                                     │
 └──────────────┘            └─────────────────────────────────────┘
 ```
-
-## Features
-
-- **Registry protocol** — blobs (GET/HEAD/DELETE, `Range`, conditional requests),
-  uploads (monolithic, chunked, resumable, status, cancel, cross-repo mount),
-  manifests (GET/HEAD/PUT/DELETE, content negotiation), tag listing, repository
-  catalog, `n`/`last` pagination, `Docker-Content-Digest`, OCI error envelope.
-- **Formats** — OCI image manifest/index and Docker schema2 manifest/list;
-  `tar`, `tar+gzip` and `tar+zstd` layers; multi-platform images.
-- **Integrity** — digests verified cryptographically on every upload; blobs
-  deduplicated and content-addressed.
-- **Garbage collection** — reference-graph mark-and-sweep reclaims unreferenced
-  blobs when tags or images are deleted.
-- **Identity** — Argon2id passwords, TOTP two-factor authentication with
-  single-use backup codes, per-account app passwords, e-mail verification
-  through Brevo, stateless access cookie + refresh tokens, registry refresh
-  tokens (offline tokens), service accounts with per-account IP allowlists,
-  login history.
-- **Authorization** — personal namespaces, workspaces, per-namespace and
-  per-repository delegations (including anonymous), registry bearer tokens for
-  `/v2` (anonymous pull included), a configurable `WWW-Authenticate` challenge
-  (`Bearer`, `Basic` or both), push implies pull.
-- **Control plane** — dashboard and activity timeline, image and tag detail with
-  sizes and platforms, JSON manifest/config browsing,
-  in-browser layer filesystem, storage analytics, profile pages with a rolling
-  52-week contribution heatmap and follows.
-- **Operations** — daily-rotated logs with per-request IP/user-agent/timestamp,
-  in-memory rate limiting, proof-of-work captcha, graceful SIGINT/SIGTERM
-  shutdown, `scratch`-based image, multi-arch CI.
 
 ## Documentation
 
