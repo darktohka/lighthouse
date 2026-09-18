@@ -616,6 +616,41 @@ impl Inner {
     }
 }
 
+/// RAII lease on one digest's in-flight build lock.
+///
+/// The lease removes `digest` from `inflight` when it is dropped, so a request
+/// cancelled while waiting for or running a build — for example because the
+/// client disconnected — cannot leave the entry behind forever. It removes the
+/// entry only once no other caller still shares the same lock, so waiting
+/// callers keep collapsing onto one build; the last holder removes it.
+struct LayerBuildLease<'a> {
+    cache: &'a LayerIndexCache,
+    digest: Digest,
+    slot: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl LayerBuildLease<'_> {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.slot.lock().await
+    }
+}
+
+impl Drop for LayerBuildLease<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.cache.lock();
+        let ours = inner
+            .inflight
+            .get(&self.digest)
+            .is_some_and(|existing| Arc::ptr_eq(existing, &self.slot));
+        // `strong_count` is the map's reference plus one per live lease. While
+        // the cache lock is held no lease can be created or dropped, so the
+        // count is stable; leave the entry for any remaining waiters.
+        if ours && Arc::strong_count(&self.slot) <= 2 {
+            inner.inflight.remove(&self.digest);
+        }
+    }
+}
+
 /// Concurrent, bounded, self-expiring cache of layer indices.
 pub struct LayerIndexCache {
     config: LayerCacheConfig,
@@ -714,16 +749,16 @@ impl LayerIndexCache {
             return Ok(index);
         }
 
-        let slot = self.build_lock(digest);
-        let _guard = slot.lock().await;
+        let lease = self.begin_build(digest);
+        let _guard = lease.lock().await;
 
-        // Another caller may have populated the cache while we waited.
+        // Another caller may have populated the cache while we waited. Dropping
+        // `lease` on return releases the in-flight entry.
         if let Some(index) = self.get(digest) {
-            self.finish_build(digest);
             return Ok(index);
         }
 
-        let result = match tokio::task::spawn_blocking(build).await {
+        match tokio::task::spawn_blocking(build).await {
             Ok(Ok(index)) => {
                 self.insert(digest.clone(), Arc::clone(&index));
                 Ok(index)
@@ -733,9 +768,7 @@ impl LayerIndexCache {
                 tracing::error!(error = %err, "layer index build panicked");
                 Err(ApiError::internal("layer reader failed"))
             }
-        };
-        self.finish_build(digest);
-        result
+        }
     }
 
     /// Drops the cached index for `digest`, e.g. after its blob is removed, and
@@ -784,18 +817,19 @@ impl LayerIndexCache {
         entry.is_some_and(|entry| now.duration_since(entry.inserted_at) >= self.config.ttl)
     }
 
-    fn build_lock(&self, digest: &Digest) -> Arc<tokio::sync::Mutex<()>> {
+    fn begin_build(&self, digest: &Digest) -> LayerBuildLease<'_> {
         let mut inner = self.lock();
-        Arc::clone(
+        let slot = Arc::clone(
             inner
                 .inflight
                 .entry(digest.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
-    }
-
-    fn finish_build(&self, digest: &Digest) {
-        self.lock().inflight.remove(digest);
+        );
+        LayerBuildLease {
+            cache: self,
+            digest: digest.clone(),
+            slot,
+        }
     }
 
     fn evict_to_budget(&self, inner: &mut Inner) {
@@ -879,6 +913,33 @@ impl ComposedInner {
             entry.seq = next;
         }
         Some(next)
+    }
+}
+
+/// RAII lease on one composed-overlay build lock; see [`LayerBuildLease`].
+struct ComposedBuildLease<'a> {
+    cache: &'a ComposedLayerCache,
+    key: ComposedKey,
+    slot: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ComposedBuildLease<'_> {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.slot.lock().await
+    }
+}
+
+impl Drop for ComposedBuildLease<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.cache.lock();
+        let ours = inner
+            .inflight
+            .get(&self.key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, &self.slot));
+        // See `LayerBuildLease`: leave the entry for waiters that share it.
+        if ours && Arc::strong_count(&self.slot) <= 2 {
+            inner.inflight.remove(&self.key);
+        }
     }
 }
 
@@ -987,16 +1048,15 @@ impl ComposedLayerCache {
             return Ok(layer);
         }
 
-        let slot = self.build_lock(key);
-        let _guard = slot.lock().await;
+        let lease = self.begin_build(key);
+        let _guard = lease.lock().await;
 
         if let Some(layer) = self.get(key) {
-            self.finish_build(key);
             return Ok(layer);
         }
 
         let generation = self.current_generation();
-        let result = match tokio::task::spawn_blocking(build).await {
+        match tokio::task::spawn_blocking(build).await {
             Ok(Ok(layer)) => {
                 self.insert_with_generation(key.clone(), Arc::clone(&layer), generation);
                 Ok(layer)
@@ -1006,9 +1066,7 @@ impl ComposedLayerCache {
                 tracing::error!(error = %err, "composed overlay build panicked");
                 Err(ApiError::internal("layer reader failed"))
             }
-        };
-        self.finish_build(key);
-        result
+        }
     }
 
     /// Number of cached overlays (introspection for tests and metrics).
@@ -1030,18 +1088,19 @@ impl ComposedLayerCache {
         entry.is_some_and(|entry| now.duration_since(entry.inserted_at) >= self.config.ttl)
     }
 
-    fn build_lock(&self, key: &ComposedKey) -> Arc<tokio::sync::Mutex<()>> {
+    fn begin_build(&self, key: &ComposedKey) -> ComposedBuildLease<'_> {
         let mut inner = self.lock();
-        Arc::clone(
+        let slot = Arc::clone(
             inner
                 .inflight
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
-    }
-
-    fn finish_build(&self, key: &ComposedKey) {
-        self.lock().inflight.remove(key);
+        );
+        ComposedBuildLease {
+            cache: self,
+            key: key.clone(),
+            slot,
+        }
     }
 
     fn evict_to_budget(&self, inner: &mut ComposedInner) {
@@ -1395,5 +1454,78 @@ mod tests {
             .expect("retry succeeds");
         assert_eq!(ok.len(), 1);
         assert!(cache.get(&a).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_build_does_not_leak_its_inflight_entry() {
+        let cache = Arc::new(LayerIndexCache::new(config(1024)));
+        let a = digest(1);
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let task = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let a = a.clone();
+            async move {
+                cache
+                    .get_or_build(&a, move || {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.recv();
+                        Ok(index(&["etc"]))
+                    })
+                    .await
+            }
+        });
+
+        started_rx.await.expect("build started");
+        assert_eq!(cache.inner.lock().unwrap().inflight.len(), 1);
+
+        // Simulate the client going away: the request future, and with it the
+        // lease, is dropped while the blocking scan is still running.
+        task.abort();
+        let _ = task.await;
+        let leaked = cache.inner.lock().unwrap().inflight.len();
+        release_tx.send(()).expect("release build");
+
+        assert_eq!(
+            leaked, 0,
+            "a cancelled build must not leave an in-flight entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_composed_build_does_not_leak_its_inflight_entry() {
+        let generation = LayerIndexCache::new(config(1024)).generation();
+        let cache = Arc::new(ComposedLayerCache::new(config(1024), generation));
+        let key: ComposedKey = (digest(1), 0);
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let task = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            async move {
+                cache
+                    .get_or_build(&key, move || {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.recv();
+                        Ok(Arc::new(ComposedLayer::empty()))
+                    })
+                    .await
+            }
+        });
+
+        started_rx.await.expect("build started");
+        assert_eq!(cache.inner.lock().unwrap().inflight.len(), 1);
+
+        task.abort();
+        let _ = task.await;
+        let leaked = cache.inner.lock().unwrap().inflight.len();
+        release_tx.send(()).expect("release build");
+
+        assert_eq!(
+            leaked, 0,
+            "a cancelled composed build must not leave an in-flight entry"
+        );
     }
 }

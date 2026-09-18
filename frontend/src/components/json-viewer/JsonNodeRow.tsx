@@ -62,7 +62,7 @@ export function JsonNodeRow({ row }: { row: Row }) {
         onRowFocus(row.path)
       }}
       className={cx(
-        'group/row flex items-start gap-1 rounded-sm py-px pr-1',
+        'group/row flex cursor-pointer items-start gap-1 rounded-sm py-px pr-1',
         isActive && 'bg-accent-subtle',
       )}
       style={{ paddingLeft: row.depth * INDENT_PX }}

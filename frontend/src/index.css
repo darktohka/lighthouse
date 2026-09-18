@@ -154,6 +154,31 @@
     min-height: 100svh;
   }
 
+  /*
+   * Pointer affordance for interactive controls.
+   *
+   * Tailwind's preflight leaves buttons, selects, links and form controls at
+   * the browser's default arrow cursor, so clickable elements need an explicit
+   * pointer. Disabled controls keep a `not-allowed` cursor instead. The rules
+   * are wrapped in `:where()` to keep specificity at zero, so utility classes
+   * (e.g. `cursor-default` on a custom control) can still override them.
+   */
+  :where(button):not(:disabled),
+  :where(a[href]):not([aria-disabled='true']),
+  :where(select):not(:disabled),
+  :where(summary),
+  :where([role='button']):not([aria-disabled='true']),
+  :where(input[type='checkbox'], input[type='radio']):not(:disabled),
+  :where(label:has(input:not(:disabled))) {
+    cursor: pointer;
+  }
+
+  :where(button, select, input):disabled,
+  :where([aria-disabled='true']),
+  :where(label:has(input:disabled)) {
+    cursor: not-allowed;
+  }
+
   code,
   kbd,
   samp,

@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::auth::middleware::{Auth, Authenticated};
 use crate::error::{ApiError, ApiResult};
@@ -27,6 +28,7 @@ struct UserProfile {
     location: Option<String>,
     website: Option<String>,
     avatar_url: Option<String>,
+    avatar_hash: String,
     created_at: DateTime<Utc>,
     namespace: String,
     repository_count: i64,
@@ -96,6 +98,12 @@ pub fn router() -> Router<AppState> {
             "/api/users/{username}/follow",
             post(follow).delete(unfollow),
         )
+}
+
+/// Lowercase hex SHA-256 of the normalized e-mail, the public Libravatar
+/// identifier. The e-mail itself is never exposed.
+fn avatar_hash(email: &str) -> String {
+    hex::encode(Sha256::digest(email.trim().to_lowercase().as_bytes()))
 }
 
 fn normalize(value: Option<String>) -> Option<String> {
@@ -212,6 +220,7 @@ async fn build_profile(
         location: user.location.clone(),
         website: user.website.clone(),
         avatar_url: user.avatar_url.clone(),
+        avatar_hash: avatar_hash(&user.email),
         created_at: user.created_at,
         namespace,
         repository_count,
@@ -478,4 +487,16 @@ async fn unfollow(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::avatar_hash;
+
+    #[test]
+    fn avatar_hash_normalizes_case_and_whitespace() {
+        let expected = "497f085b5955fac70a3418401432cdf4223dc77b41067d1c09eddc3eee6bf6da";
+        assert_eq!(avatar_hash("Alice@Test.Local"), expected);
+        assert_eq!(avatar_hash("  alice@test.local  "), expected);
+    }
 }

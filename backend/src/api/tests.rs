@@ -2416,6 +2416,10 @@ async fn user_profile_and_heatmap() {
     let profile = body_json(response).await;
     assert_eq!(profile["username"], "alice");
     assert_eq!(profile["is_self"], true);
+    assert_eq!(
+        profile["avatar_hash"],
+        "497f085b5955fac70a3418401432cdf4223dc77b41067d1c09eddc3eee6bf6da"
+    );
     assert!(
         profile.get("email").is_none(),
         "profiles never expose e-mail"
@@ -2521,4 +2525,146 @@ async fn tag_detail_layers_follow_manifest_order_not_digest_order() {
         expected,
         "platform layers follow the manifest, not digest order"
     );
+}
+
+/// Asserts the two non-empty history entries landed on the two layers in order.
+fn assert_layer_history(layers: &[Value]) {
+    assert_eq!(
+        layers.len(),
+        2,
+        "two non-empty history entries map to two layers"
+    );
+    assert_eq!(layers[0]["created"], "2024-01-02T00:00:00Z");
+    assert_eq!(layers[0]["created_by"], "RUN one");
+    assert_eq!(layers[0]["comment"], "layer-1");
+    assert_eq!(layers[1]["created"], "2024-01-03T00:00:00Z");
+    assert_eq!(layers[1]["created_by"], "RUN two");
+    assert_eq!(layers[1]["comment"], "layer-2");
+}
+
+#[tokio::test]
+async fn layer_history_metadata_maps_non_empty_entries_in_order() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let repo = state
+        .registry
+        .ensure_repository("alice/hist")
+        .await
+        .expect("repository");
+
+    let config = serde_json::to_vec(&json!({
+        "architecture": "amd64",
+        "os": "linux",
+        "history": [
+            {
+                "created": "2024-01-01T00:00:00Z",
+                "created_by": "ARG BASE",
+                "comment": "buildkit.dockerfile.v0",
+                "empty_layer": true
+            },
+            {
+                "created": "2024-01-02T00:00:00Z",
+                "created_by": "RUN one",
+                "comment": "layer-1"
+            },
+            {
+                "created": "2024-01-03T00:00:00Z",
+                "created_by": "RUN two",
+                "comment": "layer-2"
+            }
+        ]
+    }))
+    .expect("config json");
+
+    let config_digest = push_blob(&state, repo.id, &config, media_types::OCI_IMAGE_CONFIG).await;
+    let first = push_blob(
+        &state,
+        repo.id,
+        b"layer-one",
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    )
+    .await;
+    let second = push_blob(
+        &state,
+        repo.id,
+        b"layer-two",
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    )
+    .await;
+    let descriptors = vec![
+        (
+            first.to_string(),
+            b"layer-one".len() as i64,
+            media_types::OCI_IMAGE_LAYER_GZIP.to_string(),
+        ),
+        (
+            second.to_string(),
+            b"layer-two".len() as i64,
+            media_types::OCI_IMAGE_LAYER_GZIP.to_string(),
+        ),
+    ];
+    let manifest = image_manifest_layers(
+        &config_digest.to_string(),
+        config.len() as i64,
+        &descriptors,
+    );
+    let manifest_digest = Digest::from_bytes(&manifest);
+    state
+        .registry
+        .put_manifest(repo.id, media_types::OCI_IMAGE_MANIFEST, &manifest)
+        .await
+        .expect("put manifest");
+    state
+        .registry
+        .set_tag(repo.id, "latest", &manifest_digest)
+        .await
+        .expect("set tag");
+
+    let role_rows = |value: &Value, role: &str| -> Vec<Value> {
+        value
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter(|row| row["role"] == role)
+            .cloned()
+            .collect()
+    };
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/hist/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+
+    let platform_layers = role_rows(&tag["platform_details"][0]["layers"], "layer");
+    assert_layer_history(&platform_layers);
+    assert_layer_history(&role_rows(&tag["layers"], "layer"));
+
+    let config_rows = role_rows(&tag["platform_details"][0]["layers"], "config");
+    assert_eq!(config_rows.len(), 1, "the config row is present");
+    assert!(config_rows[0]["created"].is_null());
+    assert!(config_rows[0]["created_by"].is_null());
+    assert!(config_rows[0]["comment"].is_null());
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("/api/repositories/alice/hist/manifests/{manifest_digest}/references"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let references = body_json(response).await;
+    assert_layer_history(&role_rows(&references, "layer"));
+    let reference_config = role_rows(&references, "config");
+    assert_eq!(reference_config.len(), 1, "the config reference is present");
+    assert!(reference_config[0]["created"].is_null());
+    assert!(reference_config[0]["created_by"].is_null());
+    assert!(reference_config[0]["comment"].is_null());
 }

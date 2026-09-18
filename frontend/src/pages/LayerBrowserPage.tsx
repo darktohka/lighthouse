@@ -10,8 +10,12 @@ import {
 import { useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
-import { layers, type LayerTreeMode } from '../api/endpoints'
-import type { LayerChange, LayerTreeEntry } from '../api/schemas'
+import { layers, manifests, type LayerTreeMode } from '../api/endpoints'
+import type {
+  LayerChange,
+  LayerReference,
+  LayerTreeEntry,
+} from '../api/schemas'
 import { CopyButton } from '../components/CopyButton'
 import { PageHeader } from '../components/PageHeader'
 import { TabNav, TabPanel } from '../components/Tabs'
@@ -30,7 +34,13 @@ import {
 } from '../components/primitives/Table'
 import { decodeText, isProbablyBinary } from '../lib/content'
 import { cx } from '../lib/cx'
-import { formatBytes, formatMode, formatModeOctal } from '../lib/format'
+import {
+  formatBytes,
+  formatDateTime,
+  formatMode,
+  formatModeOctal,
+  splitCommandLines,
+} from '../lib/format'
 import { apiUrl, repoRoute } from '../lib/paths'
 import { useAsync } from '../lib/useAsync'
 
@@ -335,6 +345,53 @@ function LayerBreadcrumbs({
   )
 }
 
+function LayerMetadataPanel({ reference }: { reference: LayerReference }) {
+  const created = reference.created
+  const createdByLines =
+    reference.created_by === null ? [] : splitCommandLines(reference.created_by)
+  const comment = reference.comment?.trim() ?? ''
+
+  if (createdByLines.length === 0 && created === null && comment.length === 0) {
+    return null
+  }
+
+  return (
+    <Box className="p-3">
+      <dl className="space-y-3 text-xs">
+        {createdByLines.length > 0 ? (
+          <div>
+            <dt className="text-muted">Created by</dt>
+            <dd className="mt-1">
+              <div className="max-h-[300px] overflow-auto rounded-md border border-border bg-canvas-inset p-3 font-mono text-xs">
+                {createdByLines.map((line, index) => (
+                  <p
+                    key={`${index}:${line}`}
+                    className="whitespace-pre-wrap break-all"
+                  >
+                    {line}
+                  </p>
+                ))}
+              </div>
+            </dd>
+          </div>
+        ) : null}
+        {created !== null ? (
+          <div>
+            <dt className="text-muted">Created</dt>
+            <dd className="mt-0.5">{formatDateTime(created)}</dd>
+          </div>
+        ) : null}
+        {comment.length > 0 ? (
+          <div>
+            <dt className="text-muted">Comment</dt>
+            <dd className="mt-0.5 whitespace-pre-wrap break-all">{comment}</dd>
+          </div>
+        ) : null}
+      </dl>
+    </Box>
+  )
+}
+
 export function LayerBrowserPage({
   namespace,
   repo,
@@ -371,6 +428,19 @@ export function LayerBrowserPage({
     },
     `layer-tree:${namespace}:${repo}:${digest}:${mode}:${manifest ?? ''}:${path}`,
   )
+
+  const referenceState = useAsync(
+    (signal): Promise<LayerReference[]> => {
+      if (manifest === null) return Promise.resolve([])
+      return manifests.references(namespace, repo, manifest, { signal })
+    },
+    `manifest-references:${namespace}:${repo}:${manifest ?? ''}`,
+  )
+
+  const reference =
+    manifest !== null && !referenceState.loading && !referenceState.error
+      ? (referenceState.data?.find((item) => item.digest === digest) ?? null)
+      : null
 
   const changeTab = (id: string) => {
     if (!isLayerTab(id)) return
@@ -646,6 +716,8 @@ export function LayerBrowserPage({
           </AnchorButton>
         }
       />
+
+      {reference ? <LayerMetadataPanel reference={reference} /> : null}
 
       <LayerBreadcrumbs segments={segments} onNavigate={goToPath} />
 

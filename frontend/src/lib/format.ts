@@ -93,6 +93,32 @@ export function formatRelativeTime(value: string): string {
   return value
 }
 
+/**
+ * Splits a shell command line (typically an image config `created_by`) into
+ * readable logical lines.
+ *
+ * A break is inserted *before* each shell control operator — `&&`, `||`, `;`
+ * and the whole-word keywords `then`, `do`, `done`, `else`, `elif`, `fi`,
+ * `esac` — so the operator starts the following line. A bare `|` is
+ * deliberately left alone: buildkit's `RUN |4 ...` heredoc prefix is part of
+ * the command rather than a pipeline separator. CRLF/CR endings are normalized
+ * to LF, each line is trimmed, whitespace following an operator is collapsed to
+ * a single space, empty lines are dropped, and an empty/blank input yields
+ * `[]`.
+ */
+export function splitCommandLines(value: string): string[] {
+  const normalized = value.replace(/\r\n?/g, '\n').trim()
+  if (normalized.length === 0) return []
+  const marked = normalized.replace(
+    /(&&|\|\||;|\b(?:then|do|done|else|elif|fi|esac)\b)[^\S\n]*/g,
+    '\n$1 ',
+  )
+  return marked
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
 /** `sha256:0123456789ab…` — enough to identify a digest without the noise. */
 export function shortDigest(digest: string): string {
   const separator = digest.indexOf(':')

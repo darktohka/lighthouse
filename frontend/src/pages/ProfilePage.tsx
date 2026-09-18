@@ -9,14 +9,12 @@ import { ProfileHeader } from '../components/ProfileHeader'
 import { UserRepositories } from '../components/UserRepositories'
 import { Box, BoxHeader } from '../components/primitives/Box'
 import { ErrorState, LoadingState } from '../components/primitives/StateViews'
-import { useAuth } from '../lib/auth-context'
 import { useAsync } from '../lib/useAsync'
 import { NotFoundPage } from './NotFoundPage'
 
 export function ProfilePage() {
   const params = useParams()
   const username = params.username ?? ''
-  const { user } = useAuth()
   const todayIso = new Date().toISOString().slice(0, 10)
   const [endDate, setEndDate] = useState(todayIso)
   const [reloadToken, setReloadToken] = useState(0)
@@ -58,7 +56,7 @@ export function ProfilePage() {
         <>
           <ProfileHeader
             profile={profile}
-            email={profile.is_self ? user?.email : undefined}
+            avatarHash={profile.avatar_hash}
             onFollowChange={() => setReloadToken((value) => value + 1)}
           />
 

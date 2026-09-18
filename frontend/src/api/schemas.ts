@@ -66,6 +66,8 @@ export const userProfileSchema = v.object({
   location: v.nullable(v.string()),
   website: v.nullable(v.string()),
   avatar_url: v.nullable(v.string()),
+  /** Lowercase hex SHA-256 of the normalized profile e-mail (Libravatar key). */
+  avatar_hash: v.string(),
   created_at: timestampSchema,
   namespace: v.nullable(v.string()),
   repository_count: v.number(),
@@ -242,6 +244,9 @@ export const layerInfoSchema = v.object({
   media_type: v.string(),
   size: v.number(),
   role: layerRoleSchema,
+  created: v.nullable(v.string()),
+  created_by: v.nullable(v.string()),
+  comment: v.nullable(v.string()),
 })
 export type LayerInfo = v.InferOutput<typeof layerInfoSchema>
 
@@ -484,9 +489,12 @@ export type LayerTree = v.InferOutput<typeof layerTreeSchema>
 
 export const layerReferenceSchema = v.object({
   digest: v.string(),
-  media_type: v.string(),
+  media_type: v.nullable(v.string()),
   size: v.number(),
   role: layerRoleSchema,
+  created: v.nullable(v.string()),
+  created_by: v.nullable(v.string()),
+  comment: v.nullable(v.string()),
 })
 export type LayerReference = v.InferOutput<typeof layerReferenceSchema>
 

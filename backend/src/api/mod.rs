@@ -141,6 +141,61 @@ pub struct LayerInfo {
     pub media_type: Option<String>,
     pub size: i64,
     pub role: String,
+    pub created: Option<String>,
+    pub created_by: Option<String>,
+    pub comment: Option<String>,
+}
+
+/// One non-empty entry of an image config's `history` array.
+#[derive(Debug, Clone)]
+pub(crate) struct LayerHistory {
+    pub created: Option<String>,
+    pub created_by: Option<String>,
+    pub comment: Option<String>,
+}
+
+/// Extracts the image config's non-empty `history` entries, in order.
+///
+/// `history` entries with `empty_layer: true` do not correspond to a layer and
+/// are skipped, so the remaining entries map positionally onto the manifest's
+/// layer descriptors. Returns an empty vec when `config` is `None` or carries no
+/// usable `history` array.
+pub(crate) fn layer_history(config: Option<&Value>) -> Vec<LayerHistory> {
+    let Some(entries) = config
+        .and_then(|config| config.get("history"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| entry.get("empty_layer").and_then(Value::as_bool) != Some(true))
+        .map(|entry| LayerHistory {
+            created: string_field(entry, "created"),
+            created_by: string_field(entry, "created_by"),
+            comment: string_field(entry, "comment"),
+        })
+        .collect()
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Attaches the config's `history` to the `layer`-role entries of `layers`, in
+/// order. Config rows keep all three fields `None`; a history shorter than the
+/// layer list leaves the remaining layers `None`.
+pub(crate) fn apply_layer_history(layers: &mut [LayerInfo], config: Option<&Value>) {
+    let history = layer_history(config);
+    for (layer, entry) in layers
+        .iter_mut()
+        .filter(|layer| layer.role == "layer")
+        .zip(history)
+    {
+        layer.created = entry.created;
+        layer.created_by = entry.created_by;
+        layer.comment = entry.comment;
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

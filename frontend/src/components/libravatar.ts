@@ -14,5 +14,13 @@ async function hashEmail(email: string): Promise<string> {
 
 export async function libravatarUrl(email: string, size: number): Promise<string> {
   const hash = await hashEmail(email)
+  return libravatarUrlFromHash(hash, size)
+}
+
+/**
+ * Builds a Libravatar URL from a pre-computed lowercase hex SHA-256 hash,
+ * letting public profile pages render an avatar without the private e-mail.
+ */
+export function libravatarUrlFromHash(hash: string, size: number): string {
   return `${LIBRAVATAR_BASE_URL}/avatar/${hash}?s=${size}&d=retro`
 }

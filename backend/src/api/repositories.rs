@@ -25,9 +25,9 @@ use super::layers;
 use super::permissions as delegations;
 use super::{
     LayerInfo, PageQuery, Pagination, Platform, PlatformDetail, RepositoryDetail,
-    RepositorySummary, TagDetail, TagSizeEntry, TagSummary, is_namespace_owner, load_namespace,
-    namespace_by_id, repository_blob_totals, tag_size_map, user_summary, visible_repository,
-    visible_repository_ids,
+    RepositorySummary, TagDetail, TagSizeEntry, TagSummary, apply_layer_history,
+    is_namespace_owner, load_namespace, namespace_by_id, repository_blob_totals, tag_size_map,
+    user_summary, visible_repository, visible_repository_ids,
 };
 
 // ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ async fn repository_pull_count(state: &AppState, repository_id: i64) -> ApiResul
     Ok(count)
 }
 
-async fn blob_json(state: &AppState, digest: &str) -> Option<Value> {
+pub(crate) async fn blob_json(state: &AppState, digest: &str) -> Option<Value> {
     let digest = Digest::parse(digest).ok()?;
     let mut file = state.storage.open_blob(&digest).await.ok()??;
     use tokio::io::AsyncReadExt;
@@ -533,6 +533,9 @@ async fn config_and_layers(
             media_type,
             size,
             role,
+            created: None,
+            created_by: None,
+            comment: None,
         });
     }
     (config, layers)
@@ -603,7 +606,8 @@ async fn build_tag_detail(
                 manifest_blob_edges(state, child.id).await?,
                 &manifest_layer_rank(&child_manifest),
             );
-            let (child_config, child_layers) = config_and_layers(state, child_edges).await;
+            let (child_config, mut child_layers) = config_and_layers(state, child_edges).await;
+            apply_layer_history(&mut child_layers, child_config.as_ref());
             details.push(PlatformDetail {
                 os: platform.os.clone(),
                 architecture: platform.architecture.clone(),
@@ -621,7 +625,8 @@ async fn build_tag_detail(
         let platform = summary.platforms.first();
         let rank = manifest_layer_rank(&manifest_json);
         let tag_edges = order_edges(manifest_blob_edges(state, manifest.id).await?, &rank);
-        let (tag_config, tag_layers) = config_and_layers(state, tag_edges).await;
+        let (tag_config, mut tag_layers) = config_and_layers(state, tag_edges).await;
+        apply_layer_history(&mut tag_layers, tag_config.as_ref());
         (
             vec![PlatformDetail {
                 os: platform.map(|p| p.os.clone()).unwrap_or_default(),
@@ -653,7 +658,10 @@ async fn build_tag_detail(
     .bind(manifest.id)
     .fetch_all(&state.db)
     .await?;
-    let (config, layers) = config_and_layers(state, order_edges(edges, &combined_rank)).await;
+    let (config, mut layers) = config_and_layers(state, order_edges(edges, &combined_rank)).await;
+    if !media_types::is_index_type(&manifest.media_type) {
+        apply_layer_history(&mut layers, config.as_ref());
+    }
 
     Ok(TagDetail {
         summary,

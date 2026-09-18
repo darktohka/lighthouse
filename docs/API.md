@@ -59,7 +59,7 @@ Errors use the envelope:
 ```
 UserSummary   { id, username, first_name, last_name, avatar_url }
 UserProfile   { id, username, first_name, last_name, bio, company, location,
-                website, avatar_url, created_at, namespace,
+                website, avatar_url, avatar_hash, created_at, namespace,
                 repository_count, public_repository_count, total_pulls,
                 follower_count, following_count, is_following, is_self }
 HeatmapDay    { date, count }
@@ -69,6 +69,9 @@ UpdateProfile { first_name?, last_name?, bio?, company?, location?, website?, th
 
 `avatar_url` is resolved by the frontend from `LIBRAVATAR_BASE_URL` + the
 SHA-256 of the e-mail unless the user supplied an explicit override.
+`avatar_hash` is the lowercase hex SHA-256 of the trimmed, lowercased e-mail and
+is public: it lets unauthenticated visitors and other users render the Libravatar
+for any profile. The e-mail address itself is never returned by `UserProfile`.
 
 The heatmap window is the trailing 52 whole weeks (Sunday -> Saturday) ending
 on the Saturday of `end`'s week; `end` defaults to today.
@@ -134,7 +137,8 @@ TagDetail   { ...TagSummary, manifest: object,
 Platform      { os, architecture, variant|null, digest, size }
 PlatformDetail{ os, architecture, variant|null, digest, media_type, size,
                 manifest: object, config: object|null, layers: LayerInfo[] }
-LayerInfo   { digest, media_type, size, role: "config"|"layer" }
+LayerInfo   { digest, media_type, size, role: "config"|"layer",
+              created: string|null, created_by: string|null, comment: string|null }
 TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
               platforms: Platform[], updated_at }
 ```
@@ -154,6 +158,13 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   order each manifest declares in its own `layers` array, never digest order; the
   combined view concatenates each child manifest's order (platform by platform)
   and deduplicates by digest, with the config blob first.
+- `created`, `created_by` and `comment` come from the image config's `history`
+  array: entries with `empty_layer: true` are skipped and the remaining entries
+  are mapped to the manifest's layers in order (the Nth non-empty entry is the
+  Nth layer). Config-role entries always carry `null`. A missing or shorter
+  history leaves the extra layers `null`; on a multi-platform index the
+  top-level combined `layers` are ambiguous and carry `null` throughout, while
+  each `platform_details` entry still uses its own child config.
 - `unique_size` is the storage owned by the entity — every blob for which its
   earliest referencing tag (by `tags.created_at`) lives here; `shared_size` is
   `size - unique_size`, bytes an earlier tag already owned. Reuse between tags
@@ -190,8 +201,15 @@ LayerTreeEntry { name, path, kind: "file"|"dir"|"symlink", size,
                  mode, link_target, link_resolved, link_kind,
                  change: "new"|"modified"|"removed"|null,
                  source_digest: string|null }
-LayerReference { digest, media_type, size, role }
+LayerReference { digest, media_type, size, role,
+                 created: string|null, created_by: string|null, comment: string|null }
 ```
+
+`references` resolves a manifest's descriptors. For a non-index image the
+`layer`-role references carry the same `created`/`created_by`/`comment` history
+metadata as `LayerInfo`, taken from the image config's `history` array (non-empty
+entries mapped to layers in manifest order); `config` and index `manifest`
+references carry `null`.
 
 `size` is the uncompressed byte count for a file or symlink; for a directory it
 is the recursive total of every file below it, computed once when the layer index

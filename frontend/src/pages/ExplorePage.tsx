@@ -26,7 +26,7 @@ import {
 } from '../components/primitives/StateViews'
 import { VisibilityLabel } from '../components/VisibilityLabel'
 import { formatBytes, formatRelativeTime } from '../lib/format'
-import { repoRoute } from '../lib/paths'
+import { repositoryRelativePath, repoRoute } from '../lib/paths'
 import {
   compareRepositories,
   isRepositorySort,
@@ -249,7 +249,10 @@ export function ExplorePage() {
                   {visibleRepositories.map((item) => (
                     <li key={item.id}>
                       <Link
-                        to={repoRoute(item.namespace, item.name)}
+                        to={repoRoute(
+                          item.namespace,
+                          repositoryRelativePath(item.namespace, item),
+                        )}
                         className="block h-full rounded-md border border-border bg-canvas-default p-3 transition-colors hover:border-accent"
                       >
                         <div className="flex items-center gap-2">

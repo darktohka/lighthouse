@@ -42,6 +42,7 @@ use crate::permissions;
 use crate::state::{AppState, AuthContext};
 use tokio_util::io::ReaderStream;
 
+use super::repositories::blob_json as config_blob_json;
 use super::visible_repository;
 
 /// Maximum size of a single file returned by the `file` endpoint (5 MiB).
@@ -676,6 +677,24 @@ struct LayerReference {
     media_type: Option<String>,
     size: i64,
     role: String,
+    created: Option<String>,
+    created_by: Option<String>,
+    comment: Option<String>,
+}
+
+/// Attaches the config's `history` to the `layer`-role references, in order.
+/// Config and manifest references keep all three fields `None`.
+fn attach_layer_history(references: &mut [LayerReference], config: Option<&Value>) {
+    let history = super::layer_history(config);
+    for (reference, entry) in references
+        .iter_mut()
+        .filter(|reference| reference.role == "layer")
+        .zip(history)
+    {
+        reference.created = entry.created;
+        reference.created_by = entry.created_by;
+        reference.comment = entry.comment;
+    }
 }
 
 async fn resolve_manifest(
@@ -756,6 +775,9 @@ pub async fn manifest_references(
                             .map(str::to_string),
                         size: entry.get("size").and_then(Value::as_u64).unwrap_or(0) as i64,
                         role: "manifest".to_string(),
+                        created: None,
+                        created_by: None,
+                        comment: None,
                     });
                 }
             }
@@ -774,6 +796,9 @@ pub async fn manifest_references(
                     media_type,
                     size,
                     role: "manifest".to_string(),
+                    created: None,
+                    created_by: None,
+                    comment: None,
                 });
             }
         }
@@ -791,6 +816,9 @@ pub async fn manifest_references(
                                     .map(str::to_string),
                                 size: entry.get("size").and_then(Value::as_u64).unwrap_or(0) as i64,
                                 role: role.to_string(),
+                                created: None,
+                                created_by: None,
+                                comment: None,
                             });
                         }
                     }
@@ -805,12 +833,24 @@ pub async fn manifest_references(
                                 .map(str::to_string),
                             size: entry.get("size").and_then(Value::as_u64).unwrap_or(0) as i64,
                             role: "config".to_string(),
+                            created: None,
+                            created_by: None,
+                            comment: None,
                         });
                     }
                 }
                 _ => {}
             }
         }
+        let history_config = match value
+            .get("config")
+            .and_then(|config| config.get("digest"))
+            .and_then(Value::as_str)
+        {
+            Some(digest) => config_blob_json(&state, digest).await,
+            None => None,
+        };
+        attach_layer_history(&mut references, history_config.as_ref());
     } else {
         let rows = sqlx::query_as::<_, (String, Option<String>, i64, String)>(
             "SELECT b.digest, b.media_type, b.size, mb.role FROM manifest_blobs mb \
@@ -825,6 +865,9 @@ pub async fn manifest_references(
                 media_type,
                 size,
                 role,
+                created: None,
+                created_by: None,
+                comment: None,
             });
         }
     }

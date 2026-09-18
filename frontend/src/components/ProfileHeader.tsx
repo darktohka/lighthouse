@@ -17,7 +17,7 @@ import { Flash } from './primitives/Flash'
 
 export type ProfileHeaderProps = {
   profile: UserProfile
-  email?: string | null
+  avatarHash?: string | null
   onFollowChange: () => void
 }
 
@@ -25,7 +25,7 @@ function websiteHref(website: string): string {
   return /^https?:\/\//.test(website) ? website : `https://${website}`
 }
 
-export function ProfileHeader({ profile, email, onFollowChange }: ProfileHeaderProps) {
+export function ProfileHeader({ profile, avatarHash, onFollowChange }: ProfileHeaderProps) {
   const { user } = useAuth()
   const [optimistic, setOptimistic] = useState<{
     base: UserProfile
@@ -83,7 +83,7 @@ export function ProfileHeader({ profile, email, onFollowChange }: ProfileHeaderP
       <div className="flex flex-wrap items-start gap-4">
         <LibravatarAvatar
           src={profile.avatar_url}
-          email={email}
+          hash={avatarHash}
           name={displayName}
           size={96}
         />

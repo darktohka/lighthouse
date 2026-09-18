@@ -148,6 +148,37 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
         render: (layer) => formatBytes(layer.size),
       },
       {
+        key: 'created',
+        header: 'Created',
+        render: (layer) =>
+          layer.created !== null ? (
+            <span
+              className="whitespace-nowrap text-xs text-muted"
+              title={layer.created}
+            >
+              {formatDateTime(layer.created)}
+            </span>
+          ) : (
+            <span className="text-muted">—</span>
+          ),
+      },
+      {
+        key: 'comment',
+        header: 'Comment',
+        render: (layer) => {
+          const comment = layer.comment?.trim() ?? ''
+          if (comment.length === 0) return <span className="text-muted">—</span>
+          return (
+            <span
+              className="block max-w-[20rem] truncate"
+              title={layer.comment ?? undefined}
+            >
+              {comment}
+            </span>
+          )
+        },
+      },
+      {
         key: 'actions',
         header: <span className="sr-only">Actions</span>,
         align: 'right',

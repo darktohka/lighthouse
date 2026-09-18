@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react'
 
-import { libravatarUrl } from './libravatar'
+import { libravatarUrl, libravatarUrlFromHash } from './libravatar'
 import { type AvatarProps, Avatar } from './primitives/Avatar'
 
 export type LibravatarAvatarProps = Omit<AvatarProps, 'src'> & {
   src?: string | null
+  hash?: string | null
   email?: string | null
 }
 
 export function LibravatarAvatar({
   src,
+  hash,
   email,
   name,
   size = 20,
@@ -20,7 +22,7 @@ export function LibravatarAvatar({
   )
 
   useEffect(() => {
-    if (src || !email) return
+    if (src || hash || !email) return
     let active = true
     void libravatarUrl(email, Math.max(40, size * 2)).then(
       (url) => {
@@ -31,10 +33,12 @@ export function LibravatarAvatar({
     return () => {
       active = false
     }
-  }, [src, email, size])
+  }, [src, hash, email, size])
 
   const resolved =
-    src ?? (email && derived && derived.email === email ? derived.url : null)
+    src ??
+    (hash ? libravatarUrlFromHash(hash, Math.max(40, size * 2)) : null) ??
+    (email && derived && derived.email === email ? derived.url : null)
 
   return <Avatar src={resolved} name={name} size={size} className={className} />
 }
