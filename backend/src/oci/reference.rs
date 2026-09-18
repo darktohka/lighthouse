@@ -87,9 +87,9 @@ fn is_valid_path_component(component: &str) -> bool {
     if !is_lower_alphanumeric(first) || !is_lower_alphanumeric(last) {
         return false;
     }
-    bytes.iter().all(|b| {
-        is_lower_alphanumeric(*b) || matches!(b, b'.' | b'_' | b'-')
-    })
+    bytes
+        .iter()
+        .all(|b| is_lower_alphanumeric(*b) || matches!(b, b'.' | b'_' | b'-'))
 }
 
 fn is_lower_alphanumeric(byte: u8) -> bool {
@@ -103,7 +103,9 @@ mod tests {
     #[test]
     fn accepts_simple_and_nested_names() {
         assert!(validate_repository_name("library/ubuntu"));
-        assert!(validate_repository_name("darktohka/more/complicated/project2"));
+        assert!(validate_repository_name(
+            "darktohka/more/complicated/project2"
+        ));
         assert!(validate_repository_name("a/b_c/d__e/f-g"));
         assert!(validate_repository_name("registry"));
         assert!(validate_repository_name("team.api/sub_name"));

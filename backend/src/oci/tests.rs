@@ -432,9 +432,7 @@ async fn cross_repository_blob_mount() {
     let mount = send(
         &app,
         Method::POST,
-        &format!(
-            "/v2/darktohka/target/blobs/uploads/?mount={digest}&from=darktohka/source"
-        ),
+        &format!("/v2/darktohka/target/blobs/uploads/?mount={digest}&from=darktohka/source"),
         Some(USER),
         &[],
         &[],
@@ -458,9 +456,7 @@ async fn cross_repository_blob_mount() {
     let fallback = send(
         &app,
         Method::POST,
-        &format!(
-            "/v2/darktohka/target/blobs/uploads/?mount={unknown}&from=darktohka/source"
-        ),
+        &format!("/v2/darktohka/target/blobs/uploads/?mount={unknown}&from=darktohka/source"),
         Some(USER),
         &[],
         &[],
@@ -502,7 +498,14 @@ async fn oci_manifest_push_and_fetch() {
     let config_digest = push_blob(&app, "darktohka/site", &config).await;
     let layer_digest = push_blob(&app, "darktohka/site", &layer).await;
     let body = oci_manifest(&config_digest, config.len(), &layer_digest, layer.len());
-    let digest = push_manifest(&app, "darktohka/site", "latest", media_types::OCI_IMAGE_MANIFEST, &body).await;
+    let digest = push_manifest(
+        &app,
+        "darktohka/site",
+        "latest",
+        media_types::OCI_IMAGE_MANIFEST,
+        &body,
+    )
+    .await;
 
     let get = send(
         &app,
@@ -514,7 +517,10 @@ async fn oci_manifest_push_and_fetch() {
     )
     .await;
     assert_eq!(get.status(), StatusCode::OK);
-    assert_eq!(header_str(&get, "content-type"), media_types::OCI_IMAGE_MANIFEST);
+    assert_eq!(
+        header_str(&get, "content-type"),
+        media_types::OCI_IMAGE_MANIFEST
+    );
     assert_eq!(header_str(&get, "content-length"), body.len().to_string());
     assert_eq!(header_str(&get, "docker-content-digest"), digest);
     assert_eq!(header_str(&get, "etag"), format!("\"{digest}\""));
@@ -598,7 +604,10 @@ async fn manifest_referencing_missing_blob_is_rejected() {
     assert_eq!(json["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
 }
 
-async fn restricted_service_account(state: &AppState, owner: &crate::models::User) -> (i64, String) {
+async fn restricted_service_account(
+    state: &AppState,
+    owner: &crate::models::User,
+) -> (i64, String) {
     let (account, token) = crate::auth::service_accounts::create(
         state,
         crate::auth::service_accounts::NewServiceAccount {
@@ -972,7 +981,11 @@ mod auth_flow {
         let response = send(&app, Method::GET, "/v2/", None, &[], &[]).await;
         assert!(header_str(&response, "www-authenticate").starts_with("Bearer "));
         assert_eq!(
-            response.headers().get_all("www-authenticate").iter().count(),
+            response
+                .headers()
+                .get_all("www-authenticate")
+                .iter()
+                .count(),
             1
         );
     }
@@ -1075,11 +1088,12 @@ mod auth_flow {
     #[tokio::test]
     async fn app_password_authenticates_basic_and_bypasses_totp() {
         let (_dir, state, app) = harness().await;
-        let alice: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
-            .bind(USER)
-            .fetch_one(&state.db)
-            .await
-            .expect("user");
+        let alice: i64 =
+            sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
+                .bind(USER)
+                .fetch_one(&state.db)
+                .await
+                .expect("user");
         enable_totp(&state, alice).await;
 
         let rejected = send(&app, Method::GET, "/v2/", Some(USER), &[], &[]).await;
@@ -1108,11 +1122,12 @@ mod auth_flow {
     #[tokio::test]
     async fn registry_tokens_cannot_authenticate_web_endpoints() {
         let (_dir, state, app) = harness().await;
-        let alice: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
-            .bind(USER)
-            .fetch_one(&state.db)
-            .await
-            .expect("user");
+        let alice: i64 =
+            sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
+                .bind(USER)
+                .fetch_one(&state.db)
+                .await
+                .expect("user");
         let (_, secret) = crate::auth::app_passwords::create(&state, alice, "ci")
             .await
             .expect("app password");
@@ -1200,7 +1215,14 @@ async fn manifest_delete_by_tag_and_digest() {
     let config_digest = push_blob(&app, "darktohka/site", &config).await;
     let layer_digest = push_blob(&app, "darktohka/site", &layer).await;
     let body = oci_manifest(&config_digest, config.len(), &layer_digest, layer.len());
-    let digest = push_manifest(&app, "darktohka/site", "v1", media_types::OCI_IMAGE_MANIFEST, &body).await;
+    let digest = push_manifest(
+        &app,
+        "darktohka/site",
+        "v1",
+        media_types::OCI_IMAGE_MANIFEST,
+        &body,
+    )
+    .await;
 
     let delete_tag = send(
         &app,
@@ -1276,7 +1298,14 @@ async fn multi_arch_index_round_trips() {
     })
     .to_string()
     .into_bytes();
-    push_manifest(&app, "darktohka/site", "multi", media_types::OCI_IMAGE_INDEX, &index).await;
+    push_manifest(
+        &app,
+        "darktohka/site",
+        "multi",
+        media_types::OCI_IMAGE_INDEX,
+        &index,
+    )
+    .await;
 
     let get = send(
         &app,
@@ -1288,7 +1317,10 @@ async fn multi_arch_index_round_trips() {
     )
     .await;
     assert_eq!(get.status(), StatusCode::OK);
-    assert_eq!(header_str(&get, "content-type"), media_types::OCI_IMAGE_INDEX);
+    assert_eq!(
+        header_str(&get, "content-type"),
+        media_types::OCI_IMAGE_INDEX
+    );
     assert_eq!(body_bytes(get).await, index);
 
     for (digest, _, _) in &children {
@@ -1407,7 +1439,14 @@ async fn tags_list_is_sorted_and_paginated() {
     let layer_digest = push_blob(&app, "darktohka/site", &layer).await;
     let body = oci_manifest(&config_digest, config.len(), &layer_digest, layer.len());
     for tag in ["alpha", "beta", "gamma"] {
-        push_manifest(&app, "darktohka/site", tag, media_types::OCI_IMAGE_MANIFEST, &body).await;
+        push_manifest(
+            &app,
+            "darktohka/site",
+            tag,
+            media_types::OCI_IMAGE_MANIFEST,
+            &body,
+        )
+        .await;
     }
 
     let all = send(
@@ -1638,7 +1677,10 @@ async fn nested_repository_names_route_correctly() {
     )
     .await;
     assert_eq!(get_manifest.status(), StatusCode::OK);
-    assert_eq!(header_str(&get_manifest, "docker-content-digest"), manifest_digest);
+    assert_eq!(
+        header_str(&get_manifest, "docker-content-digest"),
+        manifest_digest
+    );
 
     let tags = send(
         &app,
@@ -1670,12 +1712,11 @@ async fn pulls_and_pushes_are_audited() {
     )
     .await;
 
-    let events: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM registry_events WHERE action = 'blob.pull'",
-    )
-    .fetch_one(&state.db)
-    .await
-    .expect("registry events");
+    let events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM registry_events WHERE action = 'blob.pull'")
+            .fetch_one(&state.db)
+            .await
+            .expect("registry events");
     assert!(events >= 1);
 
     let pulls: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pull_events")
@@ -1690,12 +1731,11 @@ async fn pulls_and_pushes_are_audited() {
         .expect("pull stats");
     assert!(stats >= 1);
 
-    let pushes: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM registry_events WHERE action = 'blob.push'",
-    )
-    .fetch_one(&state.db)
-    .await
-    .expect("push events");
+    let pushes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM registry_events WHERE action = 'blob.push'")
+            .fetch_one(&state.db)
+            .await
+            .expect("push events");
     assert!(pushes >= 1);
 }
 

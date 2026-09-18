@@ -210,9 +210,8 @@ mod tests {
 
     #[test]
     fn parses_accept_preserving_order_and_stripping_parameters() {
-        let parsed = parse_accept(
-            "application/vnd.oci.image.manifest.v1+json;q=0.9, application/json, */*",
-        );
+        let parsed =
+            parse_accept("application/vnd.oci.image.manifest.v1+json;q=0.9, application/json, */*");
         assert_eq!(
             parsed,
             vec![
@@ -239,7 +238,10 @@ mod tests {
     #[test]
     fn negotiate_wildcards_accept_everything() {
         assert!(negotiate(OCI_IMAGE_INDEX, &["*/*".to_string()]));
-        assert!(negotiate(OCI_IMAGE_MANIFEST, &["application/*".to_string()]));
+        assert!(negotiate(
+            OCI_IMAGE_MANIFEST,
+            &["application/*".to_string()]
+        ));
         assert!(!negotiate(OCI_EMPTY, &["text/*".to_string()]));
     }
 

@@ -52,9 +52,8 @@ pub async fn get(
         match default_child(state, repository.id, manifest.id).await? {
             Some(child) => child,
             None => {
-                return Err(RegistryError::manifest_unknown(reference_raw).with_detail(
-                    serde_json::json!({ "reason": "no acceptable child manifest" }),
-                ));
+                return Err(RegistryError::manifest_unknown(reference_raw)
+                    .with_detail(serde_json::json!({ "reason": "no acceptable child manifest" })));
             }
         }
     } else {
@@ -92,9 +91,7 @@ pub async fn get(
     {
         let matches = value.split(',').any(|candidate| {
             let candidate = candidate.trim();
-            candidate == "*"
-                || candidate == etag
-                || candidate.trim_start_matches("W/") == etag
+            candidate == "*" || candidate == etag || candidate.trim_start_matches("W/") == etag
         });
         if matches {
             let mut response = super::respond(StatusCode::NOT_MODIFIED, Body::empty());
@@ -200,7 +197,11 @@ pub async fn put(
     .await;
 
     let mut response = super::respond(StatusCode::CREATED, Body::empty());
-    response = super::set_header(response, "location", format!("/v2/{name}/manifests/{digest_text}"));
+    response = super::set_header(
+        response,
+        "location",
+        format!("/v2/{name}/manifests/{digest_text}"),
+    );
     response = super::set_header(response, "docker-content-digest", &digest_text);
     response = super::set_header(response, "content-length", "0");
     Ok(response)
@@ -220,7 +221,11 @@ pub async fn delete(
     if reference::is_digest_reference(reference_raw) {
         let digest = Digest::parse(reference_raw)
             .map_err(|_| RegistryError::manifest_unknown(reference_raw))?;
-        if !state.registry.delete_manifest(repository.id, &digest).await? {
+        if !state
+            .registry
+            .delete_manifest(repository.id, &digest)
+            .await?
+        {
             return Err(RegistryError::manifest_unknown(reference_raw));
         }
         super::log_activity(
@@ -248,7 +253,11 @@ pub async fn delete(
         if !reference::validate_tag(reference_raw) {
             return Err(RegistryError::manifest_unknown(reference_raw));
         }
-        if !state.registry.delete_tag(repository.id, reference_raw).await? {
+        if !state
+            .registry
+            .delete_tag(repository.id, reference_raw)
+            .await?
+        {
             return Err(RegistryError::manifest_unknown(reference_raw));
         }
         super::log_activity(
@@ -289,7 +298,11 @@ async fn resolve_reference(
     if !reference::validate_tag(reference_raw) {
         return Err(RegistryError::manifest_unknown(reference_raw));
     }
-    match state.registry.resolve_tag(repository_id, reference_raw).await? {
+    match state
+        .registry
+        .resolve_tag(repository_id, reference_raw)
+        .await?
+    {
         Some(digest) => Ok(digest),
         None => Err(RegistryError::manifest_unknown(reference_raw)),
     }

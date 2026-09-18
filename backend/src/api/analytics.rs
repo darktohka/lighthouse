@@ -156,11 +156,10 @@ async fn overview(
         manifest_ids.extend(ids);
     }
 
-    let pull_rows = sqlx::query_as::<_, (i64, String, i64)>(
-        "SELECT repository_id, day, pulls FROM pull_stats",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let pull_rows =
+        sqlx::query_as::<_, (i64, String, i64)>("SELECT repository_id, day, pulls FROM pull_stats")
+            .fetch_all(&state.db)
+            .await?;
     let pull_count: i64 = pull_rows
         .iter()
         .filter(|(repository_id, _, _)| scope_ids.contains(repository_id))
@@ -193,12 +192,10 @@ async fn overview(
     let mut top_repositories: Vec<TopRepository> = by_repo
         .into_iter()
         .filter_map(|(repository_id, pulls)| {
-            name_by_id
-                .get(&repository_id)
-                .map(|name| TopRepository {
-                    repository: name.clone(),
-                    pulls,
-                })
+            name_by_id.get(&repository_id).map(|name| TopRepository {
+                repository: name.clone(),
+                pulls,
+            })
         })
         .collect();
     top_repositories.sort_by(|a, b| b.pulls.cmp(&a.pulls).then(a.repository.cmp(&b.repository)));
@@ -218,7 +215,8 @@ async fn overview(
             }
         })
         .collect();
-    disk_usage_by_repository.sort_by(|a, b| b.size.cmp(&a.size).then(a.repository.cmp(&b.repository)));
+    disk_usage_by_repository
+        .sort_by(|a, b| b.size.cmp(&a.size).then(a.repository.cmp(&b.repository)));
 
     let tag_join = sqlx::query_as::<_, TagJoinRow>(
         "SELECT t.id AS tag_id, t.name AS tag_name, t.updated_at AS tag_updated_at, \
@@ -246,7 +244,11 @@ async fn overview(
             LargestTag { row, total, unique }
         })
         .collect();
-    largest.sort_by(|a, b| b.total.cmp(&a.total).then(a.row.repository_name.cmp(&b.row.repository_name)));
+    largest.sort_by(|a, b| {
+        b.total
+            .cmp(&a.total)
+            .then(a.row.repository_name.cmp(&b.row.repository_name))
+    });
     largest.truncate(10);
 
     let mut largest_tags = Vec::with_capacity(largest.len());

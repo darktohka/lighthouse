@@ -12,8 +12,8 @@ use crate::db::{self, Db};
 use crate::error::{RegistryError, RegistryResult};
 use crate::models::Upload;
 use crate::oci::digest::Digest;
-use crate::storage::registry::Registry;
 use crate::storage::Storage;
+use crate::storage::registry::Registry;
 
 pub struct Uploads {
     db: Db,
@@ -126,7 +126,9 @@ impl Uploads {
             .map_err(storage_error)?;
 
         self.registry.register_blob(digest, size, None).await?;
-        self.registry.link_blob(upload.repository_id, digest).await?;
+        self.registry
+            .link_blob(upload.repository_id, digest)
+            .await?;
         self.delete_session(uuid).await?;
         Ok(size)
     }
@@ -143,10 +145,11 @@ impl Uploads {
     /// Cancels upload sessions whose `updated_at` is older than `ttl_secs`.
     pub async fn cleanup_stale(&self, ttl_secs: i64) -> RegistryResult<usize> {
         let cutoff = Utc::now() - Duration::seconds(ttl_secs);
-        let stale: Vec<String> = sqlx::query_scalar("SELECT uuid FROM uploads WHERE updated_at < ?")
-            .bind(cutoff)
-            .fetch_all(&self.db)
-            .await?;
+        let stale: Vec<String> =
+            sqlx::query_scalar("SELECT uuid FROM uploads WHERE updated_at < ?")
+                .bind(cutoff)
+                .fetch_all(&self.db)
+                .await?;
 
         let mut removed = 0;
         for uuid in stale {
@@ -209,7 +212,13 @@ mod tests {
         let (_dir, uploads, repo_id) = harness().await;
         let upload = uploads.create(repo_id, None).await.expect("create");
         assert_eq!(upload.offset, 0);
-        assert!(uploads.status(&upload.uuid).await.expect("status").is_some());
+        assert!(
+            uploads
+                .status(&upload.uuid)
+                .await
+                .expect("status")
+                .is_some()
+        );
 
         let content = b"distributed upload payload".to_vec();
         let digest = Digest::from_bytes(&content);
@@ -230,7 +239,13 @@ mod tests {
             .await
             .expect("complete");
         assert_eq!(completed, content.len() as u64);
-        assert!(uploads.status(&upload.uuid).await.expect("status").is_none());
+        assert!(
+            uploads
+                .status(&upload.uuid)
+                .await
+                .expect("status")
+                .is_none()
+        );
         assert_eq!(
             uploads
                 .registry
@@ -240,11 +255,13 @@ mod tests {
                 .map(|blob| blob.size),
             Some(content.len() as i64)
         );
-        assert!(uploads
-            .registry
-            .blob_in_repository(repo_id, &digest)
-            .await
-            .expect("linked"));
+        assert!(
+            uploads
+                .registry
+                .blob_in_repository(repo_id, &digest)
+                .await
+                .expect("linked")
+        );
     }
 
     #[tokio::test]
@@ -258,20 +275,31 @@ mod tests {
 
         let wrong = Digest::from_bytes(b"expected bytes");
         assert!(uploads.complete(&upload.uuid, &wrong).await.is_err());
-        assert!(uploads
-            .registry
-            .blob_stat(&wrong)
-            .await
-            .expect("blob")
-            .is_none());
-        assert!(uploads.status(&upload.uuid).await.expect("status").is_some());
+        assert!(
+            uploads
+                .registry
+                .blob_stat(&wrong)
+                .await
+                .expect("blob")
+                .is_none()
+        );
+        assert!(
+            uploads
+                .status(&upload.uuid)
+                .await
+                .expect("status")
+                .is_some()
+        );
     }
 
     #[tokio::test]
     async fn append_requires_contiguous_offsets() {
         let (_dir, uploads, repo_id) = harness().await;
         let upload = uploads.create(repo_id, None).await.expect("create");
-        uploads.append(&upload.uuid, 0, b"abc").await.expect("append");
+        uploads
+            .append(&upload.uuid, 0, b"abc")
+            .await
+            .expect("append");
         assert!(uploads.append(&upload.uuid, 9, b"def").await.is_err());
     }
 
@@ -279,7 +307,10 @@ mod tests {
     async fn cancel_removes_session_and_files() {
         let (_dir, uploads, repo_id) = harness().await;
         let upload = uploads.create(repo_id, None).await.expect("create");
-        uploads.append(&upload.uuid, 0, b"abc").await.expect("append");
+        uploads
+            .append(&upload.uuid, 0, b"abc")
+            .await
+            .expect("append");
         let data_path = uploads
             .storage
             .upload_data_path(&upload.uuid)
@@ -287,7 +318,13 @@ mod tests {
         assert!(data_path.exists());
 
         uploads.cancel(&upload.uuid).await.expect("cancel");
-        assert!(uploads.status(&upload.uuid).await.expect("status").is_none());
+        assert!(
+            uploads
+                .status(&upload.uuid)
+                .await
+                .expect("status")
+                .is_none()
+        );
         assert!(!data_path.exists());
     }
 

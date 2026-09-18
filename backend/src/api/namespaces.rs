@@ -18,8 +18,8 @@ use crate::permissions;
 use crate::state::{AppState, AuthContext};
 
 use super::{
-    NamespaceMemberView, NamespaceView, PageQuery, Pagination, is_namespace_owner,
-    load_namespace, namespace_visible, user_summary,
+    NamespaceMemberView, NamespaceView, PageQuery, Pagination, is_namespace_owner, load_namespace,
+    namespace_visible, user_summary,
 };
 
 #[derive(Debug, Deserialize)]
@@ -577,7 +577,11 @@ async fn repositories_in_namespace(
             "size" => a.size.cmp(&b.size),
             _ => a.updated_at.cmp(&b.updated_at),
         };
-        let primary = if ascending { primary } else { primary.reverse() };
+        let primary = if ascending {
+            primary
+        } else {
+            primary.reverse()
+        };
         primary.then_with(|| a.path.cmp(&b.path))
     });
 

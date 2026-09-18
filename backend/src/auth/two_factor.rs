@@ -210,7 +210,9 @@ pub async fn verify_setup(
     now: DateTime<Utc>,
 ) -> ApiResult<()> {
     if is_enabled(&state.db, user_id).await? {
-        return Err(ApiError::conflict("two-factor authentication is already enabled"));
+        return Err(ApiError::conflict(
+            "two-factor authentication is already enabled",
+        ));
     }
     let Some(secret) = load_secret(&state.db, user_id).await? else {
         return Err(ApiError::bad_request("start two-factor setup first"));
@@ -240,7 +242,9 @@ pub async fn confirm_enable(
     now: DateTime<Utc>,
 ) -> ApiResult<()> {
     if is_enabled(&state.db, user_id).await? {
-        return Err(ApiError::conflict("two-factor authentication is already enabled"));
+        return Err(ApiError::conflict(
+            "two-factor authentication is already enabled",
+        ));
     }
     if load_secret(&state.db, user_id).await?.is_none() {
         return Err(ApiError::bad_request("start two-factor setup first"));
@@ -252,7 +256,9 @@ pub async fn confirm_enable(
             .await?
             .flatten();
     if verified.is_none() {
-        return Err(ApiError::bad_request("verify the authentication code first"));
+        return Err(ApiError::bad_request(
+            "verify the authentication code first",
+        ));
     }
 
     let updated = sqlx::query(
@@ -265,7 +271,9 @@ pub async fn confirm_enable(
     .execute(&state.db)
     .await?;
     if updated.rows_affected() == 0 {
-        return Err(ApiError::conflict("two-factor authentication is already enabled"));
+        return Err(ApiError::conflict(
+            "two-factor authentication is already enabled",
+        ));
     }
 
     sessions::revoke_all_except(state, user_id, keep_session).await?;
@@ -324,10 +332,14 @@ pub async fn regenerate_backup_codes(
     now: DateTime<Utc>,
 ) -> ApiResult<Vec<String>> {
     if !is_enabled(&state.db, user_id).await? {
-        return Err(ApiError::bad_request("two-factor authentication is not enabled"));
+        return Err(ApiError::bad_request(
+            "two-factor authentication is not enabled",
+        ));
     }
     let Some(secret) = load_secret(&state.db, user_id).await? else {
-        return Err(ApiError::bad_request("two-factor authentication is not enabled"));
+        return Err(ApiError::bad_request(
+            "two-factor authentication is not enabled",
+        ));
     };
     if !verify_totp_code(state, user_id, &secret, code, now).await? {
         return Err(ApiError::bad_request("invalid authentication code"));
@@ -366,7 +378,10 @@ mod tests {
     }
 
     async fn code_at(state: &AppState, user_id: i64, at: DateTime<Utc>) -> String {
-        let secret = load_secret(&state.db, user_id).await.expect("secret").expect("set");
+        let secret = load_secret(&state.db, user_id)
+            .await
+            .expect("secret")
+            .expect("set");
         let bytes = totp::base32_decode(&secret).expect("decode");
         totp::format_code(totp::totp(&bytes, at.timestamp()))
     }
@@ -385,14 +400,24 @@ mod tests {
         let user = create_user(&state, "alice").await;
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
 
-        let setup = begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        let setup = begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
         assert_eq!(setup.backup_codes.len(), 8);
-        assert!(setup.otpauth_uri.starts_with("otpauth://totp/Lighthouse:alice?"));
+        assert!(
+            setup
+                .otpauth_uri
+                .starts_with("otpauth://totp/Lighthouse:alice?")
+        );
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
 
         let code = current_code(&state, user.id).await;
-        verify_setup(&state, user.id, &code, Utc::now()).await.expect("verify");
-        confirm_enable(&state, user.id, None, Utc::now()).await.expect("enable");
+        verify_setup(&state, user.id, &code, Utc::now())
+            .await
+            .expect("verify");
+        confirm_enable(&state, user.id, None, Utc::now())
+            .await
+            .expect("enable");
         assert!(is_enabled(&state.db, user.id).await.expect("enabled"));
 
         let status = status(&state.db, user.id).await.expect("status");
@@ -404,14 +429,28 @@ mod tests {
     async fn enable_rejects_bad_code_and_double_enable() {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
 
-        assert!(verify_setup(&state, user.id, "000000", Utc::now()).await.is_err());
+        assert!(
+            verify_setup(&state, user.id, "000000", Utc::now())
+                .await
+                .is_err()
+        );
         assert!(verified_at(&state, user.id).await.is_none());
         let code = current_code(&state, user.id).await;
-        verify_setup(&state, user.id, &code, Utc::now()).await.expect("verify");
-        confirm_enable(&state, user.id, None, Utc::now()).await.expect("enable");
-        assert!(confirm_enable(&state, user.id, None, Utc::now()).await.is_err());
+        verify_setup(&state, user.id, &code, Utc::now())
+            .await
+            .expect("verify");
+        confirm_enable(&state, user.id, None, Utc::now())
+            .await
+            .expect("enable");
+        assert!(
+            confirm_enable(&state, user.id, None, Utc::now())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -419,10 +458,16 @@ mod tests {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
         let now = Utc::now();
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
         let enable_code = code_at(&state, user.id, now).await;
-        verify_setup(&state, user.id, &enable_code, now).await.expect("verify");
-        confirm_enable(&state, user.id, None, now).await.expect("enable");
+        verify_setup(&state, user.id, &enable_code, now)
+            .await
+            .expect("verify");
+        confirm_enable(&state, user.id, None, now)
+            .await
+            .expect("enable");
 
         let later = now + Duration::seconds(totp::PERIOD as i64);
         let login_code = code_at(&state, user.id, later).await;
@@ -444,14 +489,28 @@ mod tests {
     async fn backup_codes_are_single_use() {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
-        let setup = begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        let setup = begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
         let code = current_code(&state, user.id).await;
-        verify_setup(&state, user.id, &code, Utc::now()).await.expect("verify");
-        confirm_enable(&state, user.id, None, Utc::now()).await.expect("enable");
+        verify_setup(&state, user.id, &code, Utc::now())
+            .await
+            .expect("verify");
+        confirm_enable(&state, user.id, None, Utc::now())
+            .await
+            .expect("enable");
 
         let backup = &setup.backup_codes[0];
-        assert!(verify_login_code(&state, user.id, backup, Utc::now()).await.expect("verify"));
-        assert!(!verify_login_code(&state, user.id, backup, Utc::now()).await.expect("verify"));
+        assert!(
+            verify_login_code(&state, user.id, backup, Utc::now())
+                .await
+                .expect("verify")
+        );
+        assert!(
+            !verify_login_code(&state, user.id, backup, Utc::now())
+                .await
+                .expect("verify")
+        );
         let status = status(&state.db, user.id).await.expect("status");
         assert_eq!(status.backup_codes_remaining, 7);
     }
@@ -461,10 +520,16 @@ mod tests {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
         let now = Utc::now();
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
         let enable_code = code_at(&state, user.id, now).await;
-        verify_setup(&state, user.id, &enable_code, now).await.expect("verify");
-        confirm_enable(&state, user.id, None, now).await.expect("enable");
+        verify_setup(&state, user.id, &enable_code, now)
+            .await
+            .expect("verify");
+        confirm_enable(&state, user.id, None, now)
+            .await
+            .expect("enable");
 
         let fresh = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
             .bind(user.id)
@@ -492,8 +557,19 @@ mod tests {
         .expect("disable");
 
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
-        assert!(load_secret(&state.db, user.id).await.expect("secret").is_none());
-        assert_eq!(status(&state.db, user.id).await.expect("status").backup_codes_remaining, 0);
+        assert!(
+            load_secret(&state.db, user.id)
+                .await
+                .expect("secret")
+                .is_none()
+        );
+        assert_eq!(
+            status(&state.db, user.id)
+                .await
+                .expect("status")
+                .backup_codes_remaining,
+            0
+        );
     }
 
     #[tokio::test]
@@ -501,10 +577,14 @@ mod tests {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
         let now = Utc::now();
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
         let code = code_at(&state, user.id, now).await;
 
-        verify_setup(&state, user.id, &code, now).await.expect("verify");
+        verify_setup(&state, user.id, &code, now)
+            .await
+            .expect("verify");
 
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
         assert!(verified_at(&state, user.id).await.is_some());
@@ -514,9 +594,15 @@ mod tests {
     async fn confirm_enable_before_verify_is_rejected() {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
 
-        assert!(confirm_enable(&state, user.id, None, Utc::now()).await.is_err());
+        assert!(
+            confirm_enable(&state, user.id, None, Utc::now())
+                .await
+                .is_err()
+        );
         assert!(!is_enabled(&state.db, user.id).await.expect("enabled"));
         assert!(verified_at(&state, user.id).await.is_none());
     }
@@ -525,9 +611,15 @@ mod tests {
     async fn verify_setup_rejects_bad_code_and_leaves_unverified() {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
 
-        assert!(verify_setup(&state, user.id, "000000", Utc::now()).await.is_err());
+        assert!(
+            verify_setup(&state, user.id, "000000", Utc::now())
+                .await
+                .is_err()
+        );
         assert!(verified_at(&state, user.id).await.is_none());
     }
 
@@ -536,11 +628,17 @@ mod tests {
         let (_dir, state) = test_state().await;
         let user = create_user(&state, "alice").await;
         let now = Utc::now();
-        begin_setup(&state, user.id, "Lighthouse").await.expect("setup");
+        begin_setup(&state, user.id, "Lighthouse")
+            .await
+            .expect("setup");
         let code = code_at(&state, user.id, now).await;
-        verify_setup(&state, user.id, &code, now).await.expect("verify");
+        verify_setup(&state, user.id, &code, now)
+            .await
+            .expect("verify");
 
-        confirm_enable(&state, user.id, None, now).await.expect("enable");
+        confirm_enable(&state, user.id, None, now)
+            .await
+            .expect("enable");
 
         assert!(is_enabled(&state.db, user.id).await.expect("enabled"));
         assert!(verified_at(&state, user.id).await.is_none());

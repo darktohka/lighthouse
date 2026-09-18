@@ -106,11 +106,7 @@ fn parse_endpoint(rest: &str) -> Endpoint {
     if let Some(index) = rest.rfind("/layers/") {
         let repo = &rest[..index];
         let tail = &rest[index + "/layers/".len()..];
-        for (suffix, kind) in [
-            ("/tree", 0u8),
-            ("/file", 1),
-            ("/download", 2),
-        ] {
+        for (suffix, kind) in [("/tree", 0u8), ("/file", 1), ("/download", 2)] {
             if let Some(digest) = tail.strip_suffix(suffix) {
                 if !digest.is_empty() && !digest.contains('/') {
                     return match kind {
@@ -310,19 +306,14 @@ fn normalize(value: Option<String>) -> Option<String> {
 }
 
 async fn tags_for_repository(state: &AppState, repository_id: i64) -> ApiResult<Vec<Tag>> {
-    let tags = sqlx::query_as::<_, Tag>(
-        "SELECT * FROM tags WHERE repository_id = ? ORDER BY name",
-    )
-    .bind(repository_id)
-    .fetch_all(&state.db)
-    .await?;
+    let tags = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE repository_id = ? ORDER BY name")
+        .bind(repository_id)
+        .fetch_all(&state.db)
+        .await?;
     Ok(tags)
 }
 
-async fn manifests_by_ids(
-    db: &crate::db::Db,
-    ids: &[i64],
-) -> ApiResult<HashMap<i64, Manifest>> {
+async fn manifests_by_ids(db: &crate::db::Db, ids: &[i64]) -> ApiResult<HashMap<i64, Manifest>> {
     let mut map = HashMap::new();
     if ids.is_empty() {
         return Ok(map);
@@ -563,8 +554,7 @@ async fn build_tag_detail(
 
     let (config, layers) = config_and_layers(state, edges).await;
 
-    let manifest_json =
-        serde_json::from_slice(&manifest.content).unwrap_or(Value::Null);
+    let manifest_json = serde_json::from_slice(&manifest.content).unwrap_or(Value::Null);
 
     let platform_details = if media_types::is_index_type(&manifest.media_type) {
         let mut details = Vec::with_capacity(summary.platforms.len());
@@ -575,8 +565,7 @@ async fn build_tag_detail(
             };
             let child_edges = manifest_blob_edges(state, child.id).await?;
             let (child_config, child_layers) = config_and_layers(state, child_edges).await;
-            let child_manifest =
-                serde_json::from_slice(&child.content).unwrap_or(Value::Null);
+            let child_manifest = serde_json::from_slice(&child.content).unwrap_or(Value::Null);
             details.push(PlatformDetail {
                 os: platform.os.clone(),
                 architecture: platform.architecture.clone(),
@@ -897,13 +886,12 @@ async fn tag_detail(
     else {
         return Err(ApiError::not_found("tag not found"));
     };
-    let tag_row = sqlx::query_as::<_, Tag>(
-        "SELECT * FROM tags WHERE repository_id = ? AND name = ? LIMIT 1",
-    )
-    .bind(repository.id)
-    .bind(&tag)
-    .fetch_one(&state.db)
-    .await?;
+    let tag_row =
+        sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE repository_id = ? AND name = ? LIMIT 1")
+            .bind(repository.id)
+            .bind(&tag)
+            .fetch_one(&state.db)
+            .await?;
 
     let rowset = super::load_tag_blob_rows(&state).await?;
     let sizes = tag_size_map(&rowset);
@@ -920,20 +908,20 @@ async fn delete_tag(
     tag: String,
 ) -> ApiResult<Response> {
     let repository = super::mutable_repository(&state, &actor, &name).await?;
-    let manifest_id: Option<i64> =
-        sqlx::query_scalar("SELECT manifest_id FROM tags WHERE repository_id = ? AND name = ? LIMIT 1")
-            .bind(repository.id)
-            .bind(&tag)
-            .fetch_optional(&state.db)
-            .await?;
+    let manifest_id: Option<i64> = sqlx::query_scalar(
+        "SELECT manifest_id FROM tags WHERE repository_id = ? AND name = ? LIMIT 1",
+    )
+    .bind(repository.id)
+    .bind(&tag)
+    .fetch_optional(&state.db)
+    .await?;
     let Some(manifest_id) = manifest_id else {
         return Err(ApiError::not_found("tag not found"));
     };
-    let digest: Option<String> =
-        sqlx::query_scalar("SELECT digest FROM manifests WHERE id = ?")
-            .bind(manifest_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let digest: Option<String> = sqlx::query_scalar("SELECT digest FROM manifests WHERE id = ?")
+        .bind(manifest_id)
+        .fetch_optional(&state.db)
+        .await?;
 
     let removed = state
         .registry
@@ -1129,17 +1117,21 @@ async fn list_all_tags(
             }
         }
         let (total, unique) = sizes.get(&row.tag_id).copied().unwrap_or((0, 0));
-        candidates.push(Candidate {
-            row,
-            total,
-            unique,
-        });
+        candidates.push(Candidate { row, total, unique });
     }
 
     if sort == "unique_size" {
-        candidates.sort_by(|a, b| a.unique.cmp(&b.unique).then(a.row.repository_name.cmp(&b.row.repository_name)));
+        candidates.sort_by(|a, b| {
+            a.unique
+                .cmp(&b.unique)
+                .then(a.row.repository_name.cmp(&b.row.repository_name))
+        });
     } else {
-        candidates.sort_by(|a, b| a.total.cmp(&b.total).then(a.row.repository_name.cmp(&b.row.repository_name)));
+        candidates.sort_by(|a, b| {
+            a.total
+                .cmp(&b.total)
+                .then(a.row.repository_name.cmp(&b.row.repository_name))
+        });
     }
     if order == "desc" {
         candidates.reverse();

@@ -73,7 +73,11 @@ pub fn router() -> Router<AppState> {
 /// token (even an anonymous one) receives `200 {}`.
 async fn base(State(state): State<AppState>, auth: Auth) -> Response {
     if !auth.0.is_authenticated() && !auth.0.is_registry_token() {
-        return error_response(&state.config, RegistryError::code(ErrorCode::Unauthorized), None);
+        return error_response(
+            &state.config,
+            RegistryError::code(ErrorCode::Unauthorized),
+            None,
+        );
     }
 
     json_response(StatusCode::OK, serde_json::json!({}))
@@ -81,7 +85,11 @@ async fn base(State(state): State<AppState>, auth: Auth) -> Response {
 
 /// Unmatched `/v2/*` paths never reach the SPA; they render the OCI envelope.
 async fn oci_not_found(State(state): State<AppState>) -> Response {
-    error_response(&state.config, RegistryError::code(ErrorCode::NameUnknown), None)
+    error_response(
+        &state.config,
+        RegistryError::code(ErrorCode::NameUnknown),
+        None,
+    )
 }
 
 /// Per-request audit metadata, resolved before the body is consumed.
@@ -107,7 +115,9 @@ enum Endpoint {
 fn parse_endpoint(rest: &str) -> Option<Endpoint> {
     if let Some(name) = rest.strip_suffix("/tags/list") {
         if !name.is_empty() {
-            return Some(Endpoint::TagsList { name: name.to_string() });
+            return Some(Endpoint::TagsList {
+                name: name.to_string(),
+            });
         }
     }
     if let Some(index) = rest.rfind("/manifests/") {
@@ -122,7 +132,9 @@ fn parse_endpoint(rest: &str) -> Option<Endpoint> {
     }
     if let Some(name) = rest.strip_suffix("/blobs/uploads/") {
         if !name.is_empty() {
-            return Some(Endpoint::UploadStart { name: name.to_string() });
+            return Some(Endpoint::UploadStart {
+                name: name.to_string(),
+            });
         }
     }
     if let Some(index) = rest.rfind("/blobs/uploads/") {
@@ -137,7 +149,9 @@ fn parse_endpoint(rest: &str) -> Option<Endpoint> {
     }
     if let Some(name) = rest.strip_suffix("/blobs/uploads") {
         if !name.is_empty() {
-            return Some(Endpoint::UploadStart { name: name.to_string() });
+            return Some(Endpoint::UploadStart {
+                name: name.to_string(),
+            });
         }
     }
     if let Some(index) = rest.rfind("/blobs/") {
@@ -245,12 +259,26 @@ async fn dispatch(
             uploads::patch(&state, &actor, &headers, &info, &name, &uuid, &body).await
         }
         (Method::PUT, Endpoint::UploadSession { name, uuid }) => {
-            uploads::complete(&state, &actor, &headers, &info, &name, &uuid, &query, &body).await
+            uploads::complete(
+                &state,
+                &actor,
+                &info,
+                &name,
+                &uuid,
+                uploads::Completion {
+                    headers: &headers,
+                    query: &query,
+                    body: &body,
+                },
+            )
+            .await
         }
         (Method::DELETE, Endpoint::UploadSession { name, uuid }) => {
             uploads::cancel(&state, &actor, &headers, &info, &name, &uuid).await
         }
-        _ => Err(RegistryError::unsupported("method not allowed for this resource")),
+        _ => Err(RegistryError::unsupported(
+            "method not allowed for this resource",
+        )),
     };
 
     result.unwrap_or_else(|err| error_response(&state.config, err, challenge_scope.as_deref()))
@@ -262,9 +290,7 @@ fn challenge_scope(endpoint: &Endpoint, method: &Method) -> Option<String> {
     let (name, push) = match endpoint {
         Endpoint::TagsList { name }
         | Endpoint::Manifest { name, .. }
-        | Endpoint::Blob { name, .. } => {
-            (name, *method != Method::GET && *method != Method::HEAD)
-        }
+        | Endpoint::Blob { name, .. } => (name, *method != Method::GET && *method != Method::HEAD),
         Endpoint::UploadStart { name } | Endpoint::UploadSession { name, .. } => (name, true),
     };
     Some(registry::repository_scope(name, push))
@@ -370,9 +396,9 @@ pub fn parse_page_size(query: &[(String, String)]) -> Result<usize, RegistryErro
     match query_first(query, "n") {
         None => Ok(PAGE_DEFAULT),
         Some(raw) => {
-            let parsed: i64 = raw
-                .parse()
-                .map_err(|_| RegistryError::pagination_invalid(format!("invalid value for `n`: {raw}")))?;
+            let parsed: i64 = raw.parse().map_err(|_| {
+                RegistryError::pagination_invalid(format!("invalid value for `n`: {raw}"))
+            })?;
             if parsed < 0 {
                 return Err(RegistryError::pagination_invalid(format!(
                     "invalid value for `n`: {raw}"

@@ -297,9 +297,14 @@ mod tests {
         let user = create_user(&state, "alice").await;
         let scopes = vec!["repository:alice/app:pull".to_string()];
 
-        let token = issue(&state, &principal(user.id, "alice"), &scopes, Some("docker"))
-            .await
-            .expect("issue");
+        let token = issue(
+            &state,
+            &principal(user.id, "alice"),
+            &scopes,
+            Some("docker"),
+        )
+        .await
+        .expect("issue");
 
         let first = redeem(&state, &token, &[]).await.expect("first redeem");
         let second = redeem(&state, &token, &[]).await.expect("second redeem");
@@ -354,9 +359,13 @@ mod tests {
         .await
         .expect("issue");
 
-        let redeemed = redeem(&state, &token, &["repository:someone/else:pull".to_string()])
-            .await
-            .expect("redeem");
+        let redeemed = redeem(
+            &state,
+            &token,
+            &["repository:someone/else:pull".to_string()],
+        )
+        .await
+        .expect("redeem");
         assert!(redeemed.access.is_empty());
     }
 }

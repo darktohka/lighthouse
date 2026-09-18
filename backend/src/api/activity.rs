@@ -15,8 +15,8 @@ use crate::models::{Activity, Namespace};
 use crate::state::{AppState, AuthContext};
 
 use super::{
-    ActivityEntry, PageQuery, Pagination, RepositorySummary, namespace_visible,
-    parse_metadata, user_summaries,
+    ActivityEntry, PageQuery, Pagination, RepositorySummary, namespace_visible, parse_metadata,
+    user_summaries,
 };
 
 pub fn router() -> Router<AppState> {
@@ -80,9 +80,10 @@ async fn build_entries(state: &AppState, rows: Vec<Activity>) -> ApiResult<Vec<A
 }
 
 async fn all_activity(state: &AppState) -> ApiResult<Vec<Activity>> {
-    let rows = sqlx::query_as::<_, Activity>("SELECT * FROM activity ORDER BY created_at DESC, id DESC")
-        .fetch_all(&state.db)
-        .await?;
+    let rows =
+        sqlx::query_as::<_, Activity>("SELECT * FROM activity ORDER BY created_at DESC, id DESC")
+            .fetch_all(&state.db)
+            .await?;
     Ok(rows)
 }
 
@@ -138,18 +139,15 @@ async fn my_activity(
     Ok(Json(pagination.envelope(items, total)).into_response())
 }
 
-async fn visible_namespace_ids(
-    state: &AppState,
-    actor: &AuthContext,
-) -> ApiResult<HashSet<i64>> {
+async fn visible_namespace_ids(state: &AppState, actor: &AuthContext) -> ApiResult<HashSet<i64>> {
     let namespaces = sqlx::query_as::<_, Namespace>("SELECT * FROM namespaces")
         .fetch_all(&state.db)
         .await?;
     let mut visible = HashSet::new();
     for namespace in namespaces {
-        if namespace_visible(state, actor, &namespace).await? {
-            visible.insert(namespace.id);
-        } else if super::is_namespace_owner(actor, &namespace) {
+        if namespace_visible(state, actor, &namespace).await?
+            || super::is_namespace_owner(actor, &namespace)
+        {
             visible.insert(namespace.id);
         }
     }
@@ -182,9 +180,15 @@ async fn dashboard(
         );
     }
     repositories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.name.cmp(&b.name)));
-    let repository_ids: Vec<i64> = repositories.iter().map(|repository| repository.id).collect();
+    let repository_ids: Vec<i64> = repositories
+        .iter()
+        .map(|repository| repository.id)
+        .collect();
 
-    let tag_count: i64 = repositories.iter().map(|repository| repository.tag_count).sum();
+    let tag_count: i64 = repositories
+        .iter()
+        .map(|repository| repository.tag_count)
+        .sum();
     let total_size: i64 = repositories.iter().map(|repository| repository.size).sum();
 
     let mut pull_count_30d = 0i64;

@@ -346,7 +346,6 @@ pub fn verify_mfa_token(config: &Config, token: &str) -> Result<MfaClaims> {
     Ok(data.claims)
 }
 
-
 // ---- opaque tokens ---------------------------------------------------------
 
 fn random_bytes<const N: usize>() -> [u8; N] {

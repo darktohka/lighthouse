@@ -1712,14 +1712,11 @@ async fn user_profile_and_heatmap() {
     assert_eq!(response.status(), StatusCode::OK);
     let heatmap = body_json(response).await;
 
-    let start = chrono::NaiveDate::parse_from_str(
-        heatmap["start"].as_str().expect("start"),
-        "%Y-%m-%d",
-    )
-    .expect("start parses");
-    let end =
-        chrono::NaiveDate::parse_from_str(heatmap["end"].as_str().expect("end"), "%Y-%m-%d")
-            .expect("end parses");
+    let start =
+        chrono::NaiveDate::parse_from_str(heatmap["start"].as_str().expect("start"), "%Y-%m-%d")
+            .expect("start parses");
+    let end = chrono::NaiveDate::parse_from_str(heatmap["end"].as_str().expect("end"), "%Y-%m-%d")
+        .expect("end parses");
     use chrono::Datelike;
     assert_eq!(start.weekday(), chrono::Weekday::Sun);
     assert_eq!(end.weekday(), chrono::Weekday::Sat);

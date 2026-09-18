@@ -47,7 +47,10 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Validates the grant subject and resolves it to a user id.
-async fn resolve_subject(state: &AppState, grant: &CreateGrant) -> ApiResult<(String, Option<i64>)> {
+async fn resolve_subject(
+    state: &AppState,
+    grant: &CreateGrant,
+) -> ApiResult<(String, Option<i64>)> {
     match grant.subject_type.as_str() {
         "anonymous" => Ok(("anonymous".to_string(), None)),
         "user" => {
@@ -57,12 +60,13 @@ async fn resolve_subject(state: &AppState, grant: &CreateGrant) -> ApiResult<(St
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| ApiError::bad_request("subject is required for a user grant"))?;
-            let user =
-                sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ? COLLATE NOCASE LIMIT 1")
-                    .bind(username)
-                    .fetch_optional(&state.db)
-                    .await?
-                    .ok_or_else(|| ApiError::not_found("user not found"))?;
+            let user = sqlx::query_as::<_, User>(
+                "SELECT * FROM users WHERE username = ? COLLATE NOCASE LIMIT 1",
+            )
+            .bind(username)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::not_found("user not found"))?;
             Ok(("user".to_string(), Some(user.id)))
         }
         _ => Err(ApiError::bad_request(
@@ -71,26 +75,31 @@ async fn resolve_subject(state: &AppState, grant: &CreateGrant) -> ApiResult<(St
     }
 }
 
+/// A permission row flattened into the tuple [`permission_views`] consumes:
+/// `(id, subject_type, subject_user_id, can_pull, can_push, created_at)`.
+type PermissionRow = (i64, String, Option<i64>, bool, bool, chrono::DateTime<Utc>);
+
 async fn permission_views(
     state: &AppState,
-    rows: Vec<(i64, String, Option<i64>, bool, bool, chrono::DateTime<Utc>)>,
+    rows: Vec<PermissionRow>,
 ) -> ApiResult<Vec<PublicPermission>> {
     let ids: Vec<i64> = rows.iter().filter_map(|row| row.2).collect();
     let summaries = user_summaries(&state.db, &ids).await?;
     Ok(rows
         .into_iter()
-        .map(|(id, subject_type, subject_user_id, can_pull, can_push, created_at)| {
-            let subject = subject_user_id
-                .and_then(|user_id| summaries.get(&user_id).cloned());
-            PublicPermission {
-                id,
-                subject_type,
-                subject,
-                can_pull,
-                can_push,
-                created_at,
-            }
-        })
+        .map(
+            |(id, subject_type, subject_user_id, can_pull, can_push, created_at)| {
+                let subject = subject_user_id.and_then(|user_id| summaries.get(&user_id).cloned());
+                PublicPermission {
+                    id,
+                    subject_type,
+                    subject,
+                    can_pull,
+                    can_push,
+                    created_at,
+                }
+            },
+        )
         .collect())
 }
 
@@ -329,11 +338,12 @@ pub async fn revoke_repository_permission(
     id: i64,
 ) -> ApiResult<Response> {
     let repository = repository_for_admin(&state, &actor, &name).await?;
-    let result = sqlx::query("DELETE FROM repository_permissions WHERE id = ? AND repository_id = ?")
-        .bind(id)
-        .bind(repository.id)
-        .execute(&state.db)
-        .await?;
+    let result =
+        sqlx::query("DELETE FROM repository_permissions WHERE id = ? AND repository_id = ?")
+            .bind(id)
+            .bind(repository.id)
+            .execute(&state.db)
+            .await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("grant not found"));
     }

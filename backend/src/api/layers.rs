@@ -75,8 +75,12 @@ fn apply_headers(
     let value = HeaderValue::from_str(content_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     response.headers_mut().insert(header::CONTENT_TYPE, value);
-    if let Some(length) = content_length.and_then(|length| HeaderValue::from_str(&length.to_string()).ok()) {
-        response.headers_mut().insert(header::CONTENT_LENGTH, length);
+    if let Some(length) =
+        content_length.and_then(|length| HeaderValue::from_str(&length.to_string()).ok())
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, length);
     }
     response
 }
@@ -85,11 +89,7 @@ fn stream_blob(file: tokio::fs::File, size: u64, content_type: &str) -> Response
     let stream = ReaderStream::new(file);
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = StatusCode::OK;
-    apply_headers(
-        response,
-        content_type,
-        Some(size),
-    )
+    apply_headers(response, content_type, Some(size))
 }
 
 fn too_large(message: &str) -> ApiError {
@@ -459,9 +459,7 @@ fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> 
                         .as_deref()
                         .and_then(|target| index.resolve_link(&full_path, target))
                     {
-                        Some((resolved, kind)) => {
-                            (Some(resolved), Some(kind.as_str().to_string()))
-                        }
+                        Some((resolved, kind)) => (Some(resolved), Some(kind.as_str().to_string())),
                         None => (None, None),
                     }
                 }
@@ -559,12 +557,10 @@ where
     T: Send + 'static,
     F: FnOnce() -> ApiResult<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "layer task panicked");
-            ApiError::internal("layer reader failed")
-        })?
+    tokio::task::spawn_blocking(job).await.map_err(|err| {
+        tracing::error!(error = %err, "layer task panicked");
+        ApiError::internal("layer reader failed")
+    })?
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +569,12 @@ where
 
 async fn visible_blob(state: &AppState, actor: &AuthContext, digest: &str) -> ApiResult<Blob> {
     let parsed = Digest::parse(digest).map_err(|_| ApiError::not_found("blob not found"))?;
-    let Some(blob) = state.registry.blob_stat(&parsed).await.map_err(ApiError::from)? else {
+    let Some(blob) = state
+        .registry
+        .blob_stat(&parsed)
+        .await
+        .map_err(ApiError::from)?
+    else {
         return Err(not_found("blob not found"));
     };
 
@@ -618,7 +619,11 @@ async fn blob(
     let blob = visible_blob(&state, &auth.0, &digest).await?;
     let parsed = Digest::parse(&digest).map_err(|_| not_found("blob not found"))?;
     let file = open_blob(&state, &parsed).await?;
-    Ok(stream_blob(file, blob.size.max(0) as u64, "application/octet-stream"))
+    Ok(stream_blob(
+        file,
+        blob.size.max(0) as u64,
+        "application/octet-stream",
+    ))
 }
 
 async fn blob_json(
@@ -770,8 +775,7 @@ pub async fn manifest_references(
                                     .get("mediaType")
                                     .and_then(Value::as_str)
                                     .map(str::to_string),
-                                size: entry.get("size").and_then(Value::as_u64).unwrap_or(0)
-                                    as i64,
+                                size: entry.get("size").and_then(Value::as_u64).unwrap_or(0) as i64,
                                 role: role.to_string(),
                             });
                         }
@@ -822,7 +826,12 @@ async fn layer_blob(
 ) -> ApiResult<(crate::models::Repository, Blob, Digest)> {
     let repository = visible_repository(state, actor, repo_name).await?;
     let parsed = Digest::parse(digest).map_err(|_| not_found("layer not found"))?;
-    let Some(blob) = state.registry.blob_stat(&parsed).await.map_err(ApiError::from)? else {
+    let Some(blob) = state
+        .registry
+        .blob_stat(&parsed)
+        .await
+        .map_err(ApiError::from)?
+    else {
         return Err(not_found("layer not found"));
     };
     if !state
@@ -876,7 +885,11 @@ pub async fn layer_file(
     digest: String,
     path: Option<String>,
 ) -> ApiResult<Response> {
-    let Some(raw_path) = path.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(raw_path) = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return Err(ApiError::bad_request("path is required"));
     };
     let target = sanitize_request_path(raw_path)?;

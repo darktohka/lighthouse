@@ -51,9 +51,7 @@ pub async fn get(
     {
         let matches = value.split(',').any(|candidate| {
             let candidate = candidate.trim();
-            candidate == "*"
-                || candidate == etag
-                || candidate.trim_start_matches("W/") == etag
+            candidate == "*" || candidate == etag || candidate.trim_start_matches("W/") == etag
         });
         if matches {
             let mut response = super::respond(StatusCode::NOT_MODIFIED, Body::empty());

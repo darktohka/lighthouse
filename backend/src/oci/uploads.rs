@@ -12,6 +12,14 @@ use crate::state::{AppState, AuthContext};
 
 use super::EventInfo;
 
+/// Request-scoped inputs for [`complete`]: the headers and query that qualify
+/// the upload, plus the body carrying any final chunk.
+pub struct Completion<'a> {
+    pub headers: &'a HeaderMap,
+    pub query: &'a [(String, String)],
+    pub body: &'a [u8],
+}
+
 pub async fn start(
     state: &AppState,
     actor: &AuthContext,
@@ -62,7 +70,9 @@ pub async fn start(
         let upload = uploads.create(repository.id, actor.user_id).await?;
         if uploads.append(&upload.uuid, 0, body).await.is_err() {
             let _ = uploads.cancel(&upload.uuid).await;
-            return Err(RegistryError::upload_invalid("failed to stage uploaded content"));
+            return Err(RegistryError::upload_invalid(
+                "failed to stage uploaded content",
+            ));
         }
         return match uploads.complete(&upload.uuid, &digest).await {
             Ok(_) => {
@@ -240,13 +250,16 @@ pub async fn patch(
 pub async fn complete(
     state: &AppState,
     actor: &AuthContext,
-    headers: &HeaderMap,
     info: &EventInfo,
     name: &str,
     uuid: &str,
-    query: &[(String, String)],
-    body: &[u8],
+    request: Completion<'_>,
 ) -> Result<Response, RegistryError> {
+    let Completion {
+        headers,
+        query,
+        body,
+    } = request;
     super::validate_name(name)?;
     let repository = super::find_repo(state, actor, name, Action::Push).await?;
     let Some(raw) = super::query_first(query, "digest") else {

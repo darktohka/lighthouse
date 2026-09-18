@@ -73,7 +73,9 @@ impl ErrorCode {
             ErrorCode::ManifestUnknown => "manifest unknown",
             ErrorCode::ManifestInvalid => "manifest invalid",
             ErrorCode::ManifestUnverified => "manifest failed signature verification",
-            ErrorCode::ManifestBlobUnknown => "manifest references a manifest or blob unknown to registry",
+            ErrorCode::ManifestBlobUnknown => {
+                "manifest references a manifest or blob unknown to registry"
+            }
             ErrorCode::BlobUnknown => "blob unknown to registry",
             ErrorCode::BlobUploadUnknown => "blob upload unknown to registry",
             ErrorCode::BlobUploadInvalid => "blob upload invalid",

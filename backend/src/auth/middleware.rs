@@ -73,14 +73,13 @@ pub async fn resolve_identity(
         // daemon would loop on. Public repositories remain anonymously pullable
         // by design: demotion denies only the *identified* push/pull actions a
         // restricted account would otherwise receive.
-        if ctx.credential == CredentialSource::RegistryToken {
-            if let Some(service_account_id) = ctx.service_account_id
-                && !ip_ranges::allowed(&state.db, service_account_id, ip.as_deref()).await
-            {
-                ctx.user_id = None;
-                ctx.username = None;
-                ctx.service_account_id = None;
-            }
+        if ctx.credential == CredentialSource::RegistryToken
+            && let Some(service_account_id) = ctx.service_account_id
+            && !ip_ranges::allowed(&state.db, service_account_id, ip.as_deref()).await
+        {
+            ctx.user_id = None;
+            ctx.username = None;
+            ctx.service_account_id = None;
         }
 
         req.extensions_mut().insert(ctx);

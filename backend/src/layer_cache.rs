@@ -105,8 +105,8 @@ impl LayerIndex {
             .map(|(path, entry)| path.len() + entry.weight())
             .sum::<usize>();
         let dir_weight = dir_sizes
-            .iter()
-            .map(|(path, _)| path.len() + DIR_SIZE_OVERHEAD_BYTES)
+            .keys()
+            .map(|path| path.len() + DIR_SIZE_OVERHEAD_BYTES)
             .sum::<usize>();
         Self {
             entries,

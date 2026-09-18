@@ -28,17 +28,22 @@ pub async fn list(db: &Db, user_id: i64) -> ApiResult<Vec<AppPassword>> {
 
 /// Loads an app password by id, scoped to its owner.
 pub async fn find_for_user(db: &Db, user_id: i64, id: i64) -> ApiResult<Option<AppPassword>> {
-    let account =
-        sqlx::query_as::<_, AppPassword>("SELECT * FROM app_passwords WHERE id = ? AND user_id = ?")
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(db)
-            .await?;
+    let account = sqlx::query_as::<_, AppPassword>(
+        "SELECT * FROM app_passwords WHERE id = ? AND user_id = ?",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
     Ok(account)
 }
 
 /// Creates an app password and returns it with the plaintext, shown only here.
-pub async fn create(state: &AppState, user_id: i64, name: &str) -> ApiResult<(AppPassword, String)> {
+pub async fn create(
+    state: &AppState,
+    user_id: i64,
+    name: &str,
+) -> ApiResult<(AppPassword, String)> {
     let name = name.trim();
     if name.is_empty() {
         return Err(ApiError::bad_request("name is required"));
@@ -53,7 +58,9 @@ pub async fn create(state: &AppState, user_id: i64, name: &str) -> ApiResult<(Ap
             .fetch_optional(&state.db)
             .await?;
     if name_taken.is_some() {
-        return Err(ApiError::conflict("an app password with that name already exists"));
+        return Err(ApiError::conflict(
+            "an app password with that name already exists",
+        ));
     }
 
     let (plaintext, prefix, suffix, hash) = tokens::generate_app_password_token();

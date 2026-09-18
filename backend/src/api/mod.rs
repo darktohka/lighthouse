@@ -35,8 +35,8 @@ use serde_json::Value;
 use crate::db::Db;
 use crate::error::{ApiError, ApiResult};
 use crate::models::{Namespace, Repository, User};
-use crate::permissions::Access;
 use crate::permissions as authz;
+use crate::permissions::Access;
 use crate::state::{AppState, AuthContext};
 
 /// Default page size for control-plane list endpoints.
@@ -455,10 +455,9 @@ pub async fn visible_repository_ids(
     state: &AppState,
     actor: &AuthContext,
 ) -> ApiResult<HashSet<i64>> {
-    let repositories =
-        sqlx::query_as::<_, Repository>("SELECT * FROM repositories ORDER BY id")
-            .fetch_all(&state.db)
-            .await?;
+    let repositories = sqlx::query_as::<_, Repository>("SELECT * FROM repositories ORDER BY id")
+        .fetch_all(&state.db)
+        .await?;
     let mut visible = HashSet::new();
     for repository in repositories {
         if authz::repository_access(state, actor, &repository.name)

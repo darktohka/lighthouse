@@ -51,11 +51,12 @@ impl Registry {
             None => (name, ""),
         };
 
-        let namespace_row: Option<(i64, bool)> =
-            sqlx::query_as("SELECT id, is_public FROM namespaces WHERE name = ? COLLATE NOCASE LIMIT 1")
-                .bind(namespace)
-                .fetch_optional(&self.db)
-                .await?;
+        let namespace_row: Option<(i64, bool)> = sqlx::query_as(
+            "SELECT id, is_public FROM namespaces WHERE name = ? COLLATE NOCASE LIMIT 1",
+        )
+        .bind(namespace)
+        .fetch_optional(&self.db)
+        .await?;
         let (namespace_id, namespace_is_public) =
             namespace_row.ok_or_else(|| RegistryError::name_unknown(name))?;
 
@@ -258,11 +259,10 @@ impl Registry {
             .execute(&mut *tx)
             .await?;
 
-            let manifest_id: i64 =
-                sqlx::query_scalar("SELECT id FROM manifests WHERE digest = ?")
-                    .bind(&digest)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let manifest_id: i64 = sqlx::query_scalar("SELECT id FROM manifests WHERE digest = ?")
+                .bind(&digest)
+                .fetch_one(&mut *tx)
+                .await?;
 
             sqlx::query(
                 "INSERT OR IGNORE INTO manifest_repositories \
@@ -391,11 +391,12 @@ impl Registry {
             .execute(&mut *tx)
             .await?;
 
-            let links: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM manifest_repositories WHERE manifest_id = ?")
-                    .bind(manifest_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let links: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM manifest_repositories WHERE manifest_id = ?",
+            )
+            .bind(manifest_id)
+            .fetch_one(&mut *tx)
+            .await?;
             let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE manifest_id = ?")
                 .bind(manifest_id)
                 .fetch_one(&mut *tx)
@@ -492,8 +493,9 @@ impl ManifestReferences {
     /// Parses a manifest body into its graph edges. Malformed JSON or an
     /// invalid descriptor digest map to `MANIFEST_INVALID`.
     fn parse(content: &[u8], media_type: &str) -> RegistryResult<Self> {
-        let value: serde_json::Value = serde_json::from_slice(content)
-            .map_err(|err| RegistryError::manifest_invalid(format!("invalid manifest JSON: {err}")))?;
+        let value: serde_json::Value = serde_json::from_slice(content).map_err(|err| {
+            RegistryError::manifest_invalid(format!("invalid manifest JSON: {err}"))
+        })?;
         let object = value.as_object().ok_or_else(|| {
             RegistryError::manifest_invalid("manifest body must be a JSON object")
         })?;
@@ -641,12 +643,16 @@ fn descriptor_digest(value: &serde_json::Value) -> RegistryResult<Digest> {
         .get("digest")
         .and_then(|digest| digest.as_str())
         .ok_or_else(|| RegistryError::manifest_invalid("descriptor is missing `digest`"))?;
-    Digest::parse(raw)
-        .map_err(|_| RegistryError::manifest_invalid(format!("descriptor digest `{raw}` is invalid")))
+    Digest::parse(raw).map_err(|_| {
+        RegistryError::manifest_invalid(format!("descriptor digest `{raw}` is invalid"))
+    })
 }
 
 fn descriptor_size(value: &serde_json::Value) -> u64 {
-    value.get("size").and_then(|size| size.as_u64()).unwrap_or(0)
+    value
+        .get("size")
+        .and_then(|size| size.as_u64())
+        .unwrap_or(0)
 }
 
 fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -740,7 +746,10 @@ mod tests {
     #[tokio::test]
     async fn ensure_repository_requires_existing_namespace() {
         let (_dir, registry) = test_registry().await;
-        let err = registry.ensure_repository("ghost/project").await.unwrap_err();
+        let err = registry
+            .ensure_repository("ghost/project")
+            .await
+            .unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::NameUnknown);
 
         create_namespace(&registry, "darktohka").await;
@@ -763,7 +772,10 @@ mod tests {
             .expect("find");
         assert_eq!(found.map(|r| r.id), Some(repository.id));
 
-        let names = registry.list_repository_names(10, None).await.expect("list");
+        let names = registry
+            .list_repository_names(10, None)
+            .await
+            .expect("list");
         assert_eq!(names, vec!["darktohka/more/complicated/project2"]);
         let page = registry
             .list_repository_names(10, Some("darktohka/more/complicated/project2"))
@@ -832,22 +844,30 @@ mod tests {
             Some(media_types::OCI_IMAGE_LAYER_GZIP)
         );
 
-        assert!(!registry
-            .blob_in_repository(repository.id, &digest)
-            .await
-            .expect("linked"));
-        assert!(registry
-            .link_blob(repository.id, &digest)
-            .await
-            .expect("link"));
-        assert!(!registry
-            .link_blob(repository.id, &digest)
-            .await
-            .expect("relink"));
-        assert!(registry
-            .blob_in_repository(repository.id, &digest)
-            .await
-            .expect("linked"));
+        assert!(
+            !registry
+                .blob_in_repository(repository.id, &digest)
+                .await
+                .expect("linked")
+        );
+        assert!(
+            registry
+                .link_blob(repository.id, &digest)
+                .await
+                .expect("link")
+        );
+        assert!(
+            !registry
+                .link_blob(repository.id, &digest)
+                .await
+                .expect("relink")
+        );
+        assert!(
+            registry
+                .blob_in_repository(repository.id, &digest)
+                .await
+                .expect("linked")
+        );
     }
 
     #[tokio::test]
@@ -869,19 +889,25 @@ mod tests {
             .await
             .expect("register");
 
-        assert!(!registry
-            .mount_blob(source.id, target.id, &digest)
-            .await
-            .expect("unlinked mount"));
+        assert!(
+            !registry
+                .mount_blob(source.id, target.id, &digest)
+                .await
+                .expect("unlinked mount")
+        );
         registry.link_blob(source.id, &digest).await.expect("link");
-        assert!(registry
-            .mount_blob(source.id, target.id, &digest)
-            .await
-            .expect("mount"));
-        assert!(registry
-            .blob_in_repository(target.id, &digest)
-            .await
-            .expect("target linked"));
+        assert!(
+            registry
+                .mount_blob(source.id, target.id, &digest)
+                .await
+                .expect("mount")
+        );
+        assert!(
+            registry
+                .blob_in_repository(target.id, &digest)
+                .await
+                .expect("target linked")
+        );
     }
 
     #[tokio::test]
@@ -904,27 +930,30 @@ mod tests {
             .expect("put manifest");
         assert_eq!(manifest.digest, digest.to_string());
         assert_eq!(manifest.size, content.len() as i64);
-        assert!(registry
-            .manifest_in_repository(repository.id, &digest)
-            .await
-            .expect("linked"));
+        assert!(
+            registry
+                .manifest_in_repository(repository.id, &digest)
+                .await
+                .expect("linked")
+        );
 
-        let edge_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM manifest_blobs WHERE manifest_id = ?",
-        )
-        .bind(manifest.id)
-        .fetch_one(registry.db())
-        .await
-        .expect("edges");
+        let edge_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM manifest_blobs WHERE manifest_id = ?")
+                .bind(manifest.id)
+                .fetch_one(registry.db())
+                .await
+                .expect("edges");
         assert_eq!(edge_count, 2);
         let config_blob = registry.blob_stat(&config).await.expect("config blob");
         assert!(config_blob.is_some());
 
-        assert!(registry
-            .resolve_tag(repository.id, "latest")
-            .await
-            .expect("resolve")
-            .is_none());
+        assert!(
+            registry
+                .resolve_tag(repository.id, "latest")
+                .await
+                .expect("resolve")
+                .is_none()
+        );
         registry
             .set_tag(repository.id, "latest", &digest)
             .await
@@ -945,14 +974,18 @@ mod tests {
             .await
             .expect("tags");
         assert_eq!(tags, vec!["latest".to_string(), "v1".to_string()]);
-        assert!(registry
-            .delete_tag(repository.id, "v1")
-            .await
-            .expect("delete tag"));
-        assert!(!registry
-            .delete_tag(repository.id, "v1")
-            .await
-            .expect("re-delete"));
+        assert!(
+            registry
+                .delete_tag(repository.id, "v1")
+                .await
+                .expect("delete tag")
+        );
+        assert!(
+            !registry
+                .delete_tag(repository.id, "v1")
+                .await
+                .expect("re-delete")
+        );
     }
 
     #[tokio::test]
@@ -971,12 +1004,13 @@ mod tests {
             .await
             .expect("put index");
 
-        let children: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM manifest_children WHERE parent_manifest_id = ?")
-                .bind(manifest.id)
-                .fetch_one(registry.db())
-                .await
-                .expect("children");
+        let children: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM manifest_children WHERE parent_manifest_id = ?",
+        )
+        .bind(manifest.id)
+        .fetch_one(registry.db())
+        .await
+        .expect("children");
         assert_eq!(children, 1);
 
         let child_row: Option<String> =
@@ -1044,19 +1078,25 @@ mod tests {
             .await
             .expect("put second");
 
-        assert!(registry
-            .delete_manifest(first.id, &digest)
-            .await
-            .expect("unlink"));
-        assert!(registry
-            .manifest(&digest)
-            .await
-            .expect("still present")
-            .is_some());
-        assert!(registry
-            .delete_manifest(second.id, &digest)
-            .await
-            .expect("final unlink"));
+        assert!(
+            registry
+                .delete_manifest(first.id, &digest)
+                .await
+                .expect("unlink")
+        );
+        assert!(
+            registry
+                .manifest(&digest)
+                .await
+                .expect("still present")
+                .is_some()
+        );
+        assert!(
+            registry
+                .delete_manifest(second.id, &digest)
+                .await
+                .expect("final unlink")
+        );
         assert!(registry.manifest(&digest).await.expect("removed").is_none());
     }
 }

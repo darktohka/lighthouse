@@ -65,11 +65,7 @@ pub fn parse_scopes(parameters: &[String]) -> Vec<Scope> {
 /// Resolves the actions the actor actually holds for `scope`. An empty result
 /// means the scope is not granted; per the spec the caller still receives a
 /// token, and the registry denies the later request with `DENIED`.
-pub async fn granted_actions(
-    state: &AppState,
-    actor: &AuthContext,
-    scope: &Scope,
-) -> Vec<String> {
+pub async fn granted_actions(state: &AppState, actor: &AuthContext, scope: &Scope) -> Vec<String> {
     if scope.kind == "registry" {
         if scope.name == "catalog" && actor.is_authenticated() {
             return vec!["*".to_string()];

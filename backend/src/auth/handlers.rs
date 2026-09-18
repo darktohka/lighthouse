@@ -459,7 +459,7 @@ async fn complete_login(
         user,
         sessions::SessionAudit {
             user_agent: user_agent.as_deref(),
-            ip: ip.as_deref(),
+            ip,
         },
     )
     .await?;
@@ -475,7 +475,7 @@ async fn complete_login(
             username: Some(&user.username),
             success: true,
             kind,
-            ip: ip.as_deref(),
+            ip,
             user_agent: user_agent.as_deref(),
         },
     )
@@ -608,8 +608,8 @@ async fn two_factor_backup_codes(
     let user_id = ctx
         .user_id
         .ok_or_else(|| ApiError::unauthorized("user session required"))?;
-    let codes = two_factor::regenerate_backup_codes(&state, user_id, &request.code, Utc::now())
-        .await?;
+    let codes =
+        two_factor::regenerate_backup_codes(&state, user_id, &request.code, Utc::now()).await?;
     Ok(Json(json!({ "backup_codes": codes })).into_response())
 }
 
@@ -747,10 +747,11 @@ async fn verify_email_token(db: &Db, token: &str) -> ApiResult<()> {
         return Err(ApiError::bad_request("token is invalid or expired"));
     }
 
-    let already_verified: bool = sqlx::query_scalar("SELECT email_verified FROM users WHERE id = ?")
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let already_verified: bool =
+        sqlx::query_scalar("SELECT email_verified FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
     if used_at.is_some() {
         tx.rollback().await.ok();
@@ -789,7 +790,6 @@ async fn verify_email_token(db: &Db, token: &str) -> ApiResult<()> {
 
 async fn resend_verification(
     State(state): State<AppState>,
-    headers: HeaderMap,
     client_ip: logging::ClientIp,
     Json(request): Json<EmailRequest>,
 ) -> ApiResult<Response> {
@@ -1704,10 +1704,7 @@ mod tests {
             .await
             .expect("secret");
         let bytes = crate::auth::totp::base32_decode(&secret).expect("decode");
-        crate::auth::totp::format_code(crate::auth::totp::totp(
-            &bytes,
-            Utc::now().timestamp(),
-        ))
+        crate::auth::totp::format_code(crate::auth::totp::totp(&bytes, Utc::now().timestamp()))
     }
 
     #[tokio::test]
@@ -1786,7 +1783,11 @@ mod tests {
         for uri in ["/api/auth/2fa", "/api/auth/2fa/setup"] {
             let response = send(
                 &app,
-                if uri.ends_with("setup") { "POST" } else { "GET" },
+                if uri.ends_with("setup") {
+                    "POST"
+                } else {
+                    "GET"
+                },
                 uri,
                 None,
                 None,

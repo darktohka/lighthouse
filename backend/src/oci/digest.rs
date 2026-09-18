@@ -63,10 +63,7 @@ impl Digest {
 
     /// True when this registry can compute and verify the algorithm.
     pub fn is_supported(&self) -> bool {
-        matches!(
-            self.algorithm.as_str(),
-            ALGORITHM_SHA256 | ALGORITHM_SHA512
-        )
+        matches!(self.algorithm.as_str(), ALGORITHM_SHA256 | ALGORITHM_SHA512)
     }
 
     /// Digests the bytes with SHA-256.
@@ -246,7 +243,10 @@ fn is_valid_encoded(encoded: &str) -> bool {
 }
 
 fn is_lowercase_hex(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]

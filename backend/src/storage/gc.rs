@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use anyhow::Result;
 
 use crate::oci::digest::Digest;
-use crate::storage::registry::Registry;
 use crate::storage::Storage;
+use crate::storage::registry::Registry;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GcReport {
@@ -144,9 +144,7 @@ pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> R
 /// Repeatedly deletes manifests that are unreachable: no repository link, no
 /// tag, and no surviving parent index. Deleting a parent cascades its child
 /// edges, which may make further manifests eligible on the next pass.
-async fn sweep_orphan_manifests(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-) -> Result<usize> {
+async fn sweep_orphan_manifests(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<usize> {
     let mut deleted = 0usize;
     loop {
         let ids: Vec<i64> = sqlx::query_scalar(ORPHAN_MANIFESTS_SQL)

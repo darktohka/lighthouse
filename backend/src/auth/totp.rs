@@ -208,7 +208,9 @@ pub fn generate_backup_code() -> String {
 
 /// Generates [`BACKUP_CODE_COUNT`] backup codes.
 pub fn generate_backup_codes() -> Vec<String> {
-    (0..BACKUP_CODE_COUNT).map(|_| generate_backup_code()).collect()
+    (0..BACKUP_CODE_COUNT)
+        .map(|_| generate_backup_code())
+        .collect()
 }
 
 /// Normalizes a submitted backup code: upper-cases it, drops separators and
@@ -381,7 +383,10 @@ mod tests {
             normalize_backup_code(" ab12-cd34 ").as_deref(),
             Some("AB12-CD34")
         );
-        assert_eq!(normalize_backup_code("ab12cd34").as_deref(), Some("AB12-CD34"));
+        assert_eq!(
+            normalize_backup_code("ab12cd34").as_deref(),
+            Some("AB12-CD34")
+        );
         assert!(normalize_backup_code("short").is_none());
         assert!(normalize_backup_code("way-too-long-code").is_none());
         assert!(normalize_backup_code("ab12-cd3!").is_none());
