@@ -16,13 +16,14 @@ export type AvatarProps = {
 /**
  * Circular avatar with an initials fallback.
  *
- * The backend already resolves `avatar_url` (Libravatar or an explicit
- * override), so the frontend renders it directly and degrades to initials when
- * it is absent or fails to load.
+ * Callers pass an already-resolved URL (an explicit `avatar_url` override or a
+ * Libravatar URL built from `avatar_hash`); initials are shown only when no URL
+ * is available, or as the last resort when the image fails to load.
  */
 export function Avatar({ src, name, size = 20, className }: AvatarProps) {
-  const [failed, setFailed] = useState(false)
-  const showImage = typeof src === 'string' && src.length > 0 && !failed
+  const [failedSrc, setFailedSrc] = useState<string | null>(null)
+  const showImage =
+    typeof src === 'string' && src.length > 0 && failedSrc !== src
 
   return (
     <span
@@ -41,7 +42,7 @@ export function Avatar({ src, name, size = 20, className }: AvatarProps) {
           height={size}
           loading="lazy"
           className="h-full w-full object-cover"
-          onError={() => setFailed(true)}
+          onError={() => setFailedSrc(src ?? null)}
         />
       ) : (
         <span aria-hidden="true">{initials(name)}</span>

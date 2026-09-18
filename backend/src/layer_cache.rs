@@ -749,6 +749,9 @@ pub struct LayerIndexCache {
     /// Bumped whenever an index is invalidated, so caches derived from indices
     /// (the composed-overlay cache) can refuse entries built before the change.
     generation: Arc<AtomicU64>,
+    /// Woken when the generation advances, so an idle maintenance task can drop
+    /// newly-stale derived entries without waiting for a TTL deadline.
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl LayerIndexCache {
@@ -758,6 +761,7 @@ impl LayerIndexCache {
             inner: Mutex::new(Inner::default()),
             sweeps: AtomicU64::new(0),
             generation: Arc::new(AtomicU64::new(0)),
+            changed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -766,6 +770,12 @@ impl LayerIndexCache {
     /// from an index that has since been dropped.
     pub fn generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.generation)
+    }
+
+    /// A handle woken whenever the generation advances (see
+    /// [`Self::invalidate`] and [`Self::clear`]).
+    pub fn changed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.changed)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -866,6 +876,7 @@ impl LayerIndexCache {
     pub fn invalidate(&self, digest: &Digest) {
         self.lock().remove(digest);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_one();
     }
 
     /// Drops every cached index and advances the generation.
@@ -877,6 +888,13 @@ impl LayerIndexCache {
         inner.next_expires = None;
         drop(inner);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_one();
+    }
+
+    /// The instant the earliest cached index expires, or `None` when nothing is
+    /// cached. A maintenance task sleeps until then instead of polling.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.lock().next_expires
     }
 
     /// Drops every index older than the TTL.
@@ -1156,6 +1174,12 @@ impl ComposedLayerCache {
                 Err(ApiError::internal("layer reader failed"))
             }
         }
+    }
+
+    /// The instant the earliest cached overlay expires, or `None` when nothing
+    /// is cached. A maintenance task sleeps until then instead of polling.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.lock().next_expires
     }
 
     /// Drops every overlay older than the TTL.
@@ -1447,6 +1471,13 @@ impl ChangesCache {
         }
     }
 
+    /// The instant the earliest cached classification expires, or `None` when
+    /// nothing is cached. A maintenance task sleeps until then instead of
+    /// polling.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.lock().next_expires
+    }
+
     /// Drops every classification older than the TTL.
     pub fn sweep_expired(&self) {
         let now = Instant::now();
@@ -1692,6 +1723,12 @@ impl ListingCache {
             None => expires,
         });
         self.evict_to_budget(&mut inner);
+    }
+
+    /// The instant the earliest cached listing expires, or `None` when nothing
+    /// is cached. A maintenance task sleeps until then instead of polling.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.lock().next_expires
     }
 
     /// Drops every listing older than the TTL.
@@ -2359,5 +2396,43 @@ mod tests {
         layer_cache.invalidate(&digest(9));
         cache.sweep_stale_generation();
         assert_eq!(cache.len(), 0, "a stale-generation listing is reclaimed");
+    }
+
+    #[test]
+    fn next_deadline_tracks_the_earliest_entry_and_clears() {
+        let ttl = Duration::from_millis(1000);
+        let cache = LayerIndexCache::new(LayerCacheConfig {
+            max_bytes: 4096,
+            ttl,
+        });
+        assert_eq!(
+            cache.next_deadline(),
+            None,
+            "an empty cache has no deadline"
+        );
+
+        let a = digest(1);
+        let b = digest(2);
+        cache.insert(a.clone(), index(&["a"]));
+        let first = cache.next_deadline().expect("a deadline is set");
+
+        std::thread::sleep(Duration::from_millis(300));
+        cache.insert(b.clone(), index(&["b"]));
+        assert_eq!(
+            cache.next_deadline(),
+            Some(first),
+            "the oldest expiry remains the deadline"
+        );
+
+        std::thread::sleep(Duration::from_millis(800));
+        cache.sweep_expired();
+        assert!(cache.get(&b).is_some(), "b is still fresh");
+        let later = cache.next_deadline().expect("b still has a deadline");
+        assert!(later > first, "the deadline advanced to b's expiry");
+
+        let remaining = later.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining + Duration::from_millis(20));
+        cache.sweep_expired();
+        assert_eq!(cache.next_deadline(), None, "nothing left to expire");
     }
 }

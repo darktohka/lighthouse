@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -138,5 +138,25 @@ impl AppState {
         self.listing_cache.sweep_expired();
         self.listing_cache.sweep_stale_generation();
         self.limiters.retain_recent();
+    }
+
+    /// The earliest instant any cached entry expires, or `None` when every cache
+    /// is empty. The maintenance task sleeps until then.
+    pub fn next_cache_deadline(&self) -> Option<Instant> {
+        [
+            self.layer_cache.next_deadline(),
+            self.composed_cache.next_deadline(),
+            self.changes_cache.next_deadline(),
+            self.listing_cache.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// A handle woken when the layer-index generation advances, so the
+    /// maintenance task can drop newly-stale derived entries immediately.
+    pub fn caches_changed(&self) -> Arc<tokio::sync::Notify> {
+        self.layer_cache.changed()
     }
 }

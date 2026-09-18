@@ -29,9 +29,10 @@ use tokio::net::TcpListener;
 use crate::config::Config;
 use crate::state::AppState;
 
-/// How often the background task reclaims expired and generation-stale cache
-/// entries.
-const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Fallback delay when no cached entry has a TTL deadline. While idle the task
+/// normally wakes on a deadline or a generation advance; this only bounds how
+/// long it can sleep with nothing to expire.
+const MAINTENANCE_IDLE: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,24 +71,29 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Reclaims expired and stale cache entries on an interval until `shutdown`
-/// flips. Each sweep runs on the blocking pool so a large cache cannot stall
-/// the async runtime.
+/// Reclaims expired and stale cache entries until `shutdown` flips.
+///
+/// Sleeps until the earliest entry TTL, or until the layer-index generation
+/// advances, and only then sweeps; with nothing cached it falls back to
+/// [`MAINTENANCE_IDLE`]. Each sweep runs on the blocking pool so a large cache
+/// cannot stall the async runtime.
 async fn maintain_caches(state: AppState, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-    let mut ticker = tokio::time::interval(MAINTENANCE_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticker.tick().await;
+    let changed = state.caches_changed();
     loop {
+        let wait = state
+            .next_cache_deadline()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or(MAINTENANCE_IDLE);
         tokio::select! {
-            _ = ticker.tick() => {
-                let state = state.clone();
-                if let Err(err) = tokio::task::spawn_blocking(move || state.maintain()).await {
-                    tracing::warn!(error = %err, "cache maintenance panicked");
-                }
-                tracing::debug!("cache maintenance sweep complete");
-            }
+            _ = tokio::time::sleep(wait) => {}
+            _ = changed.notified() => {}
             _ = shutdown.changed() => break,
         }
+        let state = state.clone();
+        if let Err(err) = tokio::task::spawn_blocking(move || state.maintain()).await {
+            tracing::warn!(error = %err, "cache maintenance panicked");
+        }
+        tracing::debug!("cache maintenance sweep complete");
     }
 }
 

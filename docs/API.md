@@ -67,12 +67,12 @@ Heatmap       { start, end, days: [HeatmapDay], total }
 UpdateProfile { first_name?, last_name?, bio?, company?, location?, website?, theme? }
 ```
 
-`avatar_url` is resolved by the frontend from `LIBRAVATAR_BASE_URL` + the
-SHA-256 of the e-mail unless the user supplied an explicit override.
 `avatar_hash` is the lowercase hex SHA-256 of the trimmed, lowercased e-mail and
 is public: it lets unauthenticated visitors and other users render the Libravatar
-for any profile or user summary. The e-mail address itself is never returned by
-`UserProfile` or `UserSummary`.
+for any profile or user summary (the frontend builds the URL from
+`VITE_LIBRAVATAR_BASE_URL`, default `https://seccdn.libravatar.org`). An explicit
+`avatar_url`, when present, takes priority over the hash. The e-mail address
+itself is never returned by `UserProfile` or `UserSummary`.
 
 The heatmap window is the trailing 52 whole weeks (Sunday -> Saturday) ending
 on the Saturday of `end`'s week; `end` defaults to today.
@@ -411,7 +411,7 @@ AuthResponse    { user: UserView, refresh_token }
 ```
 
 `UserView` is the authenticated user object returned by `/auth/login`,
-`/auth/register`, `/auth/refresh` and `/auth/me`. Its `avatar_hash` is the
+`/auth/login/2fa`, `/auth/register` and `/auth/me`. Its `avatar_hash` is the
 lowercase hex SHA-256 of the trimmed, lowercased e-mail (the public Libravatar
 key), with the same semantics as `UserSummary`/`UserProfile` in §1: it lets the
 browser render the signed-in user's avatar without using the e-mail for that
