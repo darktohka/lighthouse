@@ -122,8 +122,11 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scope the GHA layer cache per architecture. Without a scope both
+          # matrix jobs share the default namespace and evict each other, so
+          # only one arch ever gets a warm layer cache.
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Export digest
         env:
