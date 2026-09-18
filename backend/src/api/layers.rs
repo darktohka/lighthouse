@@ -29,6 +29,7 @@ use serde_json::Value;
 use tar::EntryType;
 
 use crate::auth::middleware::Auth;
+use crate::config::effective_layer_scan_bytes;
 use crate::error::{ApiError, ApiResult};
 use crate::layer_cache::{CachedEntry, EntryKind, LayerIndex};
 use crate::models::Blob;
@@ -41,10 +42,6 @@ use tokio_util::io::ReaderStream;
 
 use super::visible_repository;
 
-/// Maximum number of tar entries inspected per request.
-const MAX_ENTRIES: u64 = 100_000;
-/// Maximum decompressed bytes read per request (512 MiB).
-const MAX_SCAN_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum size of a single file returned by the `file` endpoint (5 MiB).
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// Maximum entries returned by a single `tree` level.
@@ -288,10 +285,14 @@ fn entry_kind(entry_type: EntryType) -> EntryKind {
 
 /// Reads the archive through the entry stream, applying the whiteout and
 /// repeated-path rules, and returns the merged path map.
-fn merge_entries(reader: Box<dyn Read + Send>) -> ApiResult<HashMap<String, CachedEntry>> {
+fn merge_entries(
+    reader: Box<dyn Read + Send>,
+    max_scan_bytes: u64,
+    max_entries: u64,
+) -> ApiResult<HashMap<String, CachedEntry>> {
     let mut archive = tar::Archive::new(CappedReader {
         inner: reader,
-        remaining: MAX_SCAN_BYTES,
+        remaining: max_scan_bytes,
     });
     let mut merged: HashMap<String, CachedEntry> = HashMap::new();
     let mut pending_long_name: Option<Vec<u8>> = None;
@@ -300,7 +301,7 @@ fn merge_entries(reader: Box<dyn Read + Send>) -> ApiResult<HashMap<String, Cach
     for entry in archive.entries().map_err(map_io)? {
         let mut entry = entry.map_err(map_io)?;
         count += 1;
-        if count > MAX_ENTRIES {
+        if count > max_entries {
             return Err(too_large("layer has too many entries"));
         }
 
@@ -483,10 +484,12 @@ fn list_level(index: &LayerIndex, path: &str) -> ApiResult<Vec<LayerTreeEntry>> 
 fn find_file(
     reader: Box<dyn Read + Send>,
     target: &str,
+    max_scan_bytes: u64,
+    max_entries: u64,
 ) -> ApiResult<(Vec<u8>, String)> {
     let mut archive = tar::Archive::new(CappedReader {
         inner: reader,
-        remaining: MAX_SCAN_BYTES,
+        remaining: max_scan_bytes,
     });
     let mut pending_long_name: Option<Vec<u8>> = None;
     let mut count = 0u64;
@@ -494,7 +497,7 @@ fn find_file(
     for entry in archive.entries().map_err(map_io)? {
         let mut entry = entry.map_err(map_io)?;
         count += 1;
-        if count > MAX_ENTRIES {
+        if count > max_entries {
             return Err(too_large("layer has too many entries"));
         }
         let entry_type = entry.header().entry_type();
@@ -848,11 +851,13 @@ pub async fn layer_tree(
         None => {
             let file = open_blob(&state, &parsed).await?;
             let std_file = file.into_std().await;
+            let max_scan_bytes = effective_layer_scan_bytes(state.config.layer_max_scan_bytes);
+            let max_entries = state.config.layer_max_entries;
             state
                 .layer_cache
                 .get_or_build(&parsed, move || {
                     let reader = decompressed(std_file)?;
-                    let merged = merge_entries(reader)?;
+                    let merged = merge_entries(reader, max_scan_bytes, max_entries)?;
                     Ok(Arc::new(LayerIndex::from_entries(merged)))
                 })
                 .await?
@@ -882,10 +887,12 @@ pub async fn layer_file(
     let (_repository, _blob, parsed) = layer_blob(&state, &actor, &repo_name, &digest).await?;
     let file = open_blob(&state, &parsed).await?;
     let std_file = file.into_std().await;
+    let max_scan_bytes = effective_layer_scan_bytes(state.config.layer_max_scan_bytes);
+    let max_entries = state.config.layer_max_entries;
 
     let (content, content_type) = run_blocking(move || {
         let reader = decompressed(std_file)?;
-        find_file(reader, &target)
+        find_file(reader, &target, max_scan_bytes, max_entries)
     })
     .await?;
 

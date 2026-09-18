@@ -9,7 +9,7 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::auth::test_support::{body_json, create_user, test_state};
+use crate::auth::test_support::{body_json, create_user, test_state, test_state_with};
 use crate::models::User;
 use crate::oci::digest::Digest;
 use crate::oci::media_types;
@@ -954,6 +954,32 @@ async fn layer_tree_file_and_path_traversal_safety() {
     );
     let downloaded = body_bytes(response).await;
     assert_eq!(downloaded, layer);
+}
+
+#[tokio::test]
+async fn layer_tree_rejects_a_layer_over_the_scan_byte_cap() {
+    let (_dir, state) = test_state_with(|config| config.layer_max_scan_bytes = 1).await;
+    let app = crate::routes::build(state.clone());
+    let alice = create_user(&state, "alice").await;
+    let layer = layer_archive();
+    let (_, layer_digest) = seed_image(&state, "alice/img", "latest", b"config", &layer).await;
+    let tree_uri = format!("/api/repositories/alice/img/layers/{layer_digest}/tree");
+
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn layer_tree_rejects_a_layer_over_the_entry_cap() {
+    let (_dir, state) = test_state_with(|config| config.layer_max_entries = 1).await;
+    let app = crate::routes::build(state.clone());
+    let alice = create_user(&state, "alice").await;
+    let layer = layer_archive();
+    let (_, layer_digest) = seed_image(&state, "alice/img", "latest", b"config", &layer).await;
+    let tree_uri = format!("/api/repositories/alice/img/layers/{layer_digest}/tree");
+
+    let response = call(&app, Method::GET, &tree_uri, Some(actor(&alice)), None).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]

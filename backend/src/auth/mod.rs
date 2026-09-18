@@ -125,6 +125,8 @@ pub(crate) mod test_support {
             max_blob_size: None,
             layer_cache_max_bytes: 64 * 1024 * 1024,
             layer_cache_ttl_secs: 900,
+            layer_max_scan_bytes: 64 * 1024 * 1024,
+            layer_max_entries: 100_000,
             libravatar_base_url: "https://seccdn.libravatar.org".to_string(),
             title: "Lighthouse".to_string(),
         }

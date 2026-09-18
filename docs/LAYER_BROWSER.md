@@ -124,8 +124,8 @@ real concern. The browser enforces:
 
 | Cap | Value | Purpose |
 |---|---|---|
-| `MAX_ENTRIES` | 100,000 entries | Bound header/entry processing per request. |
-| `MAX_SCAN_BYTES` | 512 MiB | Bound total decompressed bytes read per request. |
+| `LAYER_MAX_ENTRIES` | 100,000 entries (configurable) | Bound header/entry processing per request. |
+| `LAYER_MAX_SCAN_BYTES` | 4 GiB (configurable) | Bound total decompressed bytes read per request. |
 | `MAX_FILE_BYTES` | 5 MiB | Largest single file returned by `file`. |
 | `MAX_TREE_ENTRIES` | 10,000 | Largest single directory listing returned. |
 | `MAX_PATH_LEN` | 4,096 bytes | Reject absurd paths before lookup. |
@@ -134,8 +134,14 @@ Exceeding the entry, byte or file caps produces `413 payload_too_large`; an
 unvisited path produces `404`; an unsafe path produces `400`. A capped read is
 surfaced as an `io::Error` with a sentinel message and mapped to `413`.
 
-The caps are deliberately generous enough for real images and small enough that
-a single request cannot exhaust memory or CPU.
+`LAYER_MAX_ENTRIES` and `LAYER_MAX_SCAN_BYTES` are configurable and default to
+values large enough for real images, including Immich-scale multi-gigabyte
+layers. The byte cap that a scan actually gets is the smaller of
+`LAYER_MAX_SCAN_BYTES` and available RAM minus a 256 MiB reserve, read from
+`/proc/meminfo` per request: a low-RAM host still scans layers that fit, and only
+a layer whose decompressed bytes would eat into the reserve is stopped at `413`.
+When memory cannot be probed, for example on non-Linux development hosts, the
+configured value is used unchanged. The remaining caps are fixed.
 
 ---
 

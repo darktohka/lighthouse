@@ -65,6 +65,10 @@ pub struct Config {
     pub layer_cache_max_bytes: usize,
     /// Seconds a cached layer index is served before it is rebuilt.
     pub layer_cache_ttl_secs: u64,
+    /// Maximum decompressed bytes the layer browser scans for one request.
+    pub layer_max_scan_bytes: u64,
+    /// Maximum tar entries the layer browser inspects for one request.
+    pub layer_max_entries: u64,
 
     pub libravatar_base_url: String,
     pub title: String,
@@ -121,6 +125,9 @@ impl Config {
         let jwt_secret = env::var("JWT_SECRET")
             .context("JWT_SECRET must be set — generate one with `openssl rand -hex 32`")?;
 
+        let layer_max_scan_bytes: u64 = env_parse("LAYER_MAX_SCAN_BYTES", 4 * 1024 * 1024 * 1024)?;
+        let layer_max_entries: u64 = env_parse("LAYER_MAX_ENTRIES", 100_000)?;
+
         Ok(Self {
             bind_addr,
             public_host: public_host.clone(),
@@ -171,6 +178,8 @@ impl Config {
 
             layer_cache_max_bytes: env_parse("LAYER_CACHE_MAX_BYTES", 64 * 1024 * 1024)?,
             layer_cache_ttl_secs: env_parse("LAYER_CACHE_TTL_SECS", 900)?,
+            layer_max_scan_bytes,
+            layer_max_entries,
 
             libravatar_base_url: env_or("LIBRAVATAR_BASE_URL", "https://seccdn.libravatar.org"),
             title: env_or("LIGHTHOUSE_TITLE", "Lighthouse"),
@@ -192,5 +201,84 @@ where
             .parse::<T>()
             .map_err(|e| anyhow::anyhow!("invalid value for {key}: {e}")),
         _ => Ok(default),
+    }
+}
+
+/// RAM kept free for the rest of the process when deriving a scan cap.
+const MEMORY_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Available memory in bytes, read from `/proc/meminfo`.
+///
+/// `MemAvailable` is preferred over `MemTotal`. Returns `None` when the file
+/// cannot be read or neither key parses, so the cap is left at its configured
+/// value on hosts where memory cannot be probed.
+fn available_memory_bytes() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total_kib = None;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("MemAvailable:") {
+            if let Some(kib) = meminfo_kib(value) {
+                return Some(kib.saturating_mul(1024));
+            }
+        } else if let Some(value) = line.strip_prefix("MemTotal:") {
+            total_kib = meminfo_kib(value);
+        }
+    }
+    total_kib.map(|kib| kib.saturating_mul(1024))
+}
+
+fn meminfo_kib(value: &str) -> Option<u64> {
+    value.split_whitespace().next()?.parse::<u64>().ok()
+}
+
+/// Lowers `configured` to leave at least [`MEMORY_RESERVE_BYTES`] free.
+fn clamp_scan_bytes(configured: u64, available: u64) -> u64 {
+    configured.min(available.saturating_sub(MEMORY_RESERVE_BYTES))
+}
+
+/// The byte cap one layer scan may consume: `configured`, lowered to available
+/// memory minus the reserve, or `configured` when memory cannot be probed.
+pub(crate) fn effective_layer_scan_bytes(configured: u64) -> u64 {
+    match available_memory_bytes() {
+        Some(available) => clamp_scan_bytes(configured, available),
+        None => configured,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MEMORY_RESERVE_BYTES, clamp_scan_bytes};
+
+    #[test]
+    fn scan_cap_is_the_configured_value_when_memory_is_ample() {
+        let configured = 4 * 1024 * 1024 * 1024;
+        assert_eq!(
+            clamp_scan_bytes(configured, 16 * 1024 * 1024 * 1024),
+            configured
+        );
+    }
+
+    #[test]
+    fn scan_cap_is_lowered_to_available_memory_minus_reserve() {
+        let available = 1024 * 1024 * 1024;
+        assert_eq!(
+            clamp_scan_bytes(u64::MAX, available),
+            available - MEMORY_RESERVE_BYTES
+        );
+    }
+
+    #[test]
+    fn scan_cap_never_exceeds_the_configured_ceiling() {
+        let configured = 100 * 1024 * 1024;
+        assert_eq!(
+            clamp_scan_bytes(configured, 16 * 1024 * 1024 * 1024),
+            configured
+        );
+    }
+
+    #[test]
+    fn scan_cap_is_zero_when_available_memory_is_at_or_below_the_reserve() {
+        assert_eq!(clamp_scan_bytes(u64::MAX, MEMORY_RESERVE_BYTES), 0);
+        assert_eq!(clamp_scan_bytes(u64::MAX, MEMORY_RESERVE_BYTES / 2), 0);
     }
 }
