@@ -205,7 +205,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/refresh", post(refresh))
         .route("/api/auth/me", get(me))
-        .route("/api/auth/captcha", get(captcha_challenge))
+        // `/api/auth/captcha` is mounted in `auth::router`, next to the
+        // `pow-captcha-axum` routes it shares a prefix with.
         .route("/api/auth/verify-email", post(verify_email))
         .route("/api/auth/resend-verification", post(resend_verification))
         .route("/api/auth/forgot-password", post(forgot_password))
@@ -700,7 +701,7 @@ async fn me(
     .into_response())
 }
 
-async fn captcha_challenge(
+pub(crate) async fn captcha_challenge(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
@@ -1224,6 +1225,27 @@ mod tests {
             "service_account_id": ctx.service_account_id,
             "is_admin": ctx.is_admin,
         }))
+    }
+
+    #[tokio::test]
+    async fn captcha_probe_and_solver_routes_share_the_auth_prefix() {
+        let (_dir, state) = test_state_with(|config| config.captcha_enabled = true).await;
+        crate::captcha::install(&state.db, &state.config);
+        let app = http_app(&state);
+
+        let probe = send(&app, "GET", "/api/auth/captcha", None, None).await;
+        assert_eq!(probe.status(), StatusCode::OK);
+        assert_eq!(body_json(probe).await["challenge"]["d"], 4);
+
+        let challenge = send(
+            &app,
+            "POST",
+            "/api/auth/captcha/challenge",
+            Some(json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(challenge.status(), StatusCode::OK);
     }
 
     #[test]

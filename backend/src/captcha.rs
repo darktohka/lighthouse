@@ -103,7 +103,13 @@ fn captcha_state(app: &AppState) -> Option<CaptchaState> {
 async fn ensure_schema(db: &Db) -> ApiResult<()> {
     SCHEMA
         .get_or_try_init(|| async {
-            pow_captcha_axum::run_migrations(db).await.map_err(|err| {
+            let migrations = pow_captcha_axum::MIGRATOR.iter().cloned().collect();
+            let mut migrator = sqlx::migrate::Migrator::with_migrations(migrations);
+            // The crate shares sqlx's `_sqlx_migrations` table by default, which
+            // collides with this binary's own migrator (`VersionMissing`). Track
+            // the captcha migrations separately; the table is created on demand.
+            migrator.dangerous_set_table_name("_pow_captcha_migrations");
+            migrator.run(db).await.map_err(|err| {
                 tracing::error!(error = %err, "failed to migrate captcha tables");
                 ApiError::internal("captcha unavailable")
             })

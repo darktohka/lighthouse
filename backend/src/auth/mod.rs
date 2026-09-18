@@ -16,6 +16,7 @@ pub mod totp;
 pub mod two_factor;
 
 use axum::Router;
+use axum::routing::get;
 
 use crate::db::Db;
 use crate::state::AppState;
@@ -70,9 +71,11 @@ pub fn router() -> Router<AppState> {
         .merge(token_endpoint::router())
         .merge(tokens::router());
 
-    if let Some(captcha) = crate::captcha::service() {
-        router = router.nest_service("/api/auth/captcha", captcha);
+    let mut captcha = Router::new().route("/", get(handlers::captcha_challenge));
+    if let Some(routes) = crate::captcha::service() {
+        captcha = captcha.merge(routes.with_state::<AppState>(()));
     }
+    router = router.nest("/api/auth/captcha", captcha);
 
     router
 }
