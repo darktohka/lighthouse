@@ -27,20 +27,16 @@ export function VerifyEmailPage() {
   useEffect(() => {
     if (!token || attemptedToken.current === token) return
     attemptedToken.current = token
-    let active = true
+    // Do NOT gate this on a per-effect cancel flag: the dedupe ref outlives
+    // StrictMode's setup -> cleanup -> setup cycle, so the cleanup would drop
+    // the only request's successful result. React 18+ ignores late setState.
     void verifyEmail(token).then(
-      () => {
-        if (active) setState('verified')
-      },
+      () => setState('verified'),
       (error: unknown) => {
-        if (!active) return
         setErrorMessage(authErrorMessage(error))
         setState('error')
       },
     )
-    return () => {
-      active = false
-    }
   }, [token, verifyEmail])
 
   const onResend = (event: FormEvent<HTMLFormElement>) => {
@@ -88,38 +84,40 @@ export function VerifyEmailPage() {
         ) : null}
 
         {state === 'idle' ? (
-          <Flash variant="default" title="Check your inbox">
-            Open the verification link we e-mailed you. If it did not arrive,
-            request a new one below.
-          </Flash>
-        ) : null}
+          <>
+            <Flash variant="default" title="Check your inbox">
+              Open the verification link we e-mailed you. If it did not arrive,
+              request a new one below.
+            </Flash>
 
-        <form className="space-y-3" onSubmit={onResend} noValidate>
-          <TextInput
-            label="E-mail address"
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            hint="We only send a message when the account exists."
-            autoComplete="email"
-          />
-          <Button type="submit" disabled={resendStatus === 'sending'}>
-            {resendStatus === 'sending'
-              ? 'Sending…'
-              : 'Resend verification e-mail'}
-          </Button>
-        </form>
+            <form className="space-y-3" onSubmit={onResend} noValidate>
+              <TextInput
+                label="E-mail address"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                hint="We only send a message when the account exists."
+                autoComplete="email"
+              />
+              <Button type="submit" disabled={resendStatus === 'sending'}>
+                {resendStatus === 'sending'
+                  ? 'Sending…'
+                  : 'Resend verification e-mail'}
+              </Button>
+            </form>
 
-        {resendStatus === 'sent' ? (
-          <Flash variant="success">
-            If that address belongs to an unverified account, a new link is on its
-            way.
-          </Flash>
-        ) : null}
-        {resendStatus === 'error' ? (
-          <Flash variant="danger">
-            We could not resend the message. Please try again later.
-          </Flash>
+            {resendStatus === 'sent' ? (
+              <Flash variant="success">
+                If that address belongs to an unverified account, a new link is on its
+                way.
+              </Flash>
+            ) : null}
+            {resendStatus === 'error' ? (
+              <Flash variant="danger">
+                We could not resend the message. Please try again later.
+              </Flash>
+            ) : null}
+          </>
         ) : null}
       </div>
     </AuthLayout>
