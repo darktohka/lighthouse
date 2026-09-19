@@ -126,7 +126,8 @@ async fn issue(
             return oauth_error("invalid_request", "username and password are required");
         };
         let resolved =
-            middleware::authenticate_basic(state, username, password, client_ip, None, false).await;
+            middleware::authenticate_basic(state, username, password, client_ip, None, false, true)
+                .await;
         let authenticated = resolved.is_authenticated();
         (resolved, authenticated)
     } else {

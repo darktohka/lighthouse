@@ -47,10 +47,13 @@ async fn list(
 
     let mut visible: Vec<String> = Vec::new();
     for repository in candidates {
-        if permissions::repository_access(state, actor, &repository.name)
+        // The catalog is a listing: `repository_visible` additionally withholds
+        // hidden repositories unless the caller holds explicit access. OCI
+        // *pull* authorization is unaffected, so a hidden-but-public repository
+        // is still fetchable by name; it is simply not enumerated here.
+        if permissions::repository_visible(state, actor, &repository)
             .await
             .map_err(|err| RegistryError::internal(err.message))?
-            .can_pull
         {
             visible.push(repository.name);
         }

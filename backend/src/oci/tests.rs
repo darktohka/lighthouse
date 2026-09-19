@@ -1166,6 +1166,54 @@ mod auth_flow {
     }
 
     #[tokio::test]
+    async fn app_password_is_not_a_control_plane_session() {
+        let (_dir, state, app) = harness().await;
+        let alice: i64 =
+            sqlx::query_scalar("SELECT id FROM users WHERE username = ? COLLATE NOCASE")
+                .bind(USER)
+                .fetch_one(&state.db)
+                .await
+                .expect("user");
+        let (_, secret) = crate::auth::app_passwords::create(&state, alice, "ci")
+            .await
+            .expect("app password");
+        let credentials = basic_with(USER, &secret);
+
+        let registry = send(
+            &app,
+            Method::GET,
+            "/v2/",
+            None,
+            &[("authorization", &credentials)],
+            &[],
+        )
+        .await;
+        assert_eq!(registry.status(), StatusCode::OK);
+
+        let token = send(
+            &app,
+            Method::GET,
+            "/api/auth/token?service=registry.local&scope=repository:darktohka/site:pull",
+            None,
+            &[("authorization", &credentials)],
+            &[],
+        )
+        .await;
+        assert_eq!(token.status(), StatusCode::OK);
+
+        let me = send(
+            &app,
+            Method::GET,
+            "/api/auth/me",
+            None,
+            &[("authorization", &credentials)],
+            &[],
+        )
+        .await;
+        assert_eq!(me.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn registry_tokens_cannot_authenticate_web_endpoints() {
         let (_dir, state, app) = harness().await;
         let alice: i64 =
@@ -1624,6 +1672,34 @@ async fn catalog_hides_repositories_the_actor_cannot_pull() {
         serde_json::json!([])
     );
 }
+
+#[tokio::test]
+async fn catalog_hides_hidden_repositories_from_non_explicit_callers() {
+    let (_dir, state, app) = harness().await;
+    push_blob(&app, "darktohka/alpha", b"a").await;
+    push_blob(&app, "darktohka/beta", b"b").await;
+    sqlx::query("UPDATE repositories SET is_hidden = 1 WHERE name = ? COLLATE NOCASE")
+        .bind("darktohka/beta")
+        .execute(&state.db)
+        .await
+        .expect("hide repository");
+    create_user(&state, "bob").await;
+
+    let owner = send(&app, Method::GET, "/v2/_catalog", Some(USER), &[], &[]).await;
+    assert_eq!(owner.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(owner).await["repositories"],
+        serde_json::json!(["darktohka/alpha", "darktohka/beta"])
+    );
+
+    let stranger = send(&app, Method::GET, "/v2/_catalog", Some("bob"), &[], &[]).await;
+    assert_eq!(stranger.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(stranger).await["repositories"],
+        serde_json::json!(["darktohka/alpha"])
+    );
+}
+
 
 #[tokio::test]
 async fn private_repository_requires_authentication() {

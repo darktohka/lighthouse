@@ -1028,6 +1028,19 @@ fn repository_names(value: &Value) -> Vec<String> {
         .collect()
 }
 
+fn feed_mentions(value: &Value, needle: &str) -> bool {
+    value["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .any(|item| {
+            item["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains(needle))
+                || item["metadata"]["repository"].as_str() == Some(needle)
+        })
+}
+
 #[tokio::test]
 async fn hidden_repository_visible_only_to_explicit_access() {
     let (_dir, state, app) = harness().await;
@@ -1246,6 +1259,35 @@ async fn activity_feed_hides_repositories_the_caller_cannot_see() {
     assert!(owner_repos.contains(&"alice/public".to_string()));
     assert!(owner_repos.contains(&"alice/secret".to_string()));
     assert!(owner_repos.contains(&"alice/hidden".to_string()));
+}
+
+#[tokio::test]
+async fn activity_feed_hides_deleted_hidden_repository_names() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/public", "v1", b"{\"p\":1}", b"layer-p").await;
+
+    sqlx::query(
+        "INSERT INTO activity \
+         (actor_user_id, namespace_id, repository_id, kind, summary, metadata, is_public, created_at) \
+         VALUES (NULL, (SELECT id FROM namespaces WHERE name = 'alice' COLLATE NOCASE), NULL, \
+                 'manifest.deleted', 'deleted repository alice/ghost', \
+                 '{\"repository\":\"alice/ghost\"}', 0, ?)",
+    )
+    .bind(chrono::Utc::now())
+    .execute(&state.db)
+    .await
+    .expect("activity");
+
+    let anon =
+        body_json(call(&app, Method::GET, "/api/activity?per_page=100", None, None).await).await;
+    assert!(!feed_mentions(&anon, "alice/ghost"));
+
+    let owner = body_json(
+        call(&app, Method::GET, "/api/activity?per_page=100", Some(actor(&alice)), None).await,
+    )
+    .await;
+    assert!(feed_mentions(&owner, "alice/ghost"));
 }
 
 #[tokio::test]

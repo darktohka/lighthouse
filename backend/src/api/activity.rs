@@ -97,6 +97,7 @@ async fn feed(
 
     let rows = all_activity(&state).await?;
     let visible_namespaces = visible_namespace_ids(&state, &actor).await?;
+    let explicit_namespaces = explicit_namespace_ids(&state, &actor).await?;
     let visible_repositories = super::visible_repository_ids(&state, &actor).await?;
 
     let filtered: Vec<Activity> = rows
@@ -109,9 +110,19 @@ async fn feed(
             }
             match row.repository_id {
                 Some(repository_id) => visible_repositories.contains(&repository_id),
-                None => row
-                    .namespace_id
-                    .is_some_and(|id| visible_namespaces.contains(&id)),
+                None => {
+                    let Some(namespace_id) = row.namespace_id else {
+                        return false;
+                    };
+                    if !visible_namespaces.contains(&namespace_id) {
+                        return false;
+                    }
+                    if names_repository(row) {
+                        explicit_namespaces.contains(&namespace_id)
+                    } else {
+                        true
+                    }
+                }
             }
         })
         .collect();
@@ -156,6 +167,31 @@ async fn visible_namespace_ids(state: &AppState, actor: &AuthContext) -> ApiResu
         }
     }
     Ok(visible)
+}
+
+async fn explicit_namespace_ids(state: &AppState, actor: &AuthContext) -> ApiResult<HashSet<i64>> {
+    let namespaces = sqlx::query_as::<_, Namespace>("SELECT * FROM namespaces")
+        .fetch_all(&state.db)
+        .await?;
+    let mut explicit = HashSet::new();
+    for namespace in namespaces {
+        let resolved =
+            crate::permissions::resolve_namespace_access(state, actor, &namespace.name).await?;
+        if resolved.explicit || super::is_namespace_owner(actor, &namespace) {
+            explicit.insert(namespace.id);
+        }
+    }
+    Ok(explicit)
+}
+
+/// Whether an activity row names a repository even though `repository_id` is
+/// empty. The `repository_id` FK is `ON DELETE SET NULL`, so deleting a
+/// repository clears the id of every historical row while `summary`/`metadata`
+/// still carry its name.
+fn names_repository(row: &Activity) -> bool {
+    parse_metadata(row.metadata.as_deref())
+        .get("repository")
+        .is_some()
 }
 
 async fn dashboard(

@@ -53,7 +53,8 @@ pub async fn resolve_identity(
     let ip = logging::client_ip(&req, &state.config);
 
     if req.extensions().get::<AuthContext>().is_none() {
-        let announce = req.uri().path() != crate::auth::token_endpoint::TOKEN_PATH;
+        let path = req.uri().path();
+        let announce = path != crate::auth::token_endpoint::TOKEN_PATH;
         let credentials = Credentials {
             cookie: sessions::access_token_from_headers(req.headers(), &state.config),
             basic: basic_credentials(req.headers()),
@@ -63,7 +64,7 @@ pub async fn resolve_identity(
             ip: ip.clone(),
             agent: logging::user_agent(&req),
         };
-        let mut ctx = resolve(&state, credentials, audit, announce).await;
+        let mut ctx = resolve(&state, credentials, audit, announce, registry_surface(path)).await;
 
         // A registry bearer token carrying a service-account id is checked
         // against that account's IP allowlist here, at the single point where a
@@ -89,11 +90,19 @@ pub async fn resolve_identity(
     next.run(req).await
 }
 
+/// Surfaces where a registry credential is valid: the OCI distribution API and
+/// the registry bearer-token service. An app password authenticates these, but
+/// must never establish a control-plane web session.
+fn registry_surface(path: &str) -> bool {
+    path == crate::auth::token_endpoint::TOKEN_PATH || path == "/v2" || path.starts_with("/v2/")
+}
+
 async fn resolve(
     state: &AppState,
     credentials: Credentials,
     audit: Audit,
     announce: bool,
+    registry_surface: bool,
 ) -> AuthContext {
     if let Some(token) = credentials.cookie {
         if let Some(ctx) = user_from_access_token(state, &token).await {
@@ -102,7 +111,7 @@ async fn resolve(
     }
 
     if let Some(basic) = credentials.basic {
-        return from_basic(state, &basic, &audit, announce).await;
+        return from_basic(state, &basic, &audit, announce, registry_surface).await;
     }
 
     if let Some(token) = credentials.bearer {
@@ -157,6 +166,7 @@ async fn from_basic(
     basic: &BasicCredentials,
     audit: &Audit,
     announce: bool,
+    registry_surface: bool,
 ) -> AuthContext {
     authenticate_basic(
         state,
@@ -165,6 +175,7 @@ async fn from_basic(
         audit.ip.as_deref(),
         audit.agent.as_deref(),
         announce,
+        registry_surface,
     )
     .await
 }
@@ -172,6 +183,9 @@ async fn from_basic(
 /// Verifies a username/password pair against service accounts, app passwords and
 /// account passwords, in that order. Shared by the request middleware and the
 /// token endpoint's `password` grant, which receives credentials in the body.
+/// `allow_app_password` is true only on registry surfaces: an app password is a
+/// registry credential and must not authenticate the control plane, where it
+/// would also bypass the account's second factor.
 pub async fn authenticate_basic(
     state: &AppState,
     username: &str,
@@ -179,6 +193,7 @@ pub async fn authenticate_basic(
     ip: Option<&str>,
     user_agent: Option<&str>,
     announce: bool,
+    allow_app_password: bool,
 ) -> AuthContext {
     if let Ok(Some(account)) = service_accounts::authenticate(state, username, password, ip).await {
         if announce {
@@ -217,7 +232,9 @@ pub async fn authenticate_basic(
 
     if let Some(user) = user {
         if user.email_verified {
-            if let Ok(Some(account)) = app_passwords::authenticate(state, user.id, password).await {
+            if allow_app_password
+                && let Ok(Some(account)) = app_passwords::authenticate(state, user.id, password).await
+            {
                 if announce {
                     record_login_event(
                         &state.db,
@@ -363,7 +380,10 @@ impl FromRequestParts<AppState> for Authenticated {
             .get::<AuthContext>()
             .cloned()
             .unwrap_or_default();
-        if ctx.is_authenticated() && !ctx.is_registry_token() {
+        if ctx.is_authenticated()
+            && !ctx.is_registry_token()
+            && ctx.credential != CredentialSource::AppPassword
+        {
             Ok(Authenticated(ctx))
         } else {
             Err(ApiError::unauthorized("authentication required"))
@@ -387,7 +407,10 @@ impl FromRequestParts<AppState> for Admin {
             .get::<AuthContext>()
             .cloned()
             .unwrap_or_default();
-        if ctx.is_admin && !ctx.is_registry_token() {
+        if ctx.is_admin
+            && !ctx.is_registry_token()
+            && ctx.credential != CredentialSource::AppPassword
+        {
             Ok(Admin(ctx))
         } else {
             Err(ApiError::forbidden("administrator access required"))

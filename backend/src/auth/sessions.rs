@@ -160,20 +160,24 @@ pub async fn rotate_refresh(
         tokens::issue_access_token(&state.config, user.id, &user.username, &session.id)?;
     let now = Utc::now();
 
-    db::with_busy_retry(|| async {
+    let rotated = db::with_busy_retry(|| async {
         sqlx::query(
             "UPDATE sessions SET refresh_token_hash = ?, last_seen_at = ? \
-             WHERE id = ? AND revoked_at IS NULL",
+             WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL",
         )
         .bind(&refresh_hash)
         .bind(now)
         .bind(&session.id)
+        .bind(stored)
         .execute(&state.db)
-        .await?;
-        Ok::<(), sqlx::Error>(())
+        .await
     })
     .await
     .map_err(ApiError::from)?;
+
+    if rotated.rows_affected() != 1 {
+        return Err(ApiError::unauthorized("refresh token is not valid"));
+    }
 
     Ok(Rotated {
         access_token,
@@ -357,5 +361,23 @@ mod tests {
 
         assert!(revoke(&state, &session.id).await.expect("revoke"));
         assert!(!revoke(&state, &session.id).await.expect("re-revoke"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_rotation_has_a_single_winner() {
+        let (_dir, state) = test_state().await;
+        let user = crate::auth::test_support::create_user(&state, "alice").await;
+        let (session, refresh) = create(&state, &user, SessionAudit::default())
+            .await
+            .expect("create session");
+
+        let (first, second) = tokio::join!(
+            rotate_refresh(&state, &session.id, &refresh),
+            rotate_refresh(&state, &session.id, &refresh),
+        );
+        assert!(
+            first.is_ok() ^ second.is_ok(),
+            "exactly one concurrent rotation must win"
+        );
     }
 }
