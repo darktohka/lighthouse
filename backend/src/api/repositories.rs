@@ -774,13 +774,7 @@ pub(crate) async fn namespace_repository_summaries(
 
     let mut summaries = Vec::new();
     for repository in repositories {
-        if repository.is_hidden && !actor.is_authenticated() {
-            continue;
-        }
-        if !authz::repository_access(state, actor, &repository.name)
-            .await?
-            .can_pull
-        {
+        if !authz::repository_visible(state, actor, &repository).await? {
             continue;
         }
         let size = sizes.get(&repository.id).map(|value| value.0).unwrap_or(0);

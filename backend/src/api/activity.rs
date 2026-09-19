@@ -102,13 +102,17 @@ async fn feed(
     let filtered: Vec<Activity> = rows
         .into_iter()
         .filter(|row| {
-            actor.user_id == row.actor_user_id
-                || row
-                    .repository_id
-                    .is_some_and(|id| visible_repositories.contains(&id))
-                || row
+            if let Some(actor_user_id) = actor.user_id
+                && Some(actor_user_id) == row.actor_user_id
+            {
+                return true;
+            }
+            match row.repository_id {
+                Some(repository_id) => visible_repositories.contains(&repository_id),
+                None => row
                     .namespace_id
-                    .is_some_and(|id| visible_namespaces.contains(&id))
+                    .is_some_and(|id| visible_namespaces.contains(&id)),
+            }
         })
         .collect();
 

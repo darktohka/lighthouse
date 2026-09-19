@@ -99,34 +99,18 @@ pub(crate) async fn namespace_view(
     actor: &AuthContext,
     namespace: &Namespace,
 ) -> ApiResult<NamespaceView> {
-    let access = permissions::namespace_access(state, actor, &namespace.name).await?;
-    let repository_count: i64 = if access.can_push {
-        sqlx::query_scalar("SELECT COUNT(*) FROM repositories WHERE namespace_id = ?")
-            .bind(namespace.id)
-            .fetch_one(&state.db)
-            .await?
-    } else if access.can_pull {
-        let rows: Vec<(String, bool)> =
-            sqlx::query_as("SELECT name, is_hidden FROM repositories WHERE namespace_id = ?")
-                .bind(namespace.id)
-                .fetch_all(&state.db)
-                .await?;
-        let mut count = 0i64;
-        for (name, is_hidden) in rows {
-            if is_hidden && !actor.is_authenticated() {
-                continue;
-            }
-            if permissions::repository_access(state, actor, &name)
-                .await?
-                .can_pull
-            {
-                count += 1;
-            }
+    let repositories = sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE namespace_id = ? ORDER BY id",
+    )
+    .bind(namespace.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut repository_count = 0i64;
+    for repository in &repositories {
+        if permissions::repository_visible(state, actor, repository).await? {
+            repository_count += 1;
         }
-        count
-    } else {
-        0
-    };
+    }
 
     let owner = match namespace.owner_user_id {
         Some(owner_id) => user_summary(&state.db, owner_id).await?,
@@ -151,39 +135,18 @@ async fn list(
     Query(query): Query<PageQuery>,
 ) -> ApiResult<Response> {
     let actor = auth.0;
-    let anonymous = !actor.is_authenticated();
-    let user_id = actor.user_id;
-    let service_account_id = actor.service_account_id;
 
-    let namespaces = sqlx::query_as::<_, Namespace>(
-        "SELECT n.* FROM namespaces n \
-         WHERE n.owner_user_id = ? \
-            OR EXISTS (SELECT 1 FROM namespace_members m \
-                       WHERE m.namespace_id = n.id AND m.user_id = ?) \
-            OR EXISTS (SELECT 1 FROM namespace_permissions p \
-                       WHERE p.namespace_id = n.id \
-                         AND ((p.subject_type = 'user' AND p.subject_user_id = ?) \
-                              OR (p.subject_type = 'anonymous' AND ?))) \
-            OR EXISTS (SELECT 1 FROM service_account_grants g \
-                       WHERE g.namespace_id = n.id AND g.service_account_id = ?) \
-            OR (n.is_public = 1 AND EXISTS ( \
-                    SELECT 1 FROM repositories r \
-                    WHERE r.namespace_id = n.id AND r.is_public = 1 \
-                      AND (r.is_hidden = 0 OR ?))) \
-         ORDER BY n.name COLLATE NOCASE",
-    )
-    .bind(user_id)
-    .bind(user_id)
-    .bind(user_id)
-    .bind(anonymous)
-    .bind(service_account_id)
-    .bind(actor.is_authenticated())
-    .fetch_all(&state.db)
-    .await?;
+    let namespaces =
+        sqlx::query_as::<_, Namespace>("SELECT * FROM namespaces ORDER BY name COLLATE NOCASE")
+            .fetch_all(&state.db)
+            .await?;
 
     let pagination = Pagination::from_query(&query);
-    let mut views = Vec::with_capacity(namespaces.len());
+    let mut views = Vec::new();
     for namespace in &namespaces {
+        if !namespace_visible(&state, &actor, namespace).await? {
+            continue;
+        }
         views.push(namespace_view(&state, &actor, namespace).await?);
     }
     let total = views.len() as i64;

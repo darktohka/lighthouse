@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use crate::error::{ApiError, ErrorCode, RegistryError};
+use crate::models::Repository;
 use crate::state::{AppState, AuthContext};
 
 /// The permissions a subject holds for a namespace or repository.
@@ -203,28 +204,70 @@ async fn service_repository_grant(
     Ok(access_from(flags))
 }
 
-/// True when the actor owns or is a member of the namespace.
+/// Effective access to a scope together with how it was obtained. `explicit`
+/// distinguishes ownership, membership and delegations from access granted
+/// solely by public visibility; hidden repositories are revealed only to
+/// explicitly authorized callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccessResolution {
+    pub access: Access,
+    pub explicit: bool,
+}
+
+impl AccessResolution {
+    fn none() -> Self {
+        Self {
+            access: Access::default(),
+            explicit: false,
+        }
+    }
+
+    fn explicit(access: Access) -> Self {
+        Self {
+            access,
+            explicit: true,
+        }
+    }
+
+    fn public(access: Access) -> Self {
+        Self {
+            access,
+            explicit: false,
+        }
+    }
+}
+
+pub async fn resolve_namespace_access(
+    state: &AppState,
+    actor: &AuthContext,
+    namespace: &str,
+) -> Result<AccessResolution, ApiError> {
+    let Some(namespace) = load_namespace(state, namespace).await? else {
+        return Ok(AccessResolution::none());
+    };
+    if is_owner_or_member(state, &namespace, actor).await? {
+        return Ok(AccessResolution::explicit(Access::full()));
+    }
+    if let Some(access) = user_namespace_grant(state, namespace.id, actor).await? {
+        return Ok(AccessResolution::explicit(access));
+    }
+    if let Some(access) = service_namespace_grant(state, namespace.id, actor).await? {
+        return Ok(AccessResolution::explicit(access));
+    }
+    if namespace.is_public {
+        return Ok(AccessResolution::public(Access::pull_only()));
+    }
+    Ok(AccessResolution::none())
+}
+
 pub async fn namespace_access(
     state: &AppState,
     actor: &AuthContext,
     namespace: &str,
 ) -> Result<Access, ApiError> {
-    let Some(namespace) = load_namespace(state, namespace).await? else {
-        return Ok(Access::default());
-    };
-    if is_owner_or_member(state, &namespace, actor).await? {
-        return Ok(Access::full());
-    }
-    if let Some(access) = user_namespace_grant(state, namespace.id, actor).await? {
-        return Ok(access);
-    }
-    if let Some(access) = service_namespace_grant(state, namespace.id, actor).await? {
-        return Ok(access);
-    }
-    if namespace.is_public {
-        return Ok(Access::pull_only());
-    }
-    Ok(Access::default())
+    Ok(resolve_namespace_access(state, actor, namespace)
+        .await?
+        .access)
 }
 
 /// Effective access to a repository name (may not exist yet — push creates it).
@@ -233,6 +276,16 @@ pub async fn repository_access(
     actor: &AuthContext,
     repo_name: &str,
 ) -> Result<Access, ApiError> {
+    Ok(resolve_repository_access(state, actor, repo_name)
+        .await?
+        .access)
+}
+
+pub async fn resolve_repository_access(
+    state: &AppState,
+    actor: &AuthContext,
+    repo_name: &str,
+) -> Result<AccessResolution, ApiError> {
     let namespace_name = repo_name.split('/').next().unwrap_or(repo_name);
     let namespace = load_namespace(state, namespace_name).await?;
     let repository = state
@@ -244,24 +297,24 @@ pub async fn repository_access(
     if let Some(namespace) = &namespace
         && is_owner_or_member(state, namespace, actor).await?
     {
-        return Ok(Access::full());
+        return Ok(AccessResolution::explicit(Access::full()));
     }
 
     if let Some(repository) = &repository {
         if let Some(access) = user_repository_grant(state, repository.id, actor).await? {
-            return Ok(access);
+            return Ok(AccessResolution::explicit(access));
         }
         if let Some(access) = service_repository_grant(state, repository.id, actor).await? {
-            return Ok(access);
+            return Ok(AccessResolution::explicit(access));
         }
     }
 
     if let Some(namespace) = &namespace {
         if let Some(access) = user_namespace_grant(state, namespace.id, actor).await? {
-            return Ok(access);
+            return Ok(AccessResolution::explicit(access));
         }
         if let Some(access) = service_namespace_grant(state, namespace.id, actor).await? {
-            return Ok(access);
+            return Ok(AccessResolution::explicit(access));
         }
     }
 
@@ -270,10 +323,23 @@ pub async fn repository_access(
             .as_ref()
             .is_some_and(|namespace| namespace.is_public);
     if public {
-        return Ok(Access::pull_only());
+        return Ok(AccessResolution::public(Access::pull_only()));
     }
 
-    Ok(Access::default())
+    Ok(AccessResolution::none())
+}
+
+/// Control-plane visibility of an existing repository: the actor must be able to
+/// pull it, and a hidden repository is revealed only to explicit access.
+/// OCI authorization is deliberately unaffected — hidden means unlisted, not
+/// private.
+pub async fn repository_visible(
+    state: &AppState,
+    actor: &AuthContext,
+    repository: &Repository,
+) -> Result<bool, ApiError> {
+    let resolved = resolve_repository_access(state, actor, &repository.name).await?;
+    Ok(resolved.access.can_pull && (!repository.is_hidden || resolved.explicit))
 }
 
 /// Enforces access for the OCI API, producing spec-compliant errors.

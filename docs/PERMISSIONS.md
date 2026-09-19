@@ -63,10 +63,14 @@ Notes:
   An empty allowlist is unrestricted; see `docs/AUTH.md` for enforcement.
 - Anonymous actors match only `subject_type='anonymous'` grants and public
   visibility.
-- `repositories.is_hidden` is a presentation flag, not an authorization rule. It
-  only unlists a repository on the control plane for unauthenticated callers;
-  it does not alter the `repository_access` resolution table above or OCI
-  authorization, so anonymous `docker pull` access is unchanged.
+- `repositories.is_hidden` is a presentation flag, not an OCI authorization
+  rule. It changes control-plane visibility only: a hidden repository is
+  revealed to a caller solely through **explicit** access — ownership,
+  membership, or a repository/namespace grant — never through public
+  visibility. A namespace whose visible repositories are all hidden is not
+  enumerated. The `repository_access` resolution table above and OCI
+  authorization are unchanged, so anonymous `docker pull` of a hidden but
+  public repository still succeeds.
 
 `namespace_access` follows the same order without the repository steps:
 ownership/membership, then `namespace_permissions`, then namespace-scoped

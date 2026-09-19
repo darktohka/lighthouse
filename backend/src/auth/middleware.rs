@@ -119,6 +119,10 @@ async fn resolve(
 
 async fn user_from_access_token(state: &AppState, token: &str) -> Option<AuthContext> {
     let claims = tokens::verify_access_token(&state.config, token).ok()?;
+    let session = sessions::find(&state.db, &claims.jti).await.ok()??;
+    if session.user_id != claims.sub || !sessions::is_active(&session) {
+        return None;
+    }
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = ?")
         .bind(claims.sub)
         .fetch_optional(&state.db)

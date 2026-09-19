@@ -37,7 +37,6 @@ use crate::db::Db;
 use crate::error::{ApiError, ApiResult};
 use crate::models::{Namespace, Repository, User};
 use crate::permissions as authz;
-use crate::permissions::Access;
 use crate::state::{AppState, AuthContext};
 
 /// Default page size for control-plane list endpoints.
@@ -418,23 +417,32 @@ pub async fn namespace_by_id(db: &Db, id: i64) -> ApiResult<Option<Namespace>> {
     Ok(namespace)
 }
 
-pub fn access_visible(access: Access) -> bool {
-    access.can_pull || access.can_push
-}
-
-/// A namespace is visible when the caller owns/is a member of it, holds a
-/// grant, or the namespace is public.
+/// A namespace is visible when the caller holds explicit access (ownership,
+/// membership or a delegation) or can see at least one repository inside it, so
+/// a public namespace whose entire visible set is hidden is not enumerated.
 pub async fn namespace_visible(
     state: &AppState,
     actor: &AuthContext,
     namespace: &Namespace,
 ) -> ApiResult<bool> {
-    if namespace.is_public {
+    if authz::resolve_namespace_access(state, actor, &namespace.name)
+        .await?
+        .explicit
+    {
         return Ok(true);
     }
-    Ok(access_visible(
-        authz::namespace_access(state, actor, &namespace.name).await?,
-    ))
+    let repositories = sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE namespace_id = ? ORDER BY id",
+    )
+    .bind(namespace.id)
+    .fetch_all(&state.db)
+    .await?;
+    for repository in &repositories {
+        if authz::repository_visible(state, actor, repository).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// True when the caller owns the namespace (or is a global administrator).
@@ -486,10 +494,7 @@ pub async fn visible_repository(
     else {
         return Err(ApiError::not_found("repository not found"));
     };
-    if repository.is_hidden && !actor.is_authenticated() {
-        return Err(ApiError::not_found("repository not found"));
-    }
-    if !access_visible(authz::repository_access(state, actor, name).await?) {
+    if !authz::repository_visible(state, actor, &repository).await? {
         return Err(ApiError::not_found("repository not found"));
     }
     Ok(repository)
@@ -530,13 +535,7 @@ pub async fn visible_repository_ids(
         .await?;
     let mut visible = HashSet::new();
     for repository in repositories {
-        if repository.is_hidden && !actor.is_authenticated() {
-            continue;
-        }
-        if authz::repository_access(state, actor, &repository.name)
-            .await?
-            .can_pull
-        {
+        if authz::repository_visible(state, actor, &repository).await? {
             visible.insert(repository.id);
         }
     }

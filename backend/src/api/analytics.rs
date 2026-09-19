@@ -95,10 +95,7 @@ async fn overview(
                 continue;
             }
         }
-        if permissions::repository_access(&state, &actor, &repository.name)
-            .await?
-            .can_pull
-        {
+        if permissions::repository_visible(&state, &actor, repository).await? {
             scoped.push(repository.clone());
         }
     }

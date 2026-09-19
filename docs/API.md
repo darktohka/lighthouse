@@ -147,12 +147,12 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
 - `can_pull` / `can_push` report the calling actor's effective access to the
   repository (push implies pull); the UI uses them to offer reads to pullers and
   mutations only to pushers.
-- `is_hidden` marks a repository as unlisted. Hidden repositories are omitted
-  from anonymous listings (Explore, namespace repository lists and counts,
-  activity feed, profile public repository counts), and their detail, tag and
-  layer endpoints return `404` to unauthenticated callers. Authenticated callers
-  with access see them normally, and anonymous OCI `docker pull` authorization is
-  unaffected.
+- `is_hidden` marks a repository as unlisted. A hidden repository is visible on
+  the control plane only to callers with explicit access (ownership, membership
+  or a delegation); public visibility alone does not reveal it. It is otherwise
+  omitted from listings, counts, analytics, the activity feed and the blob
+  browser, and a namespace whose visible repositories are all hidden is not
+  enumerated. Anonymous OCI `docker pull` authorization is unaffected.
 - `size` is the sum of the compressed blob sizes referenced by the tag.
 - A tag's top-level `manifest`, `config` and `layers` describe the *combined*
   view: `layers` is the union of every reachable child manifest's blobs,

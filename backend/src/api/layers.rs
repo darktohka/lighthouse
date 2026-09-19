@@ -620,8 +620,8 @@ async fn visible_blob(state: &AppState, actor: &AuthContext, digest: &str) -> Ap
         return Err(not_found("blob not found"));
     };
 
-    let repository_names = sqlx::query_scalar::<_, String>(
-        "SELECT r.name FROM blob_repositories br \
+    let repositories = sqlx::query_as::<_, crate::models::Repository>(
+        "SELECT r.* FROM blob_repositories br \
          JOIN repositories r ON r.id = br.repository_id \
          WHERE br.blob_id = ?",
     )
@@ -629,11 +629,8 @@ async fn visible_blob(state: &AppState, actor: &AuthContext, digest: &str) -> Ap
     .fetch_all(&state.db)
     .await?;
 
-    for name in repository_names {
-        if permissions::repository_access(state, actor, &name)
-            .await?
-            .can_pull
-        {
+    for repository in repositories {
+        if permissions::repository_visible(state, actor, &repository).await? {
             return Ok(blob);
         }
     }

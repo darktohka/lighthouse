@@ -841,17 +841,45 @@ async fn private_repository_is_404_for_strangers() {
 async fn hidden_repository_is_unlisted_for_anonymous() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
-    seed_image(&state, "alice/visible", "v1", b"{\"visible\":1}", b"layer-visible").await;
-    seed_image(&state, "alice/hidden", "v1", b"{\"hidden\":1}", b"layer-hidden").await;
+    seed_image(
+        &state,
+        "alice/visible",
+        "v1",
+        b"{\"visible\":1}",
+        b"layer-visible",
+    )
+    .await;
+    seed_image(
+        &state,
+        "alice/hidden",
+        "v1",
+        b"{\"hidden\":1}",
+        b"layer-hidden",
+    )
+    .await;
     sqlx::query("UPDATE repositories SET is_hidden = 1 WHERE name = 'alice/hidden' COLLATE NOCASE")
         .execute(&state.db)
         .await
         .expect("hide repository");
 
-    let hidden = call(&app, Method::GET, "/api/repositories/alice/hidden", None, None).await;
+    let hidden = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/hidden",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
 
-    let visible = call(&app, Method::GET, "/api/repositories/alice/visible", None, None).await;
+    let visible = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/visible",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(visible.status(), StatusCode::OK);
 
     let anonymous_list = body_json(
@@ -898,7 +926,14 @@ async fn hidden_repository_is_unlisted_for_anonymous() {
 async fn hiding_a_repository_persists_via_patch() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
-    seed_image(&state, "alice/visible", "v1", b"{\"cfg\":1}", b"layer-patch").await;
+    seed_image(
+        &state,
+        "alice/visible",
+        "v1",
+        b"{\"cfg\":1}",
+        b"layer-patch",
+    )
+    .await;
 
     let response = call(
         &app,
@@ -911,9 +946,19 @@ async fn hiding_a_repository_persists_via_patch() {
     assert_eq!(response.status(), StatusCode::OK);
     let patched = body_json(response).await;
     assert_eq!(patched["is_hidden"], true);
-    assert_eq!(patched["is_public"], true, "hiding does not change visibility");
+    assert_eq!(
+        patched["is_public"], true,
+        "hiding does not change visibility"
+    );
 
-    let hidden = call(&app, Method::GET, "/api/repositories/alice/visible", None, None).await;
+    let hidden = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/visible",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
 
     let response = call(
@@ -928,8 +973,322 @@ async fn hiding_a_repository_persists_via_patch() {
     let unhidden = body_json(response).await;
     assert_eq!(unhidden["is_hidden"], false);
 
-    let visible = call(&app, Method::GET, "/api/repositories/alice/visible", None, None).await;
+    let visible = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/visible",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(visible.status(), StatusCode::OK);
+}
+
+async fn hide_repository(state: &AppState, name: &str) {
+    sqlx::query("UPDATE repositories SET is_hidden = 1 WHERE name = ? COLLATE NOCASE")
+        .bind(name)
+        .execute(&state.db)
+        .await
+        .expect("hide repository");
+}
+
+async fn repository_id(state: &AppState, name: &str) -> i64 {
+    state
+        .registry
+        .find_repository(name)
+        .await
+        .expect("find")
+        .expect("repository")
+        .id
+}
+
+async fn insert_activity(state: &AppState, actor_user_id: Option<i64>, repo_name: &str) {
+    let repo_id = repository_id(state, repo_name).await;
+    sqlx::query(
+        "INSERT INTO activity \
+         (actor_user_id, namespace_id, repository_id, kind, summary, metadata, is_public, created_at) \
+         VALUES (?, (SELECT namespace_id FROM repositories WHERE id = ?), ?, 'tag.pushed', \
+                 'Pushed tag latest', '{\"tag\":\"latest\"}', 1, ?)",
+    )
+    .bind(actor_user_id)
+    .bind(repo_id)
+    .bind(repo_id)
+    .bind(chrono::Utc::now())
+    .execute(&state.db)
+    .await
+    .expect("activity");
+}
+
+fn repository_names(value: &Value) -> Vec<String> {
+    value["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|item| item["repository"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn hidden_repository_visible_only_to_explicit_access() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let bob = create_user(&state, "bob").await;
+    seed_image(&state, "alice/visible", "v1", b"{\"v\":1}", b"layer-v").await;
+    seed_image(&state, "alice/hidden", "v1", b"{\"h\":1}", b"layer-h").await;
+    hide_repository(&state, "alice/hidden").await;
+
+    let anon = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces/alice/repositories",
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(anon["total"], 1);
+
+    let stranger = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces/alice/repositories",
+            Some(actor(&bob)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(stranger["total"], 1);
+    assert_eq!(stranger["items"][0]["name"], "alice/visible");
+
+    let stranger_detail = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/hidden",
+        Some(actor(&bob)),
+        None,
+    )
+    .await;
+    assert_eq!(stranger_detail.status(), StatusCode::NOT_FOUND);
+
+    let owner = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces/alice/repositories",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(owner["total"], 2);
+
+    let hidden_id = repository_id(&state, "alice/hidden").await;
+    sqlx::query(
+        "INSERT INTO repository_permissions \
+         (repository_id, subject_type, subject_user_id, can_pull, can_push, created_by, created_at) \
+         VALUES (?, 'user', ?, 1, 0, NULL, ?)",
+    )
+    .bind(hidden_id)
+    .bind(bob.id)
+    .bind(chrono::Utc::now())
+    .execute(&state.db)
+    .await
+    .expect("grant");
+
+    let granted_detail = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/hidden",
+        Some(actor(&bob)),
+        None,
+    )
+    .await;
+    assert_eq!(granted_detail.status(), StatusCode::OK);
+
+    let granted = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces/alice/repositories",
+            Some(actor(&bob)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(granted["total"], 2);
+}
+
+#[tokio::test]
+async fn namespace_with_only_hidden_repositories_is_not_enumerated() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let bob = create_user(&state, "bob").await;
+    seed_image(&state, "alice/hidden", "v1", b"{\"h\":1}", b"layer-h").await;
+    hide_repository(&state, "alice/hidden").await;
+
+    for viewer in [None, Some(actor(&bob))] {
+        let listing =
+            body_json(call(&app, Method::GET, "/api/namespaces", viewer, None).await).await;
+        let names: Vec<String> = listing["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(!names.contains(&"alice".to_string()));
+
+        let detail = call(&app, Method::GET, "/api/namespaces/alice", None, None).await;
+        assert_eq!(detail.status(), StatusCode::NOT_FOUND);
+    }
+
+    let owner = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/namespaces",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        owner["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["name"] == "alice")
+    );
+}
+
+#[tokio::test]
+async fn analytics_hides_hidden_repositories_from_public_callers() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/visible", "v1", b"{\"v\":1}", b"layer-v").await;
+    seed_image(&state, "alice/hidden", "v1", b"{\"h\":1}", b"layer-h").await;
+    hide_repository(&state, "alice/hidden").await;
+
+    let anon =
+        body_json(call(&app, Method::GET, "/api/analytics/overview", None, None).await).await;
+    let anon_repos: Vec<String> = anon["disk_usage_by_repository"]
+        .as_array()
+        .expect("disk")
+        .iter()
+        .map(|entry| entry["repository"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(anon_repos.contains(&"alice/visible".to_string()));
+    assert!(!anon_repos.contains(&"alice/hidden".to_string()));
+
+    let owner = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/analytics/overview",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    let owner_repos: Vec<String> = owner["disk_usage_by_repository"]
+        .as_array()
+        .expect("disk")
+        .iter()
+        .map(|entry| entry["repository"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(owner_repos.contains(&"alice/hidden".to_string()));
+}
+
+#[tokio::test]
+async fn activity_feed_hides_repositories_the_caller_cannot_see() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/public", "v1", b"{\"p\":1}", b"layer-p").await;
+    seed_image(&state, "alice/secret", "v1", b"{\"s\":1}", b"layer-s").await;
+    seed_image(&state, "alice/hidden", "v1", b"{\"h\":1}", b"layer-h").await;
+    sqlx::query("UPDATE repositories SET is_public = 0 WHERE name = 'alice/secret' COLLATE NOCASE")
+        .execute(&state.db)
+        .await
+        .expect("private repository");
+    hide_repository(&state, "alice/hidden").await;
+
+    insert_activity(&state, Some(alice.id), "alice/public").await;
+    insert_activity(&state, Some(alice.id), "alice/secret").await;
+    insert_activity(&state, Some(alice.id), "alice/hidden").await;
+    insert_activity(&state, None, "alice/hidden").await;
+
+    let anon =
+        body_json(call(&app, Method::GET, "/api/activity?per_page=100", None, None).await).await;
+    let anon_repos = repository_names(&anon);
+    assert!(anon_repos.contains(&"alice/public".to_string()));
+    assert!(!anon_repos.contains(&"alice/secret".to_string()));
+    assert!(!anon_repos.contains(&"alice/hidden".to_string()));
+
+    let owner = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/activity?per_page=100",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    let owner_repos = repository_names(&owner);
+    assert!(owner_repos.contains(&"alice/public".to_string()));
+    assert!(owner_repos.contains(&"alice/secret".to_string()));
+    assert!(owner_repos.contains(&"alice/hidden".to_string()));
+}
+
+#[tokio::test]
+async fn access_token_is_rejected_after_session_revocation() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let (session, _refresh) = crate::auth::sessions::create(
+        &state,
+        &alice,
+        crate::auth::sessions::SessionAudit::default(),
+    )
+    .await
+    .expect("session");
+    let token = crate::auth::tokens::issue_access_token(
+        &state.config,
+        alice.id,
+        &alice.username,
+        &session.id,
+    )
+    .expect("token");
+    let cookie = format!("{}={token}", state.config.cookie_name);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/auth/me")
+        .header("cookie", &cookie)
+        .body(Body::empty())
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    crate::auth::sessions::revoke(&state, &session.id)
+        .await
+        .expect("revoke");
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/auth/me")
+        .header("cookie", &cookie)
+        .body(Body::empty())
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
