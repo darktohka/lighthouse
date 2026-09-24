@@ -478,6 +478,81 @@ async fn repository_detail_tags_patch_and_delete() {
 }
 
 #[tokio::test]
+async fn tag_list_supports_server_side_sorting() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/app", "alpha", b"{\"cfg\":1}", b"aa").await;
+    seed_image(&state, "alice/app", "beta", b"{\"cfg\":1}", b"bbbbbbbbbbbb").await;
+    seed_image(&state, "alice/app", "gamma", b"{\"cfg\":1}", b"ggggggg").await;
+
+    fn tag_names(page: &Value) -> Vec<String> {
+        page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["name"].as_str().expect("name").to_string())
+            .collect()
+    }
+
+    let default = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(default["total"], 3);
+    assert_eq!(tag_names(&default), ["alpha", "beta", "gamma"]);
+
+    let name_desc = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags?sort=name&order=desc",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(tag_names(&name_desc), ["gamma", "beta", "alpha"]);
+
+    let size_desc = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags?sort=compressed_size&order=desc",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(tag_names(&size_desc), ["beta", "gamma", "alpha"]);
+    let sizes: Vec<i64> = size_desc["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| item["compressed_size"].as_i64().expect("compressed_size"))
+        .collect();
+    assert!(sizes.windows(2).all(|window| window[0] > window[1]));
+
+    let bogus = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/app/tags?sort=bogus",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(bogus.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn detail_reports_effective_actor_access() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;

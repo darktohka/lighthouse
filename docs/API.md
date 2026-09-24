@@ -115,7 +115,7 @@ returns `409 conflict` (`namespace_taken`). Reserved first segments
 | GET | `/repositories/{namespace}/{*repo}` | optional | image detail |
 | PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility / hidden |
 | DELETE | `/repositories/{namespace}/{*repo}` | required | delete the image and all its tags |
-| GET | `/repositories/{namespace}/{*repo}/tags` | optional | paginated tags |
+| GET | `/repositories/{namespace}/{*repo}/tags?sort=name\|digest\|compressed_size\|pull_count\|updated_at&order=desc\|asc` | optional | paginated tags |
 | GET | `/repositories/{namespace}/{*repo}/tags/{tag}` | optional | tag detail |
 | DELETE | `/repositories/{namespace}/{*repo}/tags/{tag}` | required | delete one tag |
 | POST | `/repositories/{namespace}/{*repo}/tags/batch-delete` | required | `{tags:[…]}` → `{deleted:n}` |
@@ -188,6 +188,14 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   with `path` asc. Invalid `sort`/`order` values return `400 bad_request`. The
   response keeps the `{items, total, page, per_page}` envelope of
   `RepositorySummary`, filtered to the repositories the caller may pull.
+- `GET /repositories/{namespace}/{*repo}/tags` is paginated (`page`, `per_page`,
+  defaults `1` / `25`) and sorted server-side. `sort` is `name`, `digest`,
+  `compressed_size`, `pull_count` or `updated_at` (default `name`); `order` is
+  `asc` or `desc` (default `asc` for `name`/`digest`, otherwise `desc`). `order`
+  applies to the primary key only; ties always break on `name` ascending, and
+  `name` comparisons are case-insensitive. Invalid `sort`/`order` values return
+  `400 bad_request`. The response keeps the `{items, total, page, per_page}`
+  envelope of `TagSummary`.
 
 ---
 

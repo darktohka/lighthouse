@@ -914,6 +914,26 @@ async fn list_tags(
     };
     let pagination = Pagination::from_query(&page);
 
+    let sort = crate::oci::query_first(&query, "sort").unwrap_or("name");
+    if !matches!(
+        sort,
+        "name" | "digest" | "compressed_size" | "pull_count" | "updated_at"
+    ) {
+        return Err(ApiError::bad_request(
+            "sort must be `name`, `digest`, `compressed_size`, `pull_count` or `updated_at`",
+        ));
+    }
+    let default_order = if sort == "name" || sort == "digest" {
+        "asc"
+    } else {
+        "desc"
+    };
+    let order = crate::oci::query_first(&query, "order").unwrap_or(default_order);
+    if order != "asc" && order != "desc" {
+        return Err(ApiError::bad_request("order must be `asc` or `desc`"));
+    }
+    let ascending = order == "asc";
+
     let tags = tags_for_repository(&state, repository.id).await?;
     let manifest_ids: Vec<i64> = tags.iter().map(|tag| tag.manifest_id).collect();
     let manifests = manifests_by_ids(&state.db, &manifest_ids).await?;
@@ -926,6 +946,21 @@ async fn list_tags(
             items.push(build_tag_summary(&state, repository.id, tag, manifest, &sizes).await?);
         }
     }
+
+    // Sort the entire filtered list before pagination. `order` applies to the
+    // primary key only; ties always break on `name` ascending.
+    items.sort_by(|a, b| {
+        let primary = match sort {
+            "digest" => a.digest.cmp(&b.digest),
+            "compressed_size" => a.compressed_size.cmp(&b.compressed_size),
+            "pull_count" => a.pull_count.cmp(&b.pull_count),
+            "updated_at" => a.updated_at.cmp(&b.updated_at),
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        };
+        let primary = if ascending { primary } else { primary.reverse() };
+        primary.then_with(|| a.name.cmp(&b.name))
+    });
+
     let total = items.len() as i64;
     let windowed = pagination.window(items);
     Ok(Json(pagination.envelope(windowed, total)).into_response())

@@ -16,7 +16,11 @@ import {
   ErrorState,
   LoadingState,
 } from '../components/primitives/StateViews'
-import { Table, type TableColumn } from '../components/primitives/Table'
+import {
+  Table,
+  TableSortHeader,
+  type TableColumn,
+} from '../components/primitives/Table'
 import { VisibilityLabel } from '../components/VisibilityLabel'
 import { isApiError } from '../api/client'
 import { NotFoundPage } from './NotFoundPage'
@@ -28,6 +32,7 @@ import {
   shortDigest,
 } from '../lib/format'
 import { tagRoute } from '../lib/paths'
+import { nextTagOrder, type TagOrder, type TagSort } from '../lib/tagSort'
 import { useAuth } from '../lib/auth-context'
 import { useAsync } from '../lib/useAsync'
 
@@ -41,6 +46,8 @@ export type RepositoryPageProps = {
 export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
   const { user } = useAuth()
   const [page, setPage] = useState(1)
+  const [sort, setSort] = useState<TagSort>('name')
+  const [order, setOrder] = useState<TagOrder>('asc')
   const [confirming, setConfirming] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -51,9 +58,23 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
   )
 
   const tagsState = useAsync(
-    (signal) => repositoriesApi.tags(namespace, repo, page, PER_PAGE, { signal }),
-    `repo-tags:${namespace}:${repo}:${page}`,
+    (signal) =>
+      repositoriesApi.tags(
+        namespace,
+        repo,
+        page,
+        PER_PAGE,
+        { sort, order },
+        { signal },
+      ),
+    `repo-tags:${namespace}:${repo}:${page}:${sort}:${order}`,
   )
+
+  const changeSort = (next: TagSort) => {
+    setOrder((previous) => nextTagOrder(sort, previous, next))
+    setSort(next)
+    setPage(1)
+  }
 
   if (isApiError(detailState.error) && detailState.error.status === 404) {
     return <NotFoundPage />
@@ -89,7 +110,15 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
   const columns: TableColumn<TagSummary>[] = [
     {
       key: 'tag',
-      header: 'Tag',
+      header: (
+        <TableSortHeader
+          label="Tag"
+          active={sort === 'name'}
+          direction={order}
+          onSort={() => changeSort('name')}
+        />
+      ),
+      sortDirection: sort === 'name' ? order : undefined,
       render: (tag) => (
         <Link
           to={tagRoute(namespace, repo, tag.name)}
@@ -101,7 +130,15 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
     },
     {
       key: 'digest',
-      header: 'Digest',
+      header: (
+        <TableSortHeader
+          label="Digest"
+          active={sort === 'digest'}
+          direction={order}
+          onSort={() => changeSort('digest')}
+        />
+      ),
+      sortDirection: sort === 'digest' ? order : undefined,
       render: (tag) => (
         <span className="font-mono text-xs text-muted" title={tag.digest}>
           {shortDigest(tag.digest)}
@@ -115,20 +152,44 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
     },
     {
       key: 'size',
-      header: 'Compressed',
+      header: (
+        <TableSortHeader
+          label="Compressed"
+          active={sort === 'compressed_size'}
+          direction={order}
+          onSort={() => changeSort('compressed_size')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'compressed_size' ? order : undefined,
       render: (tag) => formatBytes(tag.compressed_size),
     },
     {
       key: 'pulls',
-      header: 'Pulls',
+      header: (
+        <TableSortHeader
+          label="Pulls"
+          active={sort === 'pull_count'}
+          direction={order}
+          onSort={() => changeSort('pull_count')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'pull_count' ? order : undefined,
       render: (tag) => formatNumber(tag.pull_count),
     },
     {
       key: 'updated',
-      header: 'Updated',
+      header: (
+        <TableSortHeader
+          label="Updated"
+          active={sort === 'updated_at'}
+          direction={order}
+          onSort={() => changeSort('updated_at')}
+        />
+      ),
       align: 'right',
+      sortDirection: sort === 'updated_at' ? order : undefined,
       render: (tag) => (
         <span title={formatDateTime(tag.updated_at)}>
           {formatRelativeTime(tag.updated_at)}

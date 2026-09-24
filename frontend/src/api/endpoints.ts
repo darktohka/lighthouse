@@ -67,6 +67,7 @@ import {
   tagApiPath,
 } from '../lib/paths'
 import type { RepositoryOrder, RepositorySort } from '../lib/repositorySort'
+import type { TagOrder, TagSort } from '../lib/tagSort'
 
 const namespacePageSchema = pageSchema(namespaceSchema)
 const repositoryPageSchema = pageSchema(repositorySummarySchema)
@@ -375,10 +376,16 @@ export const repositories = {
     repo: string,
     page = 1,
     perPage = 25,
+    params?: { sort?: TagSort; order?: TagOrder },
     options?: RequestOptions,
   ) {
     return api.get(
-      `${repositoryApiPath(namespace, repo)}/tags${buildQuery({ page, per_page: perPage })}`,
+      `${repositoryApiPath(namespace, repo)}/tags${buildQuery({
+        page,
+        per_page: perPage,
+        sort: params?.sort,
+        order: params?.order,
+      })}`,
       tagPageSchema,
       options,
     )
