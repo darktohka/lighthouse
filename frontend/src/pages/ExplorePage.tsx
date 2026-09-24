@@ -25,6 +25,7 @@ import {
   LoadingState,
 } from '../components/primitives/StateViews'
 import { VisibilityLabel } from '../components/VisibilityLabel'
+import { useAuth } from '../lib/auth-context'
 import { formatBytes, formatRelativeTime } from '../lib/format'
 import { repositoryRelativePath, repoRoute } from '../lib/paths'
 import {
@@ -45,6 +46,7 @@ const MAX_NAMESPACES_SCANNED = 8
 const PER_PAGE = 12
 
 export function ExplorePage() {
+  const { status, user } = useAuth()
   const [searchParams] = useSearchParams()
   const query = (searchParams.get('q') ?? '').trim().toLowerCase()
   const [sort, setSort] = useState<RepositorySort>('updated')
@@ -57,6 +59,10 @@ export function ExplorePage() {
     setPageState({ context: listContext, page: next })
   }
 
+  // Child effects run before the AuthProvider's session restore, so without
+  // this gate the first fetch is anonymous and stale until a manual reload.
+  const authReady = status !== 'loading'
+  const viewerKey = user ? `user:${user.id}` : status
   const { data, error, loading, reload } = useAsync<ExploreData>(
     async (signal) => {
       const page = await namespacesApi.list(1, 60, { signal })
@@ -78,7 +84,8 @@ export function ExplorePage() {
       )
       return { namespaces: page.items, repositories: repoPages.flat() }
     },
-    'explore',
+    `explore:${viewerKey}`,
+    authReady,
   )
 
   const filtered = useMemo(() => {

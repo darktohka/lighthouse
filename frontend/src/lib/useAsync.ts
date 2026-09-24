@@ -5,6 +5,13 @@
  * The loader always receives an `AbortSignal`; the previous request is aborted
  * when the key changes or the component unmounts, so late responses can't
  * clobber newer state.
+ *
+ * `enabled` (default `true`) lets a caller hold the loader back until a
+ * prerequisite is ready — most importantly until the session behind an
+ * auth-dependent request has resolved. While disabled no request is made and
+ * the hook reports `loading: true`; enabling it (or changing `key`) starts the
+ * load. This prevents a public page from fetching as an anonymous viewer and
+ * then rendering that stale, empty result after the user's session appears.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -30,6 +37,7 @@ function toError(value: unknown): Error {
 export function useAsync<T>(
   loader: (signal: AbortSignal) => Promise<T>,
   key: string,
+  enabled = true,
 ): AsyncResult<T> {
   const [state, setState] = useState<InternalState<T>>({
     key,
@@ -45,6 +53,7 @@ export function useAsync<T>(
   })
 
   useEffect(() => {
+    if (!enabled) return
     const controller = new AbortController()
     let active = true
 
@@ -62,7 +71,7 @@ export function useAsync<T>(
       active = false
       controller.abort()
     }
-  }, [key, nonce])
+  }, [key, nonce, enabled])
 
   const reload = useCallback(() => {
     setState((previous) => ({ ...previous, settled: false }))
@@ -74,7 +83,7 @@ export function useAsync<T>(
   return {
     data: state.data,
     error: isCurrent ? state.error : null,
-    loading: !isCurrent || !state.settled,
+    loading: !enabled || !isCurrent || !state.settled,
     reload,
   }
 }
