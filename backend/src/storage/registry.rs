@@ -234,6 +234,7 @@ impl Registry {
         let digest = Digest::from_bytes(content).to_string();
         let media_type = media_type.to_string();
         let artifact_type = extract_artifact_type(content);
+        let subject_digest = extract_subject_digest(content);
         let size = content.len() as i64;
         let content = content.to_vec();
         let now = Utc::now();
@@ -242,18 +243,20 @@ impl Registry {
             let mut tx = self.db.begin().await?;
             sqlx::query(
                 "INSERT INTO manifests \
-                 (digest, media_type, size, artifact_type, content, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?) \
+                 (digest, media_type, size, artifact_type, subject_digest, content, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(digest) DO UPDATE SET \
                      media_type = excluded.media_type, \
                      size = excluded.size, \
                      artifact_type = COALESCE(excluded.artifact_type, manifests.artifact_type), \
+                     subject_digest = COALESCE(excluded.subject_digest, manifests.subject_digest), \
                      content = excluded.content",
             )
             .bind(&digest)
             .bind(&media_type)
             .bind(size)
             .bind(&artifact_type)
+            .bind(&subject_digest)
             .bind(&content)
             .bind(now)
             .execute(&mut *tx)
@@ -742,6 +745,14 @@ fn extract_artifact_type(content: &[u8]) -> Option<String> {
     serde_json::from_slice::<serde_json::Value>(content)
         .ok()
         .and_then(|value| string_field(&value, "artifactType"))
+}
+
+/// The `subject.digest` an attachment manifest declares, if any.
+fn extract_subject_digest(content: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("subject").cloned())
+        .and_then(|subject| string_field(&subject, "digest"))
 }
 
 #[cfg(test)]

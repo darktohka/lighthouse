@@ -220,6 +220,43 @@ pub struct PlatformDetail {
     pub layers: Vec<LayerInfo>,
 }
 
+/// One in-toto statement layer inside an attestation manifest.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttestationPredicateView {
+    /// `in-toto.io/predicate-type` annotation, when present.
+    pub predicate_type: Option<String>,
+    /// Short label (`provenance`, `sbom`, …) derived from the predicate type.
+    pub kind: String,
+    pub digest: String,
+    pub media_type: String,
+    pub size: i64,
+}
+
+/// The image platform an attestation was built for.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttestationTargetView {
+    pub digest: String,
+    pub os: String,
+    pub architecture: String,
+    pub variant: Option<String>,
+}
+
+/// An attestation manifest attached to a tag, exposed to the control plane.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttestationView {
+    pub digest: String,
+    pub media_type: String,
+    pub artifact_type: Option<String>,
+    pub size: i64,
+    /// Deduplicated short predicate labels, in statement order.
+    pub kinds: Vec<String>,
+    pub predicates: Vec<AttestationPredicateView>,
+    pub subject_digest: Option<String>,
+    pub referenced_digest: Option<String>,
+    /// The image platform this attestation belongs to, when it can be resolved.
+    pub target: Option<AttestationTargetView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PublicPermission {
     pub id: i64,
@@ -250,6 +287,9 @@ pub struct TagDetail {
     pub config: Option<Value>,
     pub layers: Vec<LayerInfo>,
     pub platform_details: Vec<PlatformDetail>,
+    /// in-toto attestations attached to this tag, one entry per attestation
+    /// manifest, each pointing at the image platform it was built for.
+    pub attestations: Vec<AttestationView>,
     pub can_pull: bool,
     pub can_push: bool,
 }

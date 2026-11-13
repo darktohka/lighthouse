@@ -1,9 +1,14 @@
-import { FileIcon } from '@primer/octicons-react'
+import { FileIcon, ShieldCheckIcon } from '@primer/octicons-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { repositories as repositoriesApi } from '../api/endpoints'
-import type { LayerInfo, PlatformDetail, TagDetail } from '../api/schemas'
+import type {
+  Attestation,
+  LayerInfo,
+  PlatformDetail,
+  TagDetail,
+} from '../api/schemas'
 import { CopyButton } from '../components/CopyButton'
 import { JsonViewer } from '../components/json-viewer'
 import { PageHeader } from '../components/PageHeader'
@@ -35,10 +40,11 @@ export type TagPageProps = {
   tag: string
 }
 
-type TabId = 'manifest' | 'config' | 'layers'
+type TabId = 'manifest' | 'config' | 'layers' | 'attestations'
 
 const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
   { id: 'layers', label: 'Layers' },
+  { id: 'attestations', label: 'Attestations' },
   { id: 'manifest', label: 'Manifest' },
   { id: 'config', label: 'Config' },
 ]
@@ -67,6 +73,39 @@ function owningPlatformDigest(
       ? undefined
       : matches.find((item) => item.digest === scope.digest)
   return (scoped ?? matches[0])?.digest ?? detail.digest
+}
+
+/** Short labels for one attestation, falling back to its predicates' kinds. */
+function attestationKinds(attestation: Attestation): string[] {
+  return attestation.kinds.length > 0
+    ? attestation.kinds
+    : attestation.predicates.map((predicate) => predicate.kind)
+}
+
+/** `linux/arm64` for the attestation's target, or `''` when it is unknown. */
+function attestationPlatformLabel(attestation: Attestation): string {
+  const target = attestation.target
+  if (target === null) return ''
+  return formatPlatform(target.os, target.architecture, target.variant)
+}
+
+/**
+ * Short labels of the attestations that describe one image manifest.
+ *
+ * Attestation manifests belong to a specific platform, so the platform scope
+ * buttons read `linux/arm64 (provenance, sbom)`. An attestation whose target is
+ * unknown is left out of every platform.
+ */
+function attestationKindsFor(
+  attestations: readonly Attestation[],
+  digest: string,
+): string[] {
+  const kinds = new Set<string>()
+  for (const attestation of attestations) {
+    if (attestation.target?.digest !== digest) continue
+    for (const label of attestationKinds(attestation)) kinds.add(label)
+  }
+  return [...kinds]
 }
 
 function tabClass(active: boolean): string {
@@ -114,6 +153,129 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
     const layersCaption = active
       ? `Layers for ${formatPlatform(active.os, active.architecture, active.variant)}`
       : 'Layers referenced by this tag'
+
+    // Attestations follow the platform scope: a selected platform that carries
+    // attestations narrows the table to them. Otherwise every attestation of
+    // the tag is listed, so a platform without its own attestation never hides
+    // the ones the other platforms have.
+    const scopedAttestations =
+      active === null
+        ? []
+        : detail.attestations.filter(
+            (attestation) => attestation.target?.digest === active.digest,
+          )
+    const scopeHasAttestations = scopedAttestations.length > 0
+    const viewAttestations = scopeHasAttestations
+      ? scopedAttestations
+      : detail.attestations.toSorted((left, right) => {
+          // Attestations with an unknown target sort last.
+          const leftLabel = attestationPlatformLabel(left)
+          const rightLabel = attestationPlatformLabel(right)
+          if (leftLabel !== rightLabel) {
+            if (leftLabel.length === 0) return 1
+            if (rightLabel.length === 0) return -1
+            return leftLabel.localeCompare(rightLabel)
+          }
+          return left.digest.localeCompare(right.digest)
+        })
+    const attestationsCaption =
+      scopeHasAttestations && active !== null
+        ? `in-toto attestations attached to ${formatPlatform(active.os, active.architecture, active.variant)}`
+        : 'in-toto attestations attached to this tag'
+
+    const attestationColumns: TableColumn<Attestation>[] = [
+      {
+        key: 'platform',
+        header: 'Platform',
+        render: (attestation) => {
+          const label = attestationPlatformLabel(attestation)
+          if (label.length === 0) return <span className="text-muted">-</span>
+          return (
+            <span className="whitespace-nowrap font-mono text-xs">{label}</span>
+          )
+        },
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        render: (attestation) => {
+          const kinds = attestationKinds(attestation)
+          if (kinds.length === 0) return <span className="text-muted">-</span>
+          return (
+            <span className="flex flex-wrap items-center gap-1">
+              {kinds.map((kind, index) => (
+                <Label
+                  key={`${kind}:${index}`}
+                  variant={index === 0 ? 'accent' : 'muted'}
+                >
+                  {kind}
+                </Label>
+              ))}
+            </span>
+          )
+        },
+      },
+      {
+        key: 'predicate',
+        header: 'Predicate',
+        render: (attestation) => {
+          const predicateType =
+            attestation.predicates[0]?.predicate_type ?? null
+          if (predicateType === null) return <span className="text-muted">-</span>
+          return (
+            <span
+              className="block max-w-[22rem] truncate font-mono text-xs"
+              title={predicateType}
+            >
+              {predicateType}
+            </span>
+          )
+        },
+      },
+      {
+        key: 'digest',
+        header: 'Digest',
+        render: (attestation) => (
+          <span className="font-mono text-xs" title={attestation.digest}>
+            {shortDigest(attestation.digest)}
+          </span>
+        ),
+      },
+      {
+        key: 'size',
+        header: 'Size',
+        align: 'right',
+        render: (attestation) => formatBytes(attestation.size),
+      },
+      {
+        key: 'actions',
+        header: <span className="sr-only">Actions</span>,
+        align: 'right',
+        render: (attestation) => {
+          const statementDigest = attestation.predicates[0]?.digest
+          // The app has no blob-viewer route; the statement is a blob the
+          // registry API can serve, so expose its digest for copy/paste.
+          if (statementDigest === undefined) {
+            return <span className="text-muted">-</span>
+          }
+          return (
+            <span className="flex items-center justify-end gap-1.5">
+              <span
+                className="font-mono text-xs text-muted"
+                title={statementDigest}
+              >
+                {shortDigest(statementDigest)}
+              </span>
+              <CopyButton
+                value={statementDigest}
+                label="Copy"
+                ariaLabel="Copy statement digest"
+              />
+            </span>
+          )
+        },
+      },
+    ]
 
     const layerColumns: TableColumn<LayerInfo>[] = [
       {
@@ -202,7 +364,7 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
 
     return (
       <>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Box className="p-3">
             <p className="text-xs text-muted">Compressed</p>
             <p className="mt-1 text-lg font-semibold">
@@ -219,6 +381,12 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
             <p className="text-xs text-muted">Platforms</p>
             <p className="mt-1 text-lg font-semibold">
               {detail.platforms.length}
+            </p>
+          </Box>
+          <Box className="p-3">
+            <p className="text-xs text-muted">Attestations</p>
+            <p className="mt-1 text-lg font-semibold">
+              {detail.attestations.length}
             </p>
           </Box>
         </div>
@@ -266,17 +434,35 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
                   item.architecture,
                   item.variant,
                 )
+                const kinds = attestationKindsFor(
+                  detail.attestations,
+                  item.digest,
+                )
                 const selected = scope === item.digest
+                const title =
+                  kinds.length > 0
+                    ? `${label} · ${formatBytes(item.size)} · ${kinds.join(', ')}`
+                    : `${label} · ${formatBytes(item.size)}`
                 return (
                   <Button
                     key={item.digest}
                     size="sm"
                     variant={selected ? 'primary' : 'default'}
                     aria-pressed={selected}
-                    title={`${label} · ${formatBytes(item.size)}`}
+                    title={title}
                     onClick={() => setPlatform(item.digest)}
                   >
                     <span className="font-mono">{label}</span>
+                    {kinds.length > 0 ? (
+                      <span
+                        className={cx(
+                          'text-xs font-normal',
+                          selected ? 'opacity-75' : 'text-muted',
+                        )}
+                      >
+                        ({kinds.join(', ')})
+                      </span>
+                    ) : null}
                   </Button>
                 )
               })}
@@ -341,6 +527,29 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
                     rows={viewLayers}
                     rowKey={(layer) => `${layer.role}:${layer.digest}`}
                     caption={layersCaption}
+                  />
+                </Box>
+              )
+            ) : null}
+
+            {tab === 'attestations' ? (
+              viewAttestations.length === 0 ? (
+                <EmptyState
+                  title="No attestations"
+                  description={
+                    detail.attestations.length > 0
+                      ? 'No in-toto attestation manifests are attached to this platform.'
+                      : 'No in-toto attestation manifests are attached to this tag.'
+                  }
+                  icon={<ShieldCheckIcon size={24} aria-hidden="true" />}
+                />
+              ) : (
+                <Box>
+                  <Table
+                    columns={attestationColumns}
+                    rows={viewAttestations}
+                    rowKey={(attestation) => attestation.digest}
+                    caption={attestationsCaption}
                   />
                 </Box>
               )

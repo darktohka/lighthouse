@@ -24,10 +24,11 @@ use crate::state::{AppState, AuthContext};
 use super::layers;
 use super::permissions as delegations;
 use super::{
-    LayerInfo, PageQuery, Pagination, Platform, PlatformDetail, RepositoryDetail,
-    RepositorySummary, TagDetail, TagSizeEntry, TagSummary, apply_layer_history,
-    is_namespace_owner, load_namespace, namespace_by_id, pushable_repository_ids,
-    repository_blob_totals, tag_size_map, user_summary, visible_repository,
+    AttestationPredicateView, AttestationTargetView, AttestationView, LayerInfo, PageQuery,
+    Pagination, Platform, PlatformDetail, RepositoryDetail, RepositorySummary, TagDetail,
+    TagSizeEntry, TagSummary, apply_layer_history, is_namespace_owner, load_namespace,
+    namespace_by_id, pushable_repository_ids, repository_blob_totals, tag_size_map, user_summary,
+    visible_repository,
 };
 
 // ---------------------------------------------------------------------------
@@ -379,6 +380,10 @@ pub(crate) async fn blob_json(state: &AppState, digest: &str) -> Option<Value> {
 
 /// Resolves a tag's platform list: index children for an index, or a single
 /// entry derived from the image config for a plain manifest.
+///
+/// in-toto attestation manifests are *excluded*: BuildKit stores them as index
+/// entries with the placeholder `unknown/unknown` platform, and they are not
+/// image platforms. They are surfaced separately by [`attestations_for`].
 pub(crate) async fn platforms_for(
     state: &AppState,
     manifest_id: i64,
@@ -395,8 +400,10 @@ pub(crate) async fn platforms_for(
         .bind(manifest_id)
         .fetch_all(&state.db)
         .await?;
+        let attestations = attestation_entry_digests(state, manifest_id).await?;
         return Ok(rows
             .into_iter()
+            .filter(|(digest, _, _, _, _)| !attestations.contains(digest))
             .map(|(digest, size, os, architecture, variant)| Platform {
                 os: os.unwrap_or_default(),
                 architecture: architecture.unwrap_or_default(),
@@ -456,6 +463,350 @@ pub(crate) async fn platforms_for(
         digest: digest.to_string(),
         size,
     }])
+}
+
+/// Digests of the manifests an index marks as attestation manifests.
+///
+/// BuildKit's in-index attestation form annotates each attestation entry with
+/// `vnd.docker.reference.type: attestation-manifest`. The annotation lives in
+/// the index body, not in `manifest_children`, so it is read from the stored
+/// index content.
+async fn attestation_entry_digests(
+    state: &AppState,
+    index_id: i64,
+) -> ApiResult<HashSet<String>> {
+    let content: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT content FROM manifests WHERE id = ?")
+            .bind(index_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(content) = content else {
+        return Ok(HashSet::new());
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&content) else {
+        return Ok(HashSet::new());
+    };
+    let mut digests = HashSet::new();
+    if let Some(entries) = value.get("manifests").and_then(Value::as_array) {
+        for entry in entries {
+            let annotations = entry.get("annotations");
+            if !media_types::is_attestation_reference(annotations) {
+                continue;
+            }
+            if let Some(digest) = entry.get("digest").and_then(Value::as_str) {
+                digests.insert(digest.to_string());
+            }
+        }
+    }
+    Ok(digests)
+}
+
+/// Platform descriptor lookup for an image manifest.
+///
+/// Prefers the parent index's `manifest_children` platform metadata; falls back
+/// to the image config's `os`/`architecture`/`variant` fields, which is the only
+/// source of truth when the image is tagged directly rather than as an index
+/// child.
+async fn platform_of_digest(
+    state: &AppState,
+    manifest_id: i64,
+) -> ApiResult<Option<Platform>> {
+    let parent = sqlx::query_as::<_, (String, i64, Option<String>, Option<String>, Option<String>)>(
+        "SELECT m.digest, m.size, mc.platform_os, mc.platform_architecture, mc.platform_variant \
+         FROM manifest_children mc JOIN manifests m ON m.id = mc.child_manifest_id \
+         WHERE mc.child_manifest_id = ? AND (mc.platform_os IS NULL OR mc.platform_os <> 'unknown') \
+         LIMIT 1",
+    )
+    .bind(manifest_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((digest, size, os, architecture, variant)) = parent {
+        if os.is_some() || architecture.is_some() {
+            return Ok(Some(Platform {
+                os: os.unwrap_or_default(),
+                architecture: architecture.unwrap_or_default(),
+                variant,
+                digest,
+                size,
+            }));
+        }
+    }
+
+    let config: Option<(String, i64)> = sqlx::query_as(
+        "SELECT b.digest, b.size FROM manifest_blobs mb JOIN blobs b ON b.id = mb.blob_id \
+         WHERE mb.manifest_id = ? AND mb.role = 'config' LIMIT 1",
+    )
+    .bind(manifest_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((config_digest, size)) = config else {
+        return Ok(None);
+    };
+    let Some(config) = blob_json(state, &config_digest).await else {
+        return Ok(None);
+    };
+    let os = config.get("os").and_then(Value::as_str).unwrap_or_default();
+    let architecture = config
+        .get("architecture")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if os.is_empty() && architecture.is_empty() {
+        return Ok(None);
+    }
+    let (digest, manifest_size) = sqlx::query_as::<_, (String, i64)>(
+        "SELECT digest, size FROM manifests WHERE id = ?",
+    )
+    .bind(manifest_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("manifest not found"))?;
+    let _ = size;
+    Ok(Some(Platform {
+        os: os.to_string(),
+        architecture: architecture.to_string(),
+        variant: config.get("variant").and_then(Value::as_str).map(str::to_string),
+        digest,
+        size: manifest_size,
+    }))
+}
+
+/// Every attestation attached to `manifest_id`, resolved to the image platform
+/// it was built for.
+///
+/// Two discovery paths are supported and their results are merged:
+///
+/// 1. **In-index** — index entries annotated `attestation-manifest`. The
+///    referenced image digest comes from the entry's
+///    `vnd.docker.reference.digest` annotation.
+/// 2. **Referrers** — manifests whose body `subject` points at one of this
+///    tag's image manifests. This is the OCI 1.1 shape used by clients that
+///    publish attestations as separate referrers.
+///
+/// Attestations whose target cannot be resolved keep `target: None` rather than
+/// being dropped, so nothing is silently hidden from the UI.
+pub(crate) async fn attestations_for(
+    state: &AppState,
+    manifest: &Manifest,
+) -> ApiResult<Vec<AttestationView>> {
+    let mut views: Vec<AttestationView> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // The image manifests this tag exposes: the tag's own manifest plus, for an
+    // index, every non-placeholder child.
+    let mut image_ids: Vec<(i64, String)> = Vec::new();
+    if media_types::is_index_type(&manifest.media_type) {
+        let explicit = attestation_entry_digests(state, manifest.id).await?;
+        let children = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>)>(
+            "SELECT m.id, m.digest, mc.platform_os, mc.platform_architecture \
+             FROM manifest_children mc JOIN manifests m ON m.id = mc.child_manifest_id \
+             WHERE mc.parent_manifest_id = ? ORDER BY m.id",
+        )
+        .bind(manifest.id)
+        .fetch_all(&state.db)
+        .await?;
+        for (id, digest, os, architecture) in children {
+            let placeholder = os.as_deref().is_some_and(|os| os.eq_ignore_ascii_case("unknown"))
+                && architecture
+                    .as_deref()
+                    .is_some_and(|arch| arch.eq_ignore_ascii_case("unknown"));
+            if placeholder || explicit.contains(&digest) {
+                continue;
+            }
+            image_ids.push((id, digest));
+        }
+    } else {
+        image_ids.push((manifest.id, manifest.digest.clone()));
+    }
+
+    // ---- 1. in-index attestation manifests -------------------------------
+    if media_types::is_index_type(&manifest.media_type) {
+        let index_content: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT content FROM manifests WHERE id = ?")
+                .bind(manifest.id)
+                .fetch_optional(&state.db)
+                .await?;
+        if let Some(content) = index_content {
+            if let Ok(value) = serde_json::from_slice::<Value>(&content) {
+                for entry in value.get("manifests").and_then(Value::as_array).into_iter().flatten()
+                {
+                    let annotations = entry.get("annotations");
+                    if !media_types::is_attestation_reference(annotations) {
+                        continue;
+                    }
+                    let Some(raw) = entry.get("digest").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Ok(digest) = Digest::parse(raw) else {
+                        continue;
+                    };
+                    let Some(stored) = state.registry.manifest(&digest).await? else {
+                        continue;
+                    };
+                    if !seen.insert(stored.digest.clone()) {
+                        continue;
+                    }
+                    let body: Value =
+                        serde_json::from_slice(&stored.content).unwrap_or(Value::Null);
+                    let attestation = crate::oci::attestations::Attestation::from_manifest(
+                        &stored.digest,
+                        &stored.media_type,
+                        stored.size,
+                        &body,
+                        annotations,
+                    );
+                    let target = resolve_target(state, &attestation, &image_ids).await?;
+                    views.push(to_view(attestation, target));
+                }
+            }
+        }
+    }
+
+    // ---- 2. referrers: manifests whose subject is one of our images -------
+    if !image_ids.is_empty() {
+        let mut subject_digests: Vec<&str> =
+            image_ids.iter().map(|(_, digest)| digest.as_str()).collect();
+        // The tag's own manifest can also be the subject of a separate
+        // attestation manifest pushed alongside it.
+        if !subject_digests.contains(&manifest.digest.as_str()) {
+            subject_digests.push(manifest.digest.as_str());
+        }
+        let placeholders = vec!["?"; subject_digests.len()].join(",");
+        let sql = format!(
+            "SELECT digest, media_type, size, content FROM manifests \
+             WHERE subject_digest IN ({placeholders}) ORDER BY id"
+        );
+        let mut query =
+            sqlx::query_as::<_, (String, String, i64, Vec<u8>)>(sqlx::AssertSqlSafe(sql));
+        for subject in &subject_digests {
+            query = query.bind(*subject);
+        }
+
+        for (digest, media_type, size, content) in query.fetch_all(&state.db).await? {
+            let Ok(body) = serde_json::from_slice::<Value>(&content) else {
+                continue;
+            };
+            // A subject alone is not enough: the attachment must actually carry
+            // in-toto statements, otherwise a signature or SBOM attachment
+            // would be mislabelled as an attestation.
+            if !crate::oci::attestations::is_attestation(&body, None) {
+                continue;
+            }
+            if !seen.insert(digest.clone()) {
+                continue;
+            }
+            let attestation = crate::oci::attestations::Attestation::from_manifest(
+                &digest,
+                &media_type,
+                size,
+                &body,
+                None,
+            );
+            let target = match attestation.target_digest() {
+                Some(subject) => image_ids
+                    .iter()
+                    .find(|(_, candidate)| candidate == subject),
+                None => None,
+            };
+            let target = match target {
+                Some((id, digest)) => {
+                    let platform = platform_of_digest(state, *id).await?;
+                    Some(target_view(digest, platform.as_ref()))
+                }
+                None => attestation.target_digest().map(|subject| AttestationTargetView {
+                    digest: subject.to_string(),
+                    os: String::new(),
+                    architecture: String::new(),
+                    variant: None,
+                }),
+            };
+            views.push(to_view(attestation, target));
+        }
+    }
+
+    // Stable order: by the image platform the attestation belongs to, then by
+    // digest, so the UI does not shuffle between requests.
+    views.sort_by(|a, b| {
+        let key = |view: &AttestationView| {
+            view.target
+                .as_ref()
+                .map(|target| {
+                    (
+                        target.os.clone(),
+                        target.architecture.clone(),
+                        target.variant.clone().unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_else(|| (String::new(), String::new(), String::new()))
+        };
+        key(a).cmp(&key(b)).then(a.digest.cmp(&b.digest))
+    });
+    Ok(views)
+}
+
+/// Resolves the image platform an in-index attestation was built for.
+async fn resolve_target(
+    state: &AppState,
+    attestation: &crate::oci::attestations::Attestation,
+    image_ids: &[(i64, String)],
+) -> ApiResult<Option<AttestationTargetView>> {
+    let Some(target_digest) = attestation.target_digest() else {
+        return Ok(None);
+    };
+    match image_ids
+        .iter()
+        .find(|(_, candidate)| candidate == target_digest)
+    {
+        Some((id, digest)) => {
+            let platform = platform_of_digest(state, *id).await?;
+            Ok(Some(target_view(digest, platform.as_ref())))
+        }
+        // The referenced manifest is not part of this tag: keep the digest so
+        // the UI can still show what it belongs to.
+        None => Ok(Some(AttestationTargetView {
+            digest: target_digest.to_string(),
+            os: String::new(),
+            architecture: String::new(),
+            variant: None,
+        })),
+    }
+}
+
+/// Builds the target view from a matched image manifest and its platform.
+fn target_view(digest: &str, platform: Option<&Platform>) -> AttestationTargetView {
+    AttestationTargetView {
+        digest: digest.to_string(),
+        os: platform.map(|p| p.os.clone()).unwrap_or_default(),
+        architecture: platform.map(|p| p.architecture.clone()).unwrap_or_default(),
+        variant: platform.and_then(|p| p.variant.clone()),
+    }
+}
+
+/// Maps the parsed attestation onto its API representation.
+fn to_view(
+    attestation: crate::oci::attestations::Attestation,
+    target: Option<AttestationTargetView>,
+) -> AttestationView {
+    AttestationView {
+        digest: attestation.digest,
+        media_type: attestation.media_type,
+        artifact_type: attestation.artifact_type,
+        size: attestation.size,
+        kinds: attestation.kinds,
+        predicates: attestation
+            .predicates
+            .into_iter()
+            .map(|predicate| AttestationPredicateView {
+                predicate_type: predicate.predicate_type,
+                kind: predicate.kind,
+                digest: predicate.digest,
+                media_type: predicate.media_type,
+                size: predicate.size,
+            })
+            .collect(),
+        subject_digest: attestation.subject_digest,
+        referenced_digest: attestation.referenced_digest,
+        target,
+    }
 }
 
 async fn manifest_blob_edges(
@@ -671,6 +1022,7 @@ async fn build_tag_detail(
         config,
         layers,
         platform_details,
+        attestations: attestations_for(state, manifest).await?,
         can_pull: access.can_pull,
         can_push: access.can_push,
     })

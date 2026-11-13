@@ -2209,3 +2209,227 @@ async fn blob_size_limit_is_enforced() {
     let json = body_json(response).await;
     assert_eq!(json["errors"][0]["code"], "SIZE_INVALID");
 }
+
+// ---------------------------------------------------------------------------
+// OCI 1.1 referrers + in-toto attestations
+// ---------------------------------------------------------------------------
+
+/// A minimal image manifest body for `architecture`.
+fn platform_manifest(config: &str) -> Vec<u8> {
+    serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_MANIFEST,
+        "config": {
+            "mediaType": media_types::OCI_IMAGE_CONFIG,
+            "digest": config,
+            "size": 2,
+        },
+        "layers": [],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// An attestation manifest body with `subject` and one in-toto statement layer.
+fn attestation_body(subject: &str, statement: &str, predicate_type: &str) -> Vec<u8> {
+    serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_MANIFEST,
+        "artifactType": media_types::DOCKER_ATTESTATION_MANIFEST,
+        "config": {
+            "mediaType": media_types::OCI_EMPTY,
+            "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "size": 2,
+            "data": "e30=",
+        },
+        "layers": [{
+            "mediaType": media_types::IN_TOTO_JSON,
+            "digest": Digest::from_bytes(statement.as_bytes()).to_string(),
+            "size": statement.len(),
+            "annotations": { media_types::PREDICATE_TYPE_ANNOTATION: predicate_type },
+        }],
+        "subject": {
+            "mediaType": media_types::OCI_IMAGE_MANIFEST,
+            "digest": subject,
+            "size": 100,
+        },
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Pushes an image plus a separate referrer attestation and returns both
+/// digests.
+async fn seed_referrer_attestation(app: &Router) -> (String, String) {
+    let repo = format!("{USER}/attrepo");
+    let config = push_blob(app, &repo, b"{}").await;
+    let image = platform_manifest(&config);
+    let image_digest = push_manifest(app, &repo, "latest", media_types::OCI_IMAGE_MANIFEST, &image).await;
+
+    let statement = r#"{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://slsa.dev/provenance/v1"}"#;
+    // The statement layer, plus the empty `{}` config the attestation declares,
+    // must exist in the repository before the manifest is accepted.
+    push_blob(app, &repo, statement.as_bytes()).await;
+    let attestation = attestation_body(&image_digest, statement, "https://slsa.dev/provenance/v1");
+    let attestation_digest = Digest::from_bytes(&attestation).to_string();
+    push_manifest(
+        app,
+        &repo,
+        &attestation_digest,
+        media_types::OCI_IMAGE_MANIFEST,
+        &attestation,
+    )
+    .await;
+    (image_digest, attestation_digest)
+}
+
+#[tokio::test]
+async fn referrers_lists_an_attestation_with_its_artifact_type() {
+    let (_dir, _state, app) = harness().await;
+    let (image_digest, attestation_digest) = seed_referrer_attestation(&app).await;
+
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{USER}/attrepo/referrers/{image_digest}"),
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_api_version(&response);
+    assert_eq!(
+        header_str(&response, "content-type"),
+        media_types::OCI_IMAGE_INDEX
+    );
+    let index: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).expect("json");
+    assert_eq!(index["schemaVersion"], 2);
+    let manifests = index["manifests"].as_array().expect("manifests");
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["digest"], attestation_digest);
+    assert_eq!(
+        manifests[0]["artifactType"],
+        media_types::DOCKER_ATTESTATION_MANIFEST
+    );
+    assert_eq!(manifests[0]["mediaType"], media_types::OCI_IMAGE_MANIFEST);
+}
+
+#[tokio::test]
+async fn referrers_returns_an_empty_index_for_a_subject_without_referrers() {
+    let (_dir, _state, app) = harness().await;
+    let config = push_blob(&app, &format!("{USER}/lonely"), b"{}").await;
+    let image = platform_manifest(&config);
+    let image_digest = push_manifest(
+        &app,
+        &format!("{USER}/lonely"),
+        "latest",
+        media_types::OCI_IMAGE_MANIFEST,
+        &image,
+    )
+    .await;
+
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{USER}/lonely/referrers/{image_digest}"),
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "an empty listing is a 200");
+    let index: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).expect("json");
+    assert_eq!(index["manifests"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn referrers_filters_by_artifact_type() {
+    let (_dir, _state, app) = harness().await;
+    let (image_digest, _) = seed_referrer_attestation(&app).await;
+
+    let matched = send(
+        &app,
+        Method::GET,
+        &format!(
+            "/v2/{USER}/attrepo/referrers/{image_digest}?artifactType=application/vnd.docker.attestation.manifest.v1%2Bjson"
+        ),
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(matched.status(), StatusCode::OK);
+    assert_eq!(header_str(&matched, "oci-filters-applied"), "artifactType");
+    let index: serde_json::Value = serde_json::from_slice(&body_bytes(matched).await).expect("json");
+    assert_eq!(index["manifests"].as_array().expect("manifests").len(), 1);
+
+    let missed = send(
+        &app,
+        Method::GET,
+        &format!(
+            "/v2/{USER}/attrepo/referrers/{image_digest}?artifactType=application/vnd.dev.cosign.artifact.sig.v1%2Bjson"
+        ),
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(missed.status(), StatusCode::OK);
+    let index: serde_json::Value = serde_json::from_slice(&body_bytes(missed).await).expect("json");
+    assert!(index["manifests"].as_array().expect("manifests").is_empty());
+}
+
+#[tokio::test]
+async fn referrers_of_an_unknown_digest_is_manifest_unknown() {
+    let (_dir, _state, app) = harness().await;
+    let config = push_blob(&app, &format!("{USER}/ghost"), b"{}").await;
+    let image = platform_manifest(&config);
+    push_manifest(
+        &app,
+        &format!("{USER}/ghost"),
+        "latest",
+        media_types::OCI_IMAGE_MANIFEST,
+        &image,
+    )
+    .await;
+
+    let missing = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{USER}/ghost/referrers/{missing}"),
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).expect("json");
+    assert_eq!(body["errors"][0]["code"], "MANIFEST_UNKNOWN");
+}
+
+#[tokio::test]
+async fn referrers_requires_pull_access() {
+    let (_dir, state, app) = harness().await;
+    let (image_digest, _) = seed_referrer_attestation(&app).await;
+    // The test namespace is public by default, so make it private before
+    // asserting that an anonymous caller is challenged.
+    sqlx::query("UPDATE namespaces SET is_public = 0 WHERE name = ? COLLATE NOCASE")
+        .bind(USER)
+        .execute(&state.db)
+        .await
+        .expect("private namespace");
+
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/v2/{USER}/attrepo/referrers/{image_digest}"),
+        None,
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().contains_key("www-authenticate"));
+}

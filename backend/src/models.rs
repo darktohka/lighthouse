@@ -103,6 +103,8 @@ pub struct Manifest {
     pub media_type: String,
     pub size: i64,
     pub artifact_type: Option<String>,
+    /// `subject.digest` for an attachment manifest (OCI 1.1 referrers).
+    pub subject_digest: Option<String>,
     pub content: Vec<u8>,
     pub created_at: DateTime<Utc>,
 }

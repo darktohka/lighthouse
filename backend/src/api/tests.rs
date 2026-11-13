@@ -4301,3 +4301,477 @@ async fn layer_history_metadata_maps_non_empty_entries_in_order() {
     assert!(reference_config[0]["created_by"].is_null());
     assert!(reference_config[0]["comment"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// in-toto attestations
+// ---------------------------------------------------------------------------
+
+/// Seeds one image manifest for `architecture` and returns its digest.
+async fn seed_platform_image(
+    state: &AppState,
+    repo_id: i64,
+    architecture: &str,
+) -> Digest {
+    let config = format!("{{\"os\":\"linux\",\"architecture\":\"{architecture}\"}}");
+    let config_digest =
+        push_blob(state, repo_id, config.as_bytes(), media_types::OCI_IMAGE_CONFIG).await;
+    let layer = format!("layer-{architecture}").into_bytes();
+    let layer_digest = push_blob(state, repo_id, &layer, media_types::OCI_IMAGE_LAYER_GZIP).await;
+    let manifest = image_manifest_layers(
+        &config_digest.to_string(),
+        config.len() as i64,
+        &[(
+            layer_digest.to_string(),
+            layer.len() as i64,
+            media_types::OCI_IMAGE_LAYER_GZIP.to_string(),
+        )],
+    );
+    let digest = Digest::from_bytes(&manifest);
+    state
+        .registry
+        .put_manifest(repo_id, media_types::OCI_IMAGE_MANIFEST, &manifest)
+        .await
+        .expect("put image manifest");
+    digest
+}
+
+/// Seeds a BuildKit-style attestation manifest for `subject` and returns its
+/// digest. `predicates` are `(predicate-type, statement-body)` pairs.
+async fn seed_attestation_manifest(
+    state: &AppState,
+    repo_id: i64,
+    subject: &Digest,
+    subject_size: i64,
+    predicates: &[(&str, &str)],
+) -> Digest {
+    // BuildKit's empty config: `e30=` == `{}`.
+    let config = b"{}";
+    let config_digest = push_blob(state, repo_id, config, media_types::OCI_EMPTY).await;
+
+    let mut layers = Vec::new();
+    for (predicate_type, statement) in predicates {
+        let digest = push_blob(state, repo_id, statement.as_bytes(), media_types::IN_TOTO_JSON).await;
+        layers.push(json!({
+            "mediaType": media_types::IN_TOTO_JSON,
+            "digest": digest.to_string(),
+            "size": statement.len() as i64,
+            "annotations": { media_types::PREDICATE_TYPE_ANNOTATION: predicate_type },
+        }));
+    }
+
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_MANIFEST,
+        "artifactType": media_types::DOCKER_ATTESTATION_MANIFEST,
+        "config": {
+            "mediaType": media_types::OCI_EMPTY,
+            "digest": config_digest.to_string(),
+            "size": config.len() as i64,
+            "data": "e30=",
+        },
+        "layers": layers,
+        "subject": {
+            "mediaType": media_types::OCI_IMAGE_MANIFEST,
+            "digest": subject.to_string(),
+            "size": subject_size,
+        },
+    })
+    .to_string()
+    .into_bytes();
+    let digest = Digest::from_bytes(&manifest);
+    state
+        .registry
+        .put_manifest(repo_id, media_types::OCI_IMAGE_MANIFEST, &manifest)
+        .await
+        .expect("put attestation manifest");
+    digest
+}
+
+/// Seeds a multi-platform index with an attestation manifest per platform, the
+/// exact shape BuildKit produces with `--provenance`.
+async fn seed_attested_index(
+    state: &AppState,
+    repo_name: &str,
+    tag: &str,
+) -> (Digest, Digest, Digest, Digest, Digest) {
+    let repo = state
+        .registry
+        .ensure_repository(repo_name)
+        .await
+        .expect("repository");
+    let amd64 = seed_platform_image(state, repo.id, "amd64").await;
+    let arm64 = seed_platform_image(state, repo.id, "arm64").await;
+
+    let statement = "{\"_type\":\"https://in-toto.io/Statement/v1\",\
+                     \"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{}}";
+    let amd64_attestation =
+        seed_attestation_manifest(state, repo.id, &amd64, 100, &[("https://slsa.dev/provenance/v1", statement)])
+            .await;
+    let arm64_attestation =
+        seed_attestation_manifest(state, repo.id, &arm64, 100, &[("https://slsa.dev/provenance/v1", statement)])
+            .await;
+
+    let index = json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_INDEX,
+        "manifests": [
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": amd64.to_string(),
+                "size": 100,
+                "platform": { "os": "linux", "architecture": "amd64" },
+            },
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": arm64.to_string(),
+                "size": 100,
+                "platform": { "os": "linux", "architecture": "arm64" },
+            },
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": amd64_attestation.to_string(),
+                "size": 100,
+                "annotations": {
+                    media_types::REFERENCE_TYPE_ANNOTATION:
+                        media_types::ATTESTATION_MANIFEST_REFERENCE,
+                    media_types::REFERENCE_DIGEST_ANNOTATION: amd64.to_string(),
+                },
+                "platform": { "os": "unknown", "architecture": "unknown" },
+            },
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": arm64_attestation.to_string(),
+                "size": 100,
+                "annotations": {
+                    media_types::REFERENCE_TYPE_ANNOTATION:
+                        media_types::ATTESTATION_MANIFEST_REFERENCE,
+                    media_types::REFERENCE_DIGEST_ANNOTATION: arm64.to_string(),
+                },
+                "platform": { "os": "unknown", "architecture": "unknown" },
+            },
+        ],
+    })
+    .to_string()
+    .into_bytes();
+    let index_digest = Digest::from_bytes(&index);
+    state
+        .registry
+        .put_manifest(repo.id, media_types::OCI_IMAGE_INDEX, &index)
+        .await
+        .expect("put index");
+    state
+        .registry
+        .set_tag(repo.id, tag, &index_digest)
+        .await
+        .expect("set tag");
+
+    (index_digest, amd64, arm64, amd64_attestation, arm64_attestation)
+}
+
+#[tokio::test]
+async fn tag_detail_lists_attestations_against_their_platform() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let (_, amd64, arm64, amd64_attestation, arm64_attestation) =
+        seed_attested_index(&state, "alice/attested", "latest").await;
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/attested/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+
+    // Attestation manifests must not be listed as platforms.
+    let mut platforms: Vec<(String, String)> = tag["platforms"]
+        .as_array()
+        .expect("platforms")
+        .iter()
+        .map(|platform| {
+            (
+                platform["os"].as_str().unwrap_or_default().to_string(),
+                platform["architecture"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    platforms.sort();
+    assert_eq!(
+        platforms,
+        vec![
+            ("linux".to_string(), "amd64".to_string()),
+            ("linux".to_string(), "arm64".to_string()),
+        ],
+        "attestation manifests are not image platforms"
+    );
+    assert_eq!(
+        tag["platform_details"].as_array().expect("platform details").len(),
+        2,
+        "only the two real platform manifests get a detail entry"
+    );
+
+    let attestations = tag["attestations"].as_array().expect("attestations");
+    assert_eq!(attestations.len(), 2, "one attestation per platform");
+
+    let by_target = |digest: &Digest| -> Value {
+        attestations
+            .iter()
+            .find(|entry| entry["target"]["digest"] == digest.to_string())
+            .unwrap_or_else(|| panic!("no attestation targeting {digest}"))
+            .clone()
+    };
+
+    let amd64_attestation_view = by_target(&amd64);
+    assert_eq!(amd64_attestation_view["digest"], amd64_attestation.to_string());
+    assert_eq!(amd64_attestation_view["target"]["os"], "linux");
+    assert_eq!(amd64_attestation_view["target"]["architecture"], "amd64");
+    assert_eq!(
+        amd64_attestation_view["kinds"],
+        json!(["provenance"]),
+        "the predicate type is reduced to its short label"
+    );
+    assert_eq!(
+        amd64_attestation_view["artifact_type"],
+        media_types::DOCKER_ATTESTATION_MANIFEST
+    );
+    assert_eq!(
+        amd64_attestation_view["predicates"][0]["predicate_type"],
+        "https://slsa.dev/provenance/v1"
+    );
+    assert_eq!(
+        amd64_attestation_view["predicates"][0]["media_type"],
+        media_types::IN_TOTO_JSON
+    );
+    assert_eq!(amd64_attestation_view["referenced_digest"], amd64.to_string());
+    assert_eq!(amd64_attestation_view["subject_digest"], amd64.to_string());
+
+    let arm64_attestation_view = by_target(&arm64);
+    assert_eq!(arm64_attestation_view["digest"], arm64_attestation.to_string());
+    assert_eq!(arm64_attestation_view["target"]["architecture"], "arm64");
+}
+
+#[tokio::test]
+async fn attestation_kinds_cover_provenance_and_sbom() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let repo = state
+        .registry
+        .ensure_repository("alice/multi")
+        .await
+        .expect("repository");
+    let image = seed_platform_image(&state, repo.id, "amd64").await;
+
+    let provenance = "{\"predicateType\":\"https://slsa.dev/provenance/v1\"}";
+    let sbom = "{\"predicateType\":\"https://spdx.dev/Document\"}";
+    let attestation = seed_attestation_manifest(
+        &state,
+        repo.id,
+        &image,
+        100,
+        &[
+            ("https://spdx.dev/Document", sbom),
+            ("https://slsa.dev/provenance/v1", provenance),
+        ],
+    )
+    .await;
+
+    let index = json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_INDEX,
+        "manifests": [
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": image.to_string(),
+                "size": 100,
+                "platform": { "os": "linux", "architecture": "amd64" },
+            },
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": attestation.to_string(),
+                "size": 100,
+                "annotations": {
+                    media_types::REFERENCE_TYPE_ANNOTATION:
+                        media_types::ATTESTATION_MANIFEST_REFERENCE,
+                    media_types::REFERENCE_DIGEST_ANNOTATION: image.to_string(),
+                },
+                "platform": { "os": "unknown", "architecture": "unknown" },
+            },
+        ],
+    })
+    .to_string()
+    .into_bytes();
+    let index_digest = Digest::from_bytes(&index);
+    state
+        .registry
+        .put_manifest(repo.id, media_types::OCI_IMAGE_INDEX, &index)
+        .await
+        .expect("put index");
+    state
+        .registry
+        .set_tag(repo.id, "latest", &index_digest)
+        .await
+        .expect("set tag");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/multi/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+
+    let attestations = tag["attestations"].as_array().expect("attestations");
+    assert_eq!(attestations.len(), 1);
+    assert_eq!(
+        attestations[0]["kinds"],
+        json!(["sbom", "provenance"]),
+        "kinds follow the manifest's statement order and are deduplicated"
+    );
+    assert_eq!(attestations[0]["target"]["os"], "linux");
+    assert_eq!(attestations[0]["target"]["architecture"], "amd64");
+}
+
+#[tokio::test]
+async fn referrers_attestation_is_discovered_by_subject() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let repo = state
+        .registry
+        .ensure_repository("alice/referrer")
+        .await
+        .expect("repository");
+
+    // A plain image manifest that is *not* an index, plus an attestation pushed
+    // separately with this image as its `subject` (the OCI 1.1 referrers form).
+    let image = seed_platform_image(&state, repo.id, "amd64").await;
+    let statement = "{\"predicateType\":\"https://slsa.dev/provenance/v1\"}";
+    let attestation = seed_attestation_manifest(
+        &state,
+        repo.id,
+        &image,
+        100,
+        &[("https://slsa.dev/provenance/v1", statement)],
+    )
+    .await;
+    state
+        .registry
+        .set_tag(repo.id, "latest", &image)
+        .await
+        .expect("set tag");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/referrer/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+
+    let attestations = tag["attestations"].as_array().expect("attestations");
+    assert_eq!(attestations.len(), 1, "the referrer attestation is found");
+    assert_eq!(attestations[0]["digest"], attestation.to_string());
+    assert_eq!(attestations[0]["kinds"], json!(["provenance"]));
+    assert_eq!(
+        attestations[0]["target"]["digest"],
+        image.to_string(),
+        "the subject identifies the image it was built for"
+    );
+    assert_eq!(attestations[0]["target"]["architecture"], "amd64");
+}
+
+#[tokio::test]
+async fn image_without_attestations_reports_an_empty_list() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_multilayer_image(&state, "alice/plain", "latest", &[b"only-layer".to_vec()]).await;
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/plain/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+    assert_eq!(
+        tag["attestations"],
+        json!([]),
+        "attestations is always present so clients need no null checks"
+    );
+}
+
+#[tokio::test]
+async fn plain_signature_attachment_is_not_reported_as_an_attestation() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let repo = state
+        .registry
+        .ensure_repository("alice/signed")
+        .await
+        .expect("repository");
+    let image = seed_platform_image(&state, repo.id, "amd64").await;
+
+    // A cosign-style signature: a subject plus a non-in-toto layer.
+    let signature = b"signature-bytes".to_vec();
+    let signature_digest =
+        push_blob(&state, repo.id, &signature, media_types::OCI_IMAGE_LAYER_GZIP).await;
+    let attachment = json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_MANIFEST,
+        "artifactType": "application/vnd.dev.cosign.artifact.sig.v1+json",
+        "config": {
+            "mediaType": media_types::OCI_EMPTY,
+            "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "size": 2,
+        },
+        "layers": [{
+            "mediaType": media_types::OCI_IMAGE_LAYER_GZIP,
+            "digest": signature_digest.to_string(),
+            "size": signature.len() as i64,
+        }],
+        "subject": {
+            "mediaType": media_types::OCI_IMAGE_MANIFEST,
+            "digest": image.to_string(),
+            "size": 100,
+        },
+    })
+    .to_string()
+    .into_bytes();
+    state
+        .registry
+        .put_manifest(repo.id, media_types::OCI_IMAGE_MANIFEST, &attachment)
+        .await
+        .expect("put signature attachment");
+    state
+        .registry
+        .set_tag(repo.id, "latest", &image)
+        .await
+        .expect("set tag");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/signed/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+    assert_eq!(
+        tag["attestations"],
+        json!([]),
+        "a signature has no in-toto statements, so it is not an attestation"
+    );
+}

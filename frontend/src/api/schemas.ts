@@ -267,6 +267,49 @@ export const platformDetailSchema = v.object({
 })
 export type PlatformDetail = v.InferOutput<typeof platformDetailSchema>
 
+/**
+ * One in-toto statement carried by an attestation manifest (SLSA provenance,
+ * SBOM, …). `predicate_type` is the full `https://slsa.dev/provenance/v1` URI;
+ * `kind` is the short label the UI badges show ("provenance", "sbom", …).
+ */
+export const attestationPredicateSchema = v.object({
+  predicate_type: v.nullable(v.string()),
+  kind: v.string(),
+  digest: v.string(),
+  media_type: v.string(),
+  size: v.number(),
+})
+export type AttestationPredicate = v.InferOutput<
+  typeof attestationPredicateSchema
+>
+
+/** The image platform an attestation describes. */
+export const attestationTargetSchema = v.object({
+  digest: v.string(),
+  os: v.string(),
+  architecture: v.string(),
+  variant: v.nullable(v.string()),
+})
+export type AttestationTarget = v.InferOutput<typeof attestationTargetSchema>
+
+/**
+ * An in-toto attestation attached to the tag, either as an extra
+ * `unknown/unknown` entry of the image index or as an OCI 1.1 referrer.
+ * `target` is null when the relationship to an image manifest is unknown.
+ */
+export const attestationSchema = v.object({
+  digest: v.string(),
+  media_type: v.string(),
+  artifact_type: v.nullable(v.string()),
+  size: v.number(),
+  kinds: v.array(v.string()),
+  predicates: v.array(attestationPredicateSchema),
+  subject_digest: v.nullable(v.string()),
+  referenced_digest: v.nullable(v.string()),
+  target: v.nullable(attestationTargetSchema),
+})
+export type Attestation = v.InferOutput<typeof attestationSchema>
+
 export const tagDetailSchema = v.object({
   name: v.string(),
   digest: v.string(),
@@ -280,6 +323,8 @@ export const tagDetailSchema = v.object({
   config: v.nullable(jsonObjectSchema),
   layers: v.array(layerInfoSchema),
   platform_details: v.array(platformDetailSchema),
+  /** Attestation manifests are reported here, never as image platforms. */
+  attestations: v.array(attestationSchema),
   can_pull: v.boolean(),
   can_push: v.boolean(),
 })

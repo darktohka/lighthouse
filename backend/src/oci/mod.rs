@@ -8,12 +8,14 @@
 //! `/` and `/_catalog` are registered as static routes so they take priority
 //! over the catch-all.
 
+pub mod attestations;
 pub mod blobs;
 pub mod catalog;
 pub mod digest;
 pub mod manifests;
 pub mod media_types;
 pub mod reference;
+pub mod referrers;
 pub mod tags;
 pub mod uploads;
 
@@ -103,6 +105,7 @@ pub struct EventInfo {
 enum Endpoint {
     TagsList { name: String },
     Manifest { name: String, reference: String },
+    Referrers { name: String, digest: String },
     Blob { name: String, digest: String },
     UploadStart { name: String },
     UploadSession { name: String, uuid: String },
@@ -117,6 +120,16 @@ fn parse_endpoint(rest: &str) -> Option<Endpoint> {
         if !name.is_empty() {
             return Some(Endpoint::TagsList {
                 name: name.to_string(),
+            });
+        }
+    }
+    if let Some(index) = rest.rfind("/referrers/") {
+        let name = &rest[..index];
+        let digest = &rest[index + "/referrers/".len()..];
+        if !name.is_empty() && !digest.is_empty() && !digest.contains('/') {
+            return Some(Endpoint::Referrers {
+                name: name.to_string(),
+                digest: digest.to_string(),
             });
         }
     }
@@ -225,6 +238,9 @@ async fn dispatch(
         (Method::GET, Endpoint::TagsList { name }) => {
             tags::list(&state, &actor, &headers, &info, &name, &query).await
         }
+        (Method::GET, Endpoint::Referrers { name, digest }) => {
+            referrers::get(&state, &actor, &headers, &query, &name, &digest).await
+        }
         (Method::GET, Endpoint::Manifest { name, reference }) => {
             manifests::get(&state, &actor, &headers, &info, &name, &reference, false).await
         }
@@ -290,6 +306,7 @@ fn challenge_scope(endpoint: &Endpoint, method: &Method) -> Option<String> {
     let (name, push) = match endpoint {
         Endpoint::TagsList { name }
         | Endpoint::Manifest { name, .. }
+        | Endpoint::Referrers { name, .. }
         | Endpoint::Blob { name, .. } => (name, *method != Method::GET && *method != Method::HEAD),
         Endpoint::UploadStart { name } | Endpoint::UploadSession { name, .. } => (name, true),
     };
