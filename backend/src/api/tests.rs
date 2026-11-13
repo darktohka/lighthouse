@@ -553,6 +553,138 @@ async fn tag_list_supports_server_side_sorting() {
 }
 
 #[tokio::test]
+async fn tag_list_supports_server_side_regex_filtering() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    seed_image(&state, "alice/app", "v1.0.0", b"{\"cfg\":1}", b"aaaa").await;
+    seed_image(&state, "alice/app", "latest", b"{\"cfg\":1}", b"bbbb").await;
+
+    fn tag_names(page: &Value) -> Vec<String> {
+        page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["name"].as_str().expect("name").to_string())
+            .collect()
+    }
+
+    let matched = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags?regex=%5Ev%5B0-9%5D",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(matched["total"], 1);
+    assert_eq!(tag_names(&matched), ["v1.0.0"]);
+
+    let excluded = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags?regex=%5Ev%5B0-9%5D&exclude=1",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(excluded["total"], 1);
+    assert_eq!(tag_names(&excluded), ["latest"]);
+
+    let not_excluded = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags?regex=%5Ev%5B0-9%5D&exclude=0",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(not_excluded["total"], 1);
+    assert_eq!(tag_names(&not_excluded), ["v1.0.0"]);
+
+    let invalid = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/app/tags?regex=%28",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let invalid = body_json(invalid).await;
+    assert!(
+        invalid["error"]["message"]
+            .as_str()
+            .expect("message")
+            .starts_with("invalid regex:")
+    );
+
+    let long_pattern = "a".repeat(513);
+    let long = call(
+        &app,
+        Method::GET,
+        &format!("/api/repositories/alice/app/tags?regex={long_pattern}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(long.status(), StatusCode::BAD_REQUEST);
+    let long = body_json(long).await;
+    assert_eq!(
+        long["error"]["message"],
+        "regex must be at most 512 characters"
+    );
+
+    let at_limit = body_json(
+        call(
+            &app,
+            Method::GET,
+            &format!("/api/repositories/alice/app/tags?regex={}", "a".repeat(512)),
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(at_limit["total"], 0);
+
+    let unfiltered = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unfiltered["total"], 2);
+    assert_eq!(tag_names(&unfiltered), ["latest", "v1.0.0"]);
+
+    let blank = body_json(
+        call(
+            &app,
+            Method::GET,
+            "/api/repositories/alice/app/tags?regex=%20%20",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(blank["total"], 2);
+}
+
+#[tokio::test]
 async fn detail_reports_effective_actor_access() {
     let (_dir, state, app) = harness().await;
     let alice = create_user(&state, "alice").await;
@@ -864,6 +996,329 @@ async fn global_tag_ranking_and_batch_delete() {
     .await;
     let tags = body_json(response).await;
     assert_eq!(tags["total"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// Tag deletion reclaims unreachable manifests and blobs
+// ---------------------------------------------------------------------------
+
+async fn count_rows(state: &AppState, sql: &'static str, binds: &[&str]) -> i64 {
+    let mut query = sqlx::query_scalar::<_, i64>(sql);
+    for bind in binds {
+        query = query.bind(*bind);
+    }
+    query.fetch_one(&state.db).await.expect("count")
+}
+
+#[tokio::test]
+async fn deleting_last_tag_reclaims_blobs() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let (manifest_digest, layer_digest) =
+        seed_image(&state, "alice/app", "v1", b"{\"cfg\":1}", b"layer-one").await;
+    let config_digest = Digest::from_bytes(b"{\"cfg\":1}");
+    let repository = state
+        .registry
+        .find_repository("alice/app")
+        .await
+        .expect("find")
+        .expect("repository");
+
+    assert!(
+        state
+            .registry
+            .delete_tag(repository.id, "v1")
+            .await
+            .expect("delete tag")
+    );
+    // The repository link must be gone so the manifest is no longer a GC root.
+    assert_eq!(
+        count_rows(
+            &state,
+            "SELECT COUNT(*) FROM manifest_repositories mr \
+             JOIN manifests m ON m.id = mr.manifest_id WHERE m.digest = ?",
+            &[&manifest_digest.to_string()],
+        )
+        .await,
+        0
+    );
+
+    let report = crate::storage::gc::collect(&state.registry, &state.storage, false)
+        .await
+        .expect("collect");
+    assert!(report.bytes_reclaimed > 0, "expected reclaimed bytes");
+
+    assert_eq!(
+        count_rows(
+            &state,
+            "SELECT COUNT(*) FROM tags WHERE repository_id = ?",
+            &[&repository.id.to_string()],
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count_rows(
+            &state,
+            "SELECT COUNT(*) FROM manifest_repositories WHERE repository_id = ?",
+            &[&repository.id.to_string()],
+        )
+        .await,
+        0
+    );
+    assert!(
+        state
+            .registry
+            .manifest(&manifest_digest)
+            .await
+            .expect("manifest")
+            .is_none()
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&config_digest)
+            .await
+            .expect("config blob")
+            .is_none()
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&layer_digest)
+            .await
+            .expect("layer blob")
+            .is_none()
+    );
+    assert!(!state.storage.blob_path(&config_digest).exists());
+    assert!(!state.storage.blob_path(&layer_digest).exists());
+
+    // The control-plane path is what the UI uses; it must be a no-op now.
+    let response = call(
+        &app,
+        Method::DELETE,
+        "/api/repositories/alice/app/tags/v1",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deleting_one_of_two_tags_keeps_blobs() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let (manifest_digest, layer_digest) =
+        seed_image(&state, "alice/app", "v1", b"{\"cfg\":1}", b"layer-one").await;
+    // Same content and digest, second tag on the very same manifest.
+    let (again, _) = seed_image(&state, "alice/app", "v2", b"{\"cfg\":1}", b"layer-one").await;
+    assert_eq!(again, manifest_digest);
+    let config_digest = Digest::from_bytes(b"{\"cfg\":1}");
+    let repository = state
+        .registry
+        .find_repository("alice/app")
+        .await
+        .expect("find")
+        .expect("repository");
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        "/api/repositories/alice/app/tags/v1",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        count_rows(
+            &state,
+            "SELECT COUNT(*) FROM tags WHERE repository_id = ?",
+            &[&repository.id.to_string()],
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count_rows(
+            &state,
+            "SELECT COUNT(*) FROM manifest_repositories mr \
+             JOIN manifests m ON m.id = mr.manifest_id WHERE m.digest = ?",
+            &[&manifest_digest.to_string()],
+        )
+        .await,
+        1
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&config_digest)
+            .await
+            .expect("config blob")
+            .is_some()
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&layer_digest)
+            .await
+            .expect("layer blob")
+            .is_some()
+    );
+    assert!(state.storage.blob_path(&config_digest).exists());
+    assert!(state.storage.blob_path(&layer_digest).exists());
+}
+
+#[tokio::test]
+async fn retagging_reclaims_old_manifest() {
+    let (_dir, state) = test_state().await;
+    let _alice = create_user(&state, "alice").await;
+    let old_config = Digest::from_bytes(b"old-config");
+    let old_layer = Digest::from_bytes(b"old-layer");
+    let new_config = Digest::from_bytes(b"new-config");
+    let new_layer = Digest::from_bytes(b"new-layer");
+    let repository = state
+        .registry
+        .ensure_repository("alice/app")
+        .await
+        .expect("repository");
+
+    let old_manifest = image_manifest(
+        &old_config.to_string(),
+        b"old-config".len() as i64,
+        &old_layer.to_string(),
+        b"old-layer".len() as i64,
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    );
+    let old_digest = Digest::from_bytes(&old_manifest);
+    let new_manifest = image_manifest(
+        &new_config.to_string(),
+        b"new-config".len() as i64,
+        &new_layer.to_string(),
+        b"new-layer".len() as i64,
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    );
+    let new_digest = Digest::from_bytes(&new_manifest);
+
+    push_blob(
+        &state,
+        repository.id,
+        b"old-config",
+        media_types::OCI_IMAGE_CONFIG,
+    )
+    .await;
+    push_blob(
+        &state,
+        repository.id,
+        b"old-layer",
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    )
+    .await;
+    push_blob(
+        &state,
+        repository.id,
+        b"new-config",
+        media_types::OCI_IMAGE_CONFIG,
+    )
+    .await;
+    push_blob(
+        &state,
+        repository.id,
+        b"new-layer",
+        media_types::OCI_IMAGE_LAYER_GZIP,
+    )
+    .await;
+
+    state
+        .registry
+        .put_manifest(
+            repository.id,
+            media_types::OCI_IMAGE_MANIFEST,
+            &old_manifest,
+        )
+        .await
+        .expect("put old");
+    state
+        .registry
+        .put_manifest(
+            repository.id,
+            media_types::OCI_IMAGE_MANIFEST,
+            &new_manifest,
+        )
+        .await
+        .expect("put new");
+    state
+        .registry
+        .set_tag(repository.id, "latest", &old_digest)
+        .await
+        .expect("tag old");
+
+    // Moving the tag must unlink the old manifest's repository link.
+    state
+        .registry
+        .set_tag(repository.id, "latest", &new_digest)
+        .await
+        .expect("retag");
+
+    let report = crate::storage::gc::collect(&state.registry, &state.storage, false)
+        .await
+        .expect("collect");
+    assert!(report.bytes_reclaimed > 0, "expected reclaimed bytes");
+
+    assert!(
+        state
+            .registry
+            .manifest(&old_digest)
+            .await
+            .expect("old manifest")
+            .is_none()
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&old_config)
+            .await
+            .expect("old config")
+            .is_none()
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&old_layer)
+            .await
+            .expect("old layer")
+            .is_none()
+    );
+    assert!(!state.storage.blob_path(&old_config).exists());
+    assert!(!state.storage.blob_path(&old_layer).exists());
+
+    assert!(
+        state
+            .registry
+            .manifest(&new_digest)
+            .await
+            .expect("new manifest")
+            .is_some()
+    );
+    assert!(
+        state
+            .registry
+            .blob_stat(&new_config)
+            .await
+            .expect("new config")
+            .is_some()
+    );
+    assert!(state.storage.blob_path(&new_config).exists());
+    assert_eq!(
+        state
+            .registry
+            .resolve_tag(repository.id, "latest")
+            .await
+            .expect("resolve"),
+        Some(new_digest)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,7 +1814,14 @@ async fn activity_feed_hides_deleted_hidden_repository_names() {
     assert!(!feed_mentions(&anon, "alice/ghost"));
 
     let owner = body_json(
-        call(&app, Method::GET, "/api/activity?per_page=100", Some(actor(&alice)), None).await,
+        call(
+            &app,
+            Method::GET,
+            "/api/activity?per_page=100",
+            Some(actor(&alice)),
+            None,
+        )
+        .await,
     )
     .await;
     assert!(feed_mentions(&owner, "alice/ghost"));

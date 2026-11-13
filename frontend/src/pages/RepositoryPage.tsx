@@ -1,13 +1,16 @@
-import { RepoIcon, TrashIcon } from '@primer/octicons-react'
-import { useState } from 'react'
+import { RepoIcon } from '@primer/octicons-react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { repositories as repositoriesApi } from '../api/endpoints'
-import type { TagSummary } from '../api/schemas'
+import type { Page, TagSummary } from '../api/schemas'
 import { CopyButton } from '../components/CopyButton'
+import { IndeterminateCheckbox } from '../components/IndeterminateCheckbox'
 import { PageHeader } from '../components/PageHeader'
 import { Pagination } from '../components/Pagination'
 import { PlatformBadges } from '../components/PlatformBadge'
+import { TagFilterBar } from '../components/TagFilterBar'
+import { TagSelectionBar } from '../components/TagSelectionBar'
 import { Box } from '../components/primitives/Box'
 import { Button, LinkButton } from '../components/primitives/Button'
 import { Flash } from '../components/primitives/Flash'
@@ -37,6 +40,14 @@ import { useAuth } from '../lib/auth-context'
 import { useAsync } from '../lib/useAsync'
 
 const PER_PAGE = 25
+const FILTER_DEBOUNCE_MS = 300
+
+type TagQuery = {
+  /** Committed regular expression (empty means "no filter"). */
+  regex: string
+  /** Invert the pattern: show tags that do *not* match. */
+  exclude: boolean
+}
 
 export type RepositoryPageProps = {
   namespace: string
@@ -48,9 +59,26 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
   const [page, setPage] = useState(1)
   const [sort, setSort] = useState<TagSort>('name')
   const [order, setOrder] = useState<TagOrder>('asc')
-  const [confirming, setConfirming] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState<string | null>(null)
+  const [filterInput, setFilterInput] = useState('')
+  const [exclude, setExclude] = useState(false)
+  const [query, setQuery] = useState<TagQuery>({ regex: '', exclude: false })
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  const [deletingSelected, setDeletingSelected] = useState(false)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+
+  // Every filter change starts a fresh result set: page one, no selection.
+  // Identical queries are ignored so re-committing the same value (the mount
+  // debounce, or clicking the active preset) doesn't disturb the current page.
+  const commitQuery = useCallback(
+    (next: TagQuery) => {
+      if (next.regex === query.regex && next.exclude === query.exclude) return
+      setQuery(next)
+      setPage(1)
+      setSelected(new Set())
+    },
+    [query],
+  )
 
   const detailState = useAsync(
     (signal) => repositoriesApi.detail(namespace, repo, { signal }),
@@ -64,11 +92,33 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
         repo,
         page,
         PER_PAGE,
-        { sort, order },
+        {
+          sort,
+          order,
+          regex: query.regex || undefined,
+          exclude: query.exclude || undefined,
+        },
         { signal },
       ),
-    `repo-tags:${namespace}:${repo}:${page}:${sort}:${order}`,
+    `repo-tags:${namespace}:${repo}:${page}:${sort}:${order}:${query.regex}:${query.exclude}`,
   )
+
+  // Debounce keystrokes so a half-typed pattern never reaches the API; preset
+  // clicks commit immediately through `selectPreset` below.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      commitQuery({ regex: filterInput.trim(), exclude })
+    }, FILTER_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [filterInput, exclude, commitQuery])
+
+  // `useAsync` drops its data when a request fails. The tag endpoint rejects
+  // invalid patterns with a 400, so keep the last successful page around to
+  // leave the table intact while the inline error explains the problem.
+  const [lastGoodTags, setLastGoodTags] = useState<Page<TagSummary> | null>(null)
+  if (tagsState.data && tagsState.data !== lastGoodTags) {
+    setLastGoodTags(tagsState.data)
+  }
 
   const changeSort = (next: TagSort) => {
     setOrder((previous) => nextTagOrder(sort, previous, next))
@@ -76,32 +126,87 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
     setPage(1)
   }
 
+  const changeFilter = (value: string) => {
+    setFilterInput(value)
+    setExclude(false)
+  }
+
+  const selectPreset = (pattern: string, shouldExclude: boolean) => {
+    setFilterInput(pattern)
+    setExclude(shouldExclude)
+    commitQuery({ regex: pattern.trim(), exclude: shouldExclude })
+  }
+
+  const clearFilter = () => {
+    setFilterInput('')
+    setExclude(false)
+    commitQuery({ regex: '', exclude: false })
+  }
+
+  const toggleTag = (name: string) => {
+    setSelected((previous) => {
+      const next = new Set(previous)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
+
   if (isApiError(detailState.error) && detailState.error.status === 404) {
     return <NotFoundPage />
   }
 
   const detail = detailState.data
+  const canPush = Boolean(detail?.can_push)
+  const filterActive = query.regex.length > 0
+  const regexError =
+    isApiError(tagsState.error) && tagsState.error.status === 400
+      ? tagsState.error.message
+      : null
+  const visibleTags = tagsState.data ?? (regexError ? lastGoodTags : null)
+  const pageItems = visibleTags?.items ?? []
+  const allSelected =
+    pageItems.length > 0 && pageItems.every((tag) => selected.has(tag.name))
+  const someSelected = pageItems.some((tag) => selected.has(tag.name))
+
   const host = typeof window === 'undefined' ? '' : window.location.host
-  const firstTag = tagsState.data?.items[0]?.name
+  const firstTag = visibleTags?.items[0]?.name
   const pullCommand = `docker pull ${host}/${namespace}/${repo}:${firstTag ?? '<tag>'}`
   const pullCommandFor = (tag: string) =>
     `docker pull ${host}/${namespace}/${repo}:${tag}`
 
-  const deleteTag = (tag: string) => {
+  const toggleAll = () => {
+    setSelected((previous) => {
+      const next = new Set(previous)
+      if (allSelected) {
+        for (const tag of pageItems) next.delete(tag.name)
+      } else {
+        for (const tag of pageItems) next.add(tag.name)
+      }
+      return next
+    })
+  }
+
+  const deleteSelected = () => {
+    const names = [...selected]
+    if (names.length === 0) return
     setActionError(null)
-    setDeleting(tag)
-    void repositoriesApi.deleteTag(namespace, repo, tag).then(
-      () => {
-        setDeleting(null)
-        setConfirming(null)
+    setSuccessMessage(null)
+    setDeletingSelected(true)
+    void repositoriesApi.batchDeleteTags(namespace, repo, names).then(
+      (response) => {
+        setDeletingSelected(false)
+        setSelected(new Set())
+        setSuccessMessage(
+          `Deleted ${response.deleted} tag${response.deleted === 1 ? '' : 's'}`,
+        )
         tagsState.reload()
         detailState.reload()
       },
       (error: unknown) => {
-        setDeleting(null)
-        setConfirming(null)
+        setDeletingSelected(false)
         setActionError(
-          isApiError(error) ? error.message : 'The tag could not be deleted.',
+          isApiError(error) ? error.message : 'The tags could not be deleted.',
         )
       },
     )
@@ -201,44 +306,40 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
       header: <span className="sr-only">Actions</span>,
       align: 'right',
       render: (tag) =>
-        confirming === tag.name ? (
-          <span className="flex items-center justify-end gap-1">
-            <Button
-              size="sm"
-              variant="danger"
-              disabled={deleting === tag.name}
-              onClick={() => deleteTag(tag.name)}
-            >
-              {deleting === tag.name ? 'Deleting…' : 'Confirm'}
-            </Button>
-            <Button size="sm" onClick={() => setConfirming(null)}>
-              Cancel
-            </Button>
-          </span>
-        ) : (
-          <span className="flex items-center justify-end gap-1">
-            {detail?.can_pull ? (
-              <CopyButton
-                value={pullCommandFor(tag.name)}
-                label="Copy pull"
-                ariaLabel={`Copy pull command for ${tag.name}`}
-              />
-            ) : null}
-            {detail?.can_push ? (
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() => setConfirming(tag.name)}
-                aria-label={`Delete tag ${tag.name}`}
-                leadingIcon={<TrashIcon size={14} aria-hidden="true" />}
-              >
-                Delete
-              </Button>
-            ) : null}
-          </span>
-        ),
+        detail?.can_pull ? (
+          <CopyButton
+            value={pullCommandFor(tag.name)}
+            label="Copy pull"
+            ariaLabel={`Copy pull command for ${tag.name}`}
+          />
+        ) : null,
     },
   ]
+
+  // Selection only exists for viewers who can delete tags; the whole column is
+  // dropped for read-only access so the table keeps its original shape.
+  const selectionColumn: TableColumn<TagSummary> = {
+    key: 'select',
+    header: (
+      <IndeterminateCheckbox
+        checked={allSelected}
+        indeterminate={someSelected && !allSelected}
+        onChange={toggleAll}
+        aria-label="Select all tags on this page"
+      />
+    ),
+    className: 'w-8',
+    headClassName: 'w-8',
+    render: (tag) => (
+      <IndeterminateCheckbox
+        checked={selected.has(tag.name)}
+        onChange={() => toggleTag(tag.name)}
+        aria-label={`Select tag ${tag.name}`}
+      />
+    ),
+  }
+  const tableColumns = canPush ? [selectionColumn, ...columns] : columns
+  const selectedCount = selected.size
 
   return (
     <div className="space-y-4">
@@ -324,35 +425,73 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
             <CopyButton value={pullCommand} label="Copy pull command" />
           </div>
 
+          {successMessage ? (
+            <Flash variant="success" onDismiss={() => setSuccessMessage(null)}>
+              {successMessage}
+            </Flash>
+          ) : null}
           {actionError ? <Flash variant="danger">{actionError}</Flash> : null}
 
+          {canPush && selectedCount > 0 ? (
+            <TagSelectionBar
+              count={selectedCount}
+              pending={deletingSelected}
+              onClear={() => setSelected(new Set())}
+              onDelete={deleteSelected}
+            />
+          ) : null}
+
           <Box>
-            {tagsState.loading && !tagsState.data ? (
+            <TagFilterBar
+              value={filterInput}
+              exclude={exclude}
+              onChange={changeFilter}
+              onSelectPreset={selectPreset}
+              onClear={clearFilter}
+              showCount={filterActive}
+              matchCount={visibleTags?.total ?? null}
+              error={regexError}
+            />
+
+            {tagsState.loading && !visibleTags ? (
               <LoadingState label="Loading tags…" />
             ) : null}
-            {tagsState.error ? (
+            {tagsState.error && !regexError ? (
               <ErrorState error={tagsState.error} onRetry={tagsState.reload} />
             ) : null}
-            {tagsState.data ? (
-              tagsState.data.items.length === 0 ? (
-                <EmptyState
-                  title="No tags"
-                  description="Push an image to this repository to create a tag."
-                  icon={<RepoIcon size={24} aria-hidden="true" />}
-                />
+            {visibleTags ? (
+              visibleTags.items.length === 0 ? (
+                filterActive ? (
+                  <EmptyState
+                    title="No tags match this pattern"
+                    description="Adjust the pattern or clear the filter to see every tag."
+                    icon={<RepoIcon size={24} aria-hidden="true" />}
+                    action={
+                      <Button size="sm" onClick={clearFilter}>
+                        Clear filter
+                      </Button>
+                    }
+                  />
+                ) : (
+                  <EmptyState
+                    title="No tags"
+                    description="Push an image to this repository to create a tag."
+                    icon={<RepoIcon size={24} aria-hidden="true" />}
+                  />
+                )
               ) : (
                 <>
                   <Table
-                    columns={columns}
-                    rows={tagsState.data.items}
+                    columns={tableColumns}
+                    rows={visibleTags.items}
                     rowKey={(tag) => tag.name}
                     caption={`Tags for ${namespace}/${repo}`}
                   />
                   <div className="px-4">
                     <Pagination
-                      page={tagsState.data.page}
-                      perPage={tagsState.data.per_page}
-                      total={tagsState.data.total}
+                      page={visibleTags.page}
+                      perPage={visibleTags.per_page}
+                      total={visibleTags.total}
                       onPageChange={setPage}
                     />
                   </div>

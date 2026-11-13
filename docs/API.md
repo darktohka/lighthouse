@@ -115,7 +115,7 @@ returns `409 conflict` (`namespace_taken`). Reserved first segments
 | GET | `/repositories/{namespace}/{*repo}` | optional | image detail |
 | PATCH | `/repositories/{namespace}/{*repo}` | required | description / visibility / hidden |
 | DELETE | `/repositories/{namespace}/{*repo}` | required | delete the image and all its tags |
-| GET | `/repositories/{namespace}/{*repo}/tags?sort=name\|digest\|compressed_size\|pull_count\|updated_at&order=desc\|asc` | optional | paginated tags |
+| GET | `/repositories/{namespace}/{*repo}/tags?sort=name\|digest\|compressed_size\|pull_count\|updated_at&order=desc\|asc&regex=&exclude=` | optional | paginated tags (`regex`, `exclude` filter tag names server-side) |
 | GET | `/repositories/{namespace}/{*repo}/tags/{tag}` | optional | tag detail |
 | DELETE | `/repositories/{namespace}/{*repo}/tags/{tag}` | required | delete one tag |
 | POST | `/repositories/{namespace}/{*repo}/tags/batch-delete` | required | `{tags:[…]}` → `{deleted:n}` |
@@ -196,6 +196,17 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   `name` comparisons are case-insensitive. Invalid `sort`/`order` values return
   `400 bad_request`. The response keeps the `{items, total, page, per_page}`
   envelope of `TagSummary`.
+- The tag listing also accepts an optional `regex` filter applied to tag names
+  before sorting and pagination, so `total` counts only matching tags. An empty
+  or whitespace-only `regex` is ignored (no filter). Patterns are capped at 512
+  characters; a longer pattern returns `400 bad_request` (`regex must be at most
+  512 characters`) and an unparsable one returns `400 bad_request` (`invalid
+  regex: …`). Add `exclude=1` (also `true` or `yes`) to invert the match and
+  return only tags that do *not* match. Filtering is server-side using the
+  linear-time Rust `regex` engine (no backtracking), with bounded compile
+  (1 MiB compiled-size and DFA budgets) and a 500 ms match budget per request;
+  exceeding the match budget returns `400 bad_request` (`tag filter took too
+  long; narrow the pattern`).
 
 ---
 

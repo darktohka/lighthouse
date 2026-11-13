@@ -233,7 +233,8 @@ pub async fn authenticate_basic(
     if let Some(user) = user {
         if user.email_verified {
             if allow_app_password
-                && let Ok(Some(account)) = app_passwords::authenticate(state, user.id, password).await
+                && let Ok(Some(account)) =
+                    app_passwords::authenticate(state, user.id, password).await
             {
                 if announce {
                     record_login_event(

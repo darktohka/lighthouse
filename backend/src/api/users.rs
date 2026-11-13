@@ -1,5 +1,9 @@
 //! User profile, follow graph, heatmap and search.
 
+use crate::auth::middleware::{Auth, Authenticated};
+use crate::error::{ApiError, ApiResult};
+use crate::models::User;
+use crate::state::{AppState, AuthContext};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
@@ -8,10 +12,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use crate::auth::middleware::{Auth, Authenticated};
-use crate::error::{ApiError, ApiResult};
-use crate::models::User;
-use crate::state::{AppState, AuthContext};
 
 use super::{PageQuery, Pagination, UserSummary, avatar_hash, load_user};
 

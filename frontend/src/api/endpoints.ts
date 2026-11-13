@@ -416,7 +416,14 @@ export const repositories = {
     repo: string,
     page = 1,
     perPage = 25,
-    params?: { sort?: TagSort; order?: TagOrder },
+    params?: {
+      sort?: TagSort
+      order?: TagOrder
+      /** Regular expression the tag name must match. */
+      regex?: string
+      /** Invert `regex`: return tags whose name does *not* match. */
+      exclude?: boolean
+    },
     options?: RequestOptions,
   ) {
     return api.get(
@@ -425,6 +432,8 @@ export const repositories = {
         per_page: perPage,
         sort: params?.sort,
         order: params?.order,
+        regex: params?.regex,
+        exclude: params?.exclude || undefined,
       })}`,
       tagPageSchema,
       options,

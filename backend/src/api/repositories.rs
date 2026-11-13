@@ -900,6 +900,86 @@ async fn delete(state: AppState, actor: AuthContext, name: String) -> ApiResult<
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Longest accepted `regex` tag-filter pattern, in characters (after trimming).
+const TAG_FILTER_MAX_PATTERN_LEN: usize = 512;
+
+/// Wall-clock budget for matching a tag filter over one repository's tags.
+const TAG_FILTER_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Matches are linear-time, so this bounds worst-case work per tag set.
+const TAG_FILTER_REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+/// Number of tag names matched between cooperative yields.
+const TAG_FILTER_YIELD_INTERVAL: usize = 1024;
+
+fn is_truthy_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Parses the optional `regex` / `exclude` query pair into a compiled filter.
+///
+/// A missing, empty or whitespace-only `regex` means "no filter". `exclude`
+/// (`1`, `true`, `yes`) inverts the match so only non-matching tags remain.
+fn parse_tag_filter(query: &[(String, String)]) -> ApiResult<Option<(regex::Regex, bool)>> {
+    let Some(raw) = crate::oci::query_first(query, "regex") else {
+        return Ok(None);
+    };
+    let pattern = raw.trim();
+    if pattern.is_empty() {
+        return Ok(None);
+    }
+    if pattern.chars().count() > TAG_FILTER_MAX_PATTERN_LEN {
+        return Err(ApiError::bad_request(format!(
+            "regex must be at most {TAG_FILTER_MAX_PATTERN_LEN} characters"
+        )));
+    }
+    let compiled = regex::RegexBuilder::new(pattern)
+        .size_limit(TAG_FILTER_REGEX_SIZE_LIMIT)
+        .dfa_size_limit(TAG_FILTER_REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|err| ApiError::bad_request(format!("invalid regex: {err}")))?;
+    let exclude = crate::oci::query_first(query, "exclude")
+        .map(is_truthy_flag)
+        .unwrap_or(false);
+    Ok(Some((compiled, exclude)))
+}
+
+/// Drops tags that the compiled filter does not keep. The match loop runs
+/// under a bounded timeout and yields periodically, so a pathological pattern
+/// cannot monopolise an async worker.
+async fn apply_tag_filter(
+    tags: Vec<Tag>,
+    filter: Option<&(regex::Regex, bool)>,
+) -> ApiResult<Vec<Tag>> {
+    let Some((regex, exclude)) = filter else {
+        return Ok(tags);
+    };
+    let names: Vec<String> = tags.iter().map(|tag| tag.name.clone()).collect();
+    let regex = regex.clone();
+    let exclude = *exclude;
+    let keep = tokio::time::timeout(TAG_FILTER_BUDGET, async move {
+        let mut keep = vec![false; names.len()];
+        for (index, name) in names.iter().enumerate() {
+            if index % TAG_FILTER_YIELD_INTERVAL == 0 {
+                tokio::task::yield_now().await;
+            }
+            keep[index] = regex.is_match(name) != exclude;
+        }
+        keep
+    })
+    .await
+    .map_err(|_| ApiError::bad_request("tag filter took too long; narrow the pattern"))?;
+
+    Ok(tags
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(tag, kept)| kept.then_some(tag))
+        .collect())
+}
+
 async fn list_tags(
     state: AppState,
     actor: AuthContext,
@@ -934,7 +1014,10 @@ async fn list_tags(
     }
     let ascending = order == "asc";
 
+    let filter = parse_tag_filter(&query)?;
+
     let tags = tags_for_repository(&state, repository.id).await?;
+    let tags = apply_tag_filter(tags, filter.as_ref()).await?;
     let manifest_ids: Vec<i64> = tags.iter().map(|tag| tag.manifest_id).collect();
     let manifests = manifests_by_ids(&state.db, &manifest_ids).await?;
     let rowset = super::load_tag_blob_rows(&state).await?;
@@ -957,7 +1040,11 @@ async fn list_tags(
             "updated_at" => a.updated_at.cmp(&b.updated_at),
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         };
-        let primary = if ascending { primary } else { primary.reverse() };
+        let primary = if ascending {
+            primary
+        } else {
+            primary.reverse()
+        };
         primary.then_with(|| a.name.cmp(&b.name))
     });
 

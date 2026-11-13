@@ -334,8 +334,22 @@ impl Registry {
         let Some(manifest) = self.manifest(digest).await? else {
             return Err(RegistryError::manifest_unknown(&digest.to_string()));
         };
+        let manifest_id = manifest.id;
         let now = Utc::now();
+
+        // Retagging can orphan the manifest the tag previously pointed at: once
+        // no tag in this repository references it, its repository link must go
+        // too, otherwise it stays a GC root and its blobs are never reclaimed.
         db::with_busy_retry(|| async {
+            let mut tx = self.db.begin().await?;
+            let previous: Option<i64> = sqlx::query_scalar(
+                "SELECT manifest_id FROM tags WHERE repository_id = ? AND name = ? LIMIT 1",
+            )
+            .bind(repo_id)
+            .bind(tag)
+            .fetch_optional(&mut *tx)
+            .await?;
+
             sqlx::query(
                 "INSERT INTO tags (repository_id, name, manifest_id, created_at, updated_at) \
                  VALUES (?, ?, ?, ?, ?) \
@@ -344,11 +358,19 @@ impl Registry {
             )
             .bind(repo_id)
             .bind(tag)
-            .bind(manifest.id)
+            .bind(manifest_id)
             .bind(now)
             .bind(now)
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await?;
+
+            if let Some(previous) = previous {
+                if previous != manifest_id {
+                    unlink_if_untagged(&mut tx, repo_id, previous).await?;
+                }
+            }
+
+            tx.commit().await?;
             Ok::<(), sqlx::Error>(())
         })
         .await
@@ -357,13 +379,40 @@ impl Registry {
     }
 
     /// Deletes a tag. Returns `false` when it did not exist.
+    ///
+    /// When the deleted tag was the last one in the repository pointing at its
+    /// manifest, the repository link is removed as well so the manifest stops
+    /// being a GC root and its blobs can be reclaimed.
     pub async fn delete_tag(&self, repo_id: i64, tag: &str) -> RegistryResult<bool> {
-        let result = sqlx::query("DELETE FROM tags WHERE repository_id = ? AND name = ?")
+        let removed = db::with_busy_retry(|| async {
+            let mut tx = self.db.begin().await?;
+
+            let manifest_id: Option<i64> = sqlx::query_scalar(
+                "SELECT manifest_id FROM tags WHERE repository_id = ? AND name = ? LIMIT 1",
+            )
             .bind(repo_id)
             .bind(tag)
-            .execute(&self.db)
+            .fetch_optional(&mut *tx)
             .await?;
-        Ok(result.rows_affected() > 0)
+            let Some(manifest_id) = manifest_id else {
+                tx.commit().await?;
+                return Ok(false);
+            };
+
+            sqlx::query("DELETE FROM tags WHERE repository_id = ? AND name = ?")
+                .bind(repo_id)
+                .bind(tag)
+                .execute(&mut *tx)
+                .await?;
+
+            unlink_if_untagged(&mut tx, repo_id, manifest_id).await?;
+
+            tx.commit().await?;
+            Ok(true)
+        })
+        .await
+        .map_err(RegistryError::from)?;
+        Ok(removed)
     }
 
     /// Removes a manifest from a repository, deleting the manifest row itself
@@ -557,6 +606,33 @@ impl ManifestReferences {
 
         Ok(ManifestReferences::Blobs(Vec::new()))
     }
+}
+
+/// Removes the `manifest_repositories` link for a manifest once no tag in the
+/// same repository references it anymore. Other repositories' links, and links
+/// still backed by a tag, are left untouched.
+async fn unlink_if_untagged(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    repo_id: i64,
+    manifest_id: i64,
+) -> Result<(), sqlx::Error> {
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE repository_id = ? AND manifest_id = ?")
+            .bind(repo_id)
+            .bind(manifest_id)
+            .fetch_one(&mut **tx)
+            .await?;
+
+    if remaining == 0 {
+        sqlx::query(
+            "DELETE FROM manifest_repositories WHERE manifest_id = ? AND repository_id = ?",
+        )
+        .bind(manifest_id)
+        .bind(repo_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn apply_references(

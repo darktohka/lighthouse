@@ -1700,7 +1700,6 @@ async fn catalog_hides_hidden_repositories_from_non_explicit_callers() {
     );
 }
 
-
 #[tokio::test]
 async fn private_repository_requires_authentication() {
     let (_dir, state, app) = harness().await;
