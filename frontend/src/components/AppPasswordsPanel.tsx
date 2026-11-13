@@ -306,7 +306,7 @@ export function AppPasswordsPanel() {
             {totalPasswords === 0 && categories.length === 0 ? (
               <EmptyState
                 title="No app passwords yet"
-                description="Create one to run docker login without your account password or two-factor code."
+                description="Create one to log into Docker without your two-factor code."
                 icon={<KeyIcon size={24} aria-hidden="true" />}
               />
             ) : null}

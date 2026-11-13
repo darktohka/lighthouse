@@ -83,7 +83,7 @@ export function CreateAppPasswordDialog({
     <Dialog
       open
       title="New app password"
-      description="Use it to run docker login without your account password or two-factor code."
+      description="App passwords are used to log into Docker without your two-factor code."
       onClose={submitting ? () => undefined : onClose}
       footer={
         <>
@@ -131,12 +131,6 @@ export function CreateAppPasswordDialog({
             ]}
           />
         </div>
-
-        <p className="text-xs text-muted">
-          App passwords authenticate the Docker CLI on their own, so tools and
-          scripts never need your account password or your two-factor code. The
-          token is shown once, right after it is created.
-        </p>
       </form>
     </Dialog>
   )
