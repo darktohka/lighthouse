@@ -137,7 +137,7 @@ export function CreateServiceAccountDialog({
     <Dialog
       open
       title="New service account"
-      description="Set up the token, its categories, reachable networks and permissions in one go."
+      description="Service accounts are used to delegate your repository accesses to independent workflows."
       onClose={submitting ? () => undefined : onClose}
       widthClassName="max-w-2xl"
       footer={
@@ -151,7 +151,7 @@ export function CreateServiceAccountDialog({
             variant="success"
             disabled={submitting}
           >
-            {submitting ? 'Creating…' : 'Create service account'}
+            {submitting ? 'Creating...' : 'Create service account'}
           </Button>
         </>
       }
@@ -199,9 +199,8 @@ export function CreateServiceAccountDialog({
         <section className="space-y-1">
           <h3 className="text-sm font-medium">IP allowlist</h3>
           <p className="text-xs text-muted">
-            Optional. Leave empty to let the account authenticate from any
-            address. Single addresses become <code>/32</code> (IPv4) or{' '}
-            <code>/128</code> (IPv6).
+            Optional. Leave empty to allow access from any address.
+            Use CIDR notation for specifying IP ranges.
           </p>
           <ul className="divide-y divide-border rounded-md border border-border">
             {ranges.map((range) => (
@@ -229,8 +228,7 @@ export function CreateServiceAccountDialog({
         <section className="space-y-1">
           <h3 className="text-sm font-medium">Grants</h3>
           <p className="text-xs text-muted">
-            Each grant is created together with the account. If one is rejected,
-            nothing is created.
+            The permissions granted here define what the service account can access.
           </p>
           <ul className="divide-y divide-border rounded-md border border-border">
             {grants.map((grant, index) => (
@@ -260,13 +258,6 @@ export function CreateServiceAccountDialog({
             />
           </ul>
         </section>
-
-        <p className="flex items-center gap-1.5 text-xs text-muted">
-          <KeyIcon size={12} aria-hidden="true" />
-          The token is shown once, right after creation.
-          <PlusIcon size={12} aria-hidden="true" />
-          Everything above is saved atomically.
-        </p>
       </form>
     </Dialog>
   )

@@ -380,10 +380,6 @@ export function ServiceAccountCard({
                 pending={busy === 'ip-range'}
               />
             </ul>
-            <p className="text-xs text-muted">
-              Single addresses become /32 (IPv4) or /128 (IPv6). The client IP
-              comes from the reverse proxy&apos;s X-Forwarded-For header.
-            </p>
           </section>
 
           <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2 pl-6">

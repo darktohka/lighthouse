@@ -472,7 +472,7 @@ function CategoryCreator({
         {pending ? 'Adding…' : 'Add category'}
       </Button>
       <span className="text-xs text-muted">
-        Group related accounts; at most 40 characters.
+        Group related accounts.
       </span>
     </form>
   )
