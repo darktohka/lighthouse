@@ -419,18 +419,42 @@ characters are stored. See `docs/AUTH.md` for the full model.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/app-passwords` | required | caller's app passwords |
-| POST | `/app-passwords` | required | create `{name}`; token returned **once** |
+| POST | `/app-passwords` | required | create `{name, category_id?}`; token returned **once** |
+| PATCH | `/app-passwords/{id}` | required | set/clear the category |
 | POST | `/app-passwords/{id}/token` | required | rotate; new token returned once |
 | DELETE | `/app-passwords/{id}` | required | delete |
+| GET | `/app-password-categories` | required | caller's categories with counts |
+| POST | `/app-password-categories` | required | create a category |
+| DELETE | `/app-password-categories/{id}` | required | delete an empty category |
 
 ```
-AppPassword        { id, name, token_prefix, token_suffix, created_at, last_used_at }
-CreatedAppPassword { app_password: AppPassword, token: string }
+AppPassword         { id, name, category_id: number|null, token_prefix,
+                      token_suffix, created_at, last_used_at }
+CreatedAppPassword  { app_password: AppPassword, token: string }
+CreateAppPassword   { name: string, category_id?: number|null }
+UpdateAppPassword   { category_id: number|null }
+AppPasswordCategory { id, name, password_count }
 ```
 
 Names are unique per user. An app password authenticates over Basic auth and
 bypasses TOTP, so it is the credential to use for `docker login` once 2FA is
 enabled.
+
+`PATCH /api/app-passwords/{id}` requires the `category_id` key: `null` clears
+the category, a number assigns one, and a body without the key is
+`400 bad_request`. The response is the full `AppPassword`. A category that does
+not exist or belongs to another user is `404 not_found` ("category not found"),
+here and on creation alike. `POST /api/app-passwords` accepts an optional
+`category_id`; it is validated before the credential is created, and a failed
+assignment rolls the credential back so no half-configured secret is returned.
+
+Categories are owner-scoped:
+
+| Method | Path | Result |
+|---|---|---|
+| GET | `/app-password-categories` | `200` bare array `[{ id, name, password_count }]`, ordered by `name` (`COLLATE NOCASE`); `password_count` counts only the caller's app passwords in that category |
+| POST | `/app-password-categories` | `201 { id, name, password_count: 0 }`; the name is trimmed, empty or > 40 characters is `400 bad_request`, a duplicate (case-insensitive) name for the same owner is `409 conflict` |
+| DELETE | `/app-password-categories/{id}` | `204`; `404 not_found` when the category is unknown or not owned by the caller, `409 conflict` ("category is not empty") while any app password still references it — credentials are never reassigned or deleted |
 
 ---
 

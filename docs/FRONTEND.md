@@ -320,14 +320,17 @@ The panel is one bordered list grouped by **category**, not a stack of cards:
   remove button, and each list keeps a trailing "implicit" add row; the target
   still typed in that trailing row is included on submit. A failing grant fails
   the whole creation, which surfaces as a `Flash` inside the dialog. On success
-  the dialog closes and the one-time token appears above the list
-  (`OneTimeToken`).
+  the dialog closes, the list is re-fetched, every other account collapses, the
+  new one expands and the page scrolls it to the vertical centre — the one-time
+  token (`OneTimeToken`) renders *inside* that account's own expanded row, never
+  above the list.
 - **Rows** (`ServiceAccountCard`) are collapsed by default and one line tall:
   name, `token_prefix…token_suffix`, grant/IP summary, relative last use and a
   chevron. The expanded body holds the username, category, created date,
   description, the grants list and the IP allowlist (each ending in its implicit
   add row, with inline `Flash` errors) plus rotate/delete. Expanded state is
-  local component state and is deliberately not persisted.
+  panel-level (`expandedId`), so only one row is open at a time and it is
+  deliberately not persisted.
 - **Categories.** Every category section shows its name, a count (`n of m` while
   a search filters it) and a delete affordance that is only enabled when the
   category is empty — otherwise it renders as a disabled label with a title
@@ -342,9 +345,54 @@ The panel is one bordered list grouped by **category**, not a stack of cards:
   still match stay visible, and an all-out filter shows
   `No service accounts match "<query>"`.
 
+### App passwords
+
+The app-passwords tab is structurally identical to the service-accounts tab and
+shares its components' shape rather than its code: app passwords have no grants,
+no IP allowlist, no description and no username, so a row only carries name,
+`token_prefix…token_suffix`, category and the relative last-use time.
+
+- **Toolbar.** The same `Box`/`BoxHeader` toolbar: a live search box
+  (`type="search"`, no submit) and a green **New app password** button
+  (`variant="success"`). The old always-visible "New app password" form is gone;
+  creation happens in a modal dialog.
+- **Create dialog** (`CreateAppPasswordDialog` over the `Dialog` primitive).
+  Name (required, validated inline), an optional category select including
+  "Uncategorized", and copy explaining that an app password lets `docker login`
+  work without the account password or a two-factor code. It submits one
+  `POST /api/app-passwords` (`{ name, category_id? }`); on success the dialog
+  closes, the list is re-fetched, every other row collapses, the new one expands
+  and the page scrolls it to the vertical centre.
+- **Rows** (`AppPasswordCard`) are collapsed by default and one line tall:
+  chevron, name, `token_prefix…token_suffix`, relative last use and a compact
+  category `<select>`. The expanded body holds the category, created date and
+  last use plus Regenerate/Delete (`ConfirmAction`) and inline `Flash` errors.
+  Expansion is panel-level (`expandedId`), so only one row is open at a time.
+- **Token in the row.** The one-time token (`OneTimeToken`) renders inside the
+  expanded body of the row it belongs to, for both creation and regeneration;
+  the panel keeps `scrollTargetRef` and scrolls via a `data-app-password="{id}"`
+  attribute once the refreshed list has rendered (the same approach as
+  `ServiceAccountsPanel`/`ServiceAccountCard`).
+- **Categories.** Sections are headed by a `<h3>` with a `TagIcon` and a `Label`
+  count pill (`n of m` while filtering), and each offers an "Add password"
+  shortcut that prefills the dialog's category. A category's delete affordance is
+  only enabled when it is empty — otherwise it is a disabled label with a `title`
+  saying it must be emptied first. A "New category" inline form at the foot of
+  the list creates categories (`409` reports a duplicate, `400` an empty or
+  over-40-character name). App passwords with `category_id === null` appear in a
+  trailing **Uncategorized** section shown only when non-empty. The per-row
+  `<select>` PATCHes `/api/app-passwords/{id}` with `{ category_id }` and
+  reflects the result after reload.
+- **Search** filters live on name, token prefix/suffix, category name and the
+  literal word "uncategorized"; sections that still match stay visible, and an
+  all-out filter shows `No app passwords match "<query>"`.
+- **Order.** Every section is sorted by name, case-insensitively
+  (`localeCompare(..., { sensitivity: 'base' })`), matching service accounts.
+
 Supporting components: `AnalyticsCharts`, `Heatmap`, `DelegationsPanel`,
 `UserAutocomplete`, `MembersPanel`, `ServiceAccountCard`,
-`CreateServiceAccountDialog`, `ServiceAccountRows`, `TagSizeTable`,
+`CreateServiceAccountDialog`, `ServiceAccountRows`, `AppPasswordCard`,
+`CreateAppPasswordDialog`, `TagSizeTable`,
 `ConfirmAction`, `FormFields`, `Tabs`, `OneTimeToken`, `ProfileHeader`,
 `ProfileSettingsForm`, `AvatarSettingsPanel`, `SessionsPanel`,
 `LoginHistoryPanel`, `PasswordSettingsForm`, `FollowPanel`, `UserRepositories`,
@@ -365,10 +413,12 @@ utilities numerically, so `inputClasses('py-0')` silently loses to its own
   additions: tolerant list bindings that accept either the documented page
   envelope or the bare array the shipped backend returns (`/users/search`,
   namespace members, namespace/repository permissions, service accounts,
-  `/service-account-categories`), the session/login-history bindings, the
-  single-grant service-account binding, `serviceAccountCategories`
-  (list/create/remove), `serviceAccounts.updateCategory`, the category fields on
-  the service-account schemas and the wave-3 form schemas. No frozen binding is
+  `/service-account-categories`, `/app-password-categories`), the
+  session/login-history bindings, the single-grant service-account binding,
+  `serviceAccountCategories` (list/create/remove),
+  `serviceAccounts.updateCategory`, `appPasswordCategories` (list/create/remove)
+  and `appPasswords.updateCategory`, the category fields on the service-account
+  and app-password schemas and the wave-3 form schemas. No frozen binding is
   modified.
 - `recharts` colours are read from the `--lh-*` tokens at runtime through a
   `MutationObserver` on the root class, so light and dark render without any

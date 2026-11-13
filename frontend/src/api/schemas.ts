@@ -895,12 +895,24 @@ export type TwoFactorDisableRequest = v.InferOutput<
 export const appPasswordSchema = v.object({
   id: v.number(),
   name: v.string(),
+  /** `null` means the app password is uncategorized. */
+  category_id: v.nullable(v.number()),
   token_prefix: v.string(),
   token_suffix: v.string(),
   created_at: timestampSchema,
   last_used_at: v.nullable(timestampSchema),
 })
 export type AppPassword = v.InferOutput<typeof appPasswordSchema>
+
+export const appPasswordCategorySchema = v.object({
+  id: v.number(),
+  name: v.string(),
+  /** Number of app passwords filed under this category. */
+  password_count: v.number(),
+})
+export type AppPasswordCategory = v.InferOutput<
+  typeof appPasswordCategorySchema
+>
 
 export const createdAppPasswordSchema = v.object({
   app_password: appPasswordSchema,
@@ -912,8 +924,29 @@ export type CreatedAppPassword = v.InferOutput<
 
 export const createAppPasswordSchema = v.object({
   name: v.pipe(v.string(), v.nonEmpty('Give the app password a name')),
+  /** Omit or `null` for an uncategorized app password. */
+  category_id: v.optional(v.nullable(v.number())),
 })
 export type CreateAppPassword = v.InferOutput<typeof createAppPasswordSchema>
+
+export const updateAppPasswordCategorySchema = v.object({
+  category_id: v.nullable(v.number()),
+})
+export type UpdateAppPasswordCategory = v.InferOutput<
+  typeof updateAppPasswordCategorySchema
+>
+
+export const createAppPasswordCategorySchema = v.object({
+  name: v.pipe(
+    v.string(),
+    v.trim(),
+    v.nonEmpty('Give the category a name'),
+    v.maxLength(40, 'Category names are at most 40 characters'),
+  ),
+})
+export type CreateAppPasswordCategory = v.InferOutput<
+  typeof createAppPasswordCategorySchema
+>
 
 export const verifyCodeFormSchema = v.object({
   code: v.pipe(v.string(), v.nonEmpty('Enter the 6-digit code')),

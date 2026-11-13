@@ -33,7 +33,8 @@ backoff for operations that can still collide.
 | `sessions` | refresh-token families; `id` is also the access-token `jti` |
 | `email_tokens` | single-use verification / password-reset tokens |
 | `totp_backup_codes` | single-use Argon2id-hashed 2FA recovery codes |
-| `app_passwords` | SHA-256-hashed registry credentials for human accounts |
+| `app_passwords` | SHA-256-hashed registry credentials for human accounts; `category_id` groups them |
+| `app_password_categories` | owner-scoped groupings for app passwords |
 | `login_events` | password, service-token, app-password, two-factor and refresh usage history |
 
 ### Namespaces and repositories
@@ -146,6 +147,30 @@ Indexes:
 category. A category can only be deleted once no account references it; the
 `SET NULL` is a safety net for cascaded owner deletion, not a reassignment path.
 
+### App-password categories
+| Table | Purpose |
+|---|---|
+| `app_password_categories` | owner-scoped labels used to group app passwords |
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | primary key, autoincrement |
+| `owner_user_id` | INTEGER | FK `users(id)`, `ON DELETE CASCADE`; categories are never shared |
+| `name` | TEXT | trimmed, at most 40 characters, unique per owner (case-insensitive) |
+| `created_at` | TEXT | insertion time |
+
+Indexes:
+
+| Index | Columns | Kind |
+|---|---|---|
+| `idx_app_password_categories_owner_name` | `owner_user_id`, `name COLLATE NOCASE` | unique |
+
+`app_passwords.category_id` (INTEGER, nullable, FK
+`app_password_categories(id)`, `ON DELETE SET NULL`) points at the credential's
+category. A category can only be deleted once no app password references it;
+the `SET NULL` is a safety net for cascaded owner deletion, not a reassignment
+path.
+
 ## Reference graph
 
 ```
@@ -179,6 +204,9 @@ Migrations run in filename order at startup.
 - `0007_service_account_categories.sql` creates `service_account_categories`
   (owner-scoped, unique `(owner_user_id, name COLLATE NOCASE)`) and adds the
   nullable `service_accounts.category_id` reference with `ON DELETE SET NULL`.
+- `0008_app_password_categories.sql` creates `app_password_categories`
+  (owner-scoped, unique `(owner_user_id, name COLLATE NOCASE)`) and adds the
+  nullable `app_passwords.category_id` reference with `ON DELETE SET NULL`.
 
 ## Maintenance
 

@@ -11,6 +11,7 @@ import { api, refreshSession, type RequestOptions } from './client'
 import {
   activityEntrySchema,
   analyticsOverviewSchema,
+  appPasswordCategorySchema,
   appPasswordSchema,
   backupCodesResponseSchema,
   batchDeleteResultSchema,
@@ -47,6 +48,7 @@ import {
   userSummarySchema,
   verifyEmailResponseSchema,
   type CreateAppPassword,
+  type CreateAppPasswordCategory,
   type CreateGrant,
   type CreateNamespace,
   type CreateRepository,
@@ -58,6 +60,7 @@ import {
   type LoginRequest,
   type RegisterRequest,
   type ResetPasswordRequest,
+  type UpdateAppPasswordCategory,
   type UpdateProfile,
   type UpdateRepository,
   type UpdateServiceAccountCategory,
@@ -220,8 +223,42 @@ export const appPasswords = {
     return api.post(`/app-passwords/${id}/token`, createdAppPasswordSchema)
   },
 
+  updateCategory(id: number, body: UpdateAppPasswordCategory) {
+    return api.patch(`/app-passwords/${id}`, appPasswordSchema, body)
+  },
+
   remove(id: number) {
     return api.deleteVoid(`/app-passwords/${id}`)
+  },
+}
+
+/**
+ * Categories group app passwords. `GET` answers either a bare array (what the
+ * backend ships today) or the documented page envelope; both normalize to a
+ * plain array, ordered by name. Mirrors `serviceAccountCategories`.
+ */
+const appPasswordCategoryListSchema = v.union([
+  v.array(appPasswordCategorySchema),
+  pageSchema(appPasswordCategorySchema),
+])
+
+export const appPasswordCategories = {
+  list(options?: RequestOptions) {
+    return api
+      .get('/app-password-categories', appPasswordCategoryListSchema, options)
+      .then((value) => (Array.isArray(value) ? value : value.items))
+  },
+
+  create(body: CreateAppPasswordCategory) {
+    return api.post(
+      '/app-password-categories',
+      appPasswordCategorySchema,
+      body,
+    )
+  },
+
+  remove(id: number) {
+    return api.deleteVoid(`/app-password-categories/${id}`)
   },
 }
 
