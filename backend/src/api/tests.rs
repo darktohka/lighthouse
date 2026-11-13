@@ -4775,3 +4775,147 @@ async fn plain_signature_attachment_is_not_reported_as_an_attestation() {
         "a signature has no in-toto statements, so it is not an attestation"
     );
 }
+
+#[tokio::test]
+async fn single_platform_tag_reports_its_attestation() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let repo = state
+        .registry
+        .ensure_repository("alice/single")
+        .await
+        .expect("repository");
+
+    // BuildKit also emits attestations for a single-platform build: the tag is
+    // a plain (non-index) image manifest, and the attestation is either a
+    // referrer or an index entry. Here it is a referrer, so the platform comes
+    // from the image config.
+    let image = seed_platform_image(&state, repo.id, "arm64").await;
+    let statement = "{\"predicateType\":\"https://slsa.dev/provenance/v1\"}";
+    seed_attestation_manifest(
+        &state,
+        repo.id,
+        &image,
+        100,
+        &[("https://slsa.dev/provenance/v1", statement)],
+    )
+    .await;
+    state
+        .registry
+        .set_tag(repo.id, "latest", &image)
+        .await
+        .expect("set tag");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/single/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag = body_json(response).await;
+
+    // The tag itself is still a single image, not an index.
+    assert_eq!(tag["platforms"].as_array().expect("platforms").len(), 1);
+    assert_eq!(tag["platforms"][0]["architecture"], "arm64");
+
+    let attestations = tag["attestations"].as_array().expect("attestations");
+    assert_eq!(attestations.len(), 1);
+    assert_eq!(attestations[0]["kinds"], json!(["provenance"]));
+    assert_eq!(
+        attestations[0]["target"]["os"], "linux",
+        "the platform comes from the image config when there is no index"
+    );
+    assert_eq!(attestations[0]["target"]["architecture"], "arm64");
+    assert_eq!(attestations[0]["target"]["digest"], image.to_string());
+}
+
+#[tokio::test]
+async fn attestations_do_not_leak_between_repositories_sharing_an_image() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    // Two repositories holding the *same* image manifest digest — which happens
+    // whenever two Dockerfiles build identically. Only one of them gets an
+    // attestation, and it must not show up under the other.
+    let repo_a = state
+        .registry
+        .ensure_repository("alice/with-attestation")
+        .await
+        .expect("repository a");
+    let repo_b = state
+        .registry
+        .ensure_repository("alice/without-attestation")
+        .await
+        .expect("repository b");
+
+    let image = seed_platform_image(&state, repo_a.id, "amd64").await;
+    // Share the image manifest into the second repository.
+    state
+        .registry
+        .put_manifest(repo_b.id, media_types::OCI_IMAGE_MANIFEST, &{
+            let stored = state
+                .registry
+                .manifest(&image)
+                .await
+                .expect("manifest")
+                .expect("row");
+            stored.content
+        })
+        .await
+        .expect("share image");
+
+    let statement = "{\"predicateType\":\"https://slsa.dev/provenance/v1\"}";
+    seed_attestation_manifest(
+        &state,
+        repo_a.id,
+        &image,
+        100,
+        &[("https://slsa.dev/provenance/v1", statement)],
+    )
+    .await;
+    state
+        .registry
+        .set_tag(repo_a.id, "latest", &image)
+        .await
+        .expect("tag a");
+    state
+        .registry
+        .set_tag(repo_b.id, "latest", &image)
+        .await
+        .expect("tag b");
+
+    let with_attestation = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/with-attestation/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(with_attestation.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(with_attestation).await["attestations"]
+            .as_array()
+            .expect("attestations")
+            .len(),
+        1
+    );
+
+    let without_attestation = call(
+        &app,
+        Method::GET,
+        "/api/repositories/alice/without-attestation/tags/latest",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(without_attestation.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(without_attestation).await["attestations"],
+        json!([]),
+        "an attestation pushed to one repository must not appear in another"
+    );
+}

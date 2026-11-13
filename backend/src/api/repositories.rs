@@ -584,8 +584,13 @@ async fn platform_of_digest(
 ///
 /// Attestations whose target cannot be resolved keep `target: None` rather than
 /// being dropped, so nothing is silently hidden from the UI.
+///
+/// Discovery is scoped to `repository_id`: two repositories can share an image
+/// digest (identical Dockerfiles produce identical manifests), and an
+/// attestation pushed to one repository must not appear under the other.
 pub(crate) async fn attestations_for(
     state: &AppState,
+    repository_id: i64,
     manifest: &Manifest,
 ) -> ApiResult<Vec<AttestationView>> {
     let mut views: Vec<AttestationView> = Vec::new();
@@ -642,6 +647,16 @@ pub(crate) async fn attestations_for(
                     let Some(stored) = state.registry.manifest(&digest).await? else {
                         continue;
                     };
+                    // The attestation must belong to *this* repository: an index
+                    // digest can be shared, but the attestation manifests pushed
+                    // alongside it are per repository.
+                    if !state
+                        .registry
+                        .manifest_in_repository(repository_id, &digest)
+                        .await?
+                    {
+                        continue;
+                    }
                     if !seen.insert(stored.digest.clone()) {
                         continue;
                     }
@@ -672,14 +687,17 @@ pub(crate) async fn attestations_for(
         }
         let placeholders = vec!["?"; subject_digests.len()].join(",");
         let sql = format!(
-            "SELECT digest, media_type, size, content FROM manifests \
-             WHERE subject_digest IN ({placeholders}) ORDER BY id"
+            "SELECT m.digest, m.media_type, m.size, m.content FROM manifests m \
+             JOIN manifest_repositories mr ON mr.manifest_id = m.id \
+             WHERE m.subject_digest IN ({placeholders}) AND mr.repository_id = ? \
+             ORDER BY m.id"
         );
         let mut query =
             sqlx::query_as::<_, (String, String, i64, Vec<u8>)>(sqlx::AssertSqlSafe(sql));
         for subject in &subject_digests {
             query = query.bind(*subject);
         }
+        query = query.bind(repository_id);
 
         for (digest, media_type, size, content) in query.fetch_all(&state.db).await? {
             let Ok(body) = serde_json::from_slice::<Value>(&content) else {
@@ -1022,7 +1040,7 @@ async fn build_tag_detail(
         config,
         layers,
         platform_details,
-        attestations: attestations_for(state, manifest).await?,
+        attestations: attestations_for(state, repository_id, manifest).await?,
         can_pull: access.can_pull,
         can_push: access.can_push,
     })

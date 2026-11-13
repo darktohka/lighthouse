@@ -154,6 +154,15 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
       ? `Layers for ${formatPlatform(active.os, active.architecture, active.variant)}`
       : 'Layers referenced by this tag'
 
+    // Attestation labels per platform, used by the platform badges so a tag with
+    // attestations reads `linux/arm64 (provenance)` even when it has a single
+    // platform (and therefore no scope button row).
+    const platformKinds = new Map<string, string[]>()
+    for (const item of platformDetails) {
+      const kinds = attestationKindsFor(detail.attestations, item.digest)
+      if (kinds.length > 0) platformKinds.set(item.digest, kinds)
+    }
+
     // Attestations follow the platform scope the same way layers do: a
     // selected platform lists only the attestations that describe it.
     const viewAttestations =
@@ -417,7 +426,11 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
             <div>
               <dt className="text-muted">Platforms</dt>
               <dd className="mt-1">
-                <PlatformBadges platforms={detail.platforms} limit={8} />
+                <PlatformBadges
+                  platforms={detail.platforms}
+                  limit={8}
+                  kindsByDigest={platformKinds}
+                />
               </dd>
             </div>
           </dl>
@@ -430,6 +443,15 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
               aria-label="Platform scope"
               className="mb-2 flex flex-wrap items-center gap-1.5"
             >
+              <Button
+                size="sm"
+                variant={scope === 'all' ? 'primary' : 'default'}
+                aria-pressed={scope === 'all'}
+                title="Every platform and attestation in this tag"
+                onClick={() => setPlatform('all')}
+              >
+                All platforms
+              </Button>
               {platformDetails.map((item) => {
                 const label = formatPlatform(
                   item.os,
