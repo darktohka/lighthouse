@@ -49,7 +49,7 @@ backoff for operations that can still collide.
 |---|---|
 | `blobs` | content-addressed metadata (digest, size, media type) |
 | `blob_repositories` | which repositories link a blob |
-| `manifests` | manifest/index metadata plus the exact JSON body |
+| `manifests` | manifest/index metadata plus the exact JSON body; `artifactType` and `subject_digest` (OCI 1.1 referrers) are indexed columns |
 | `manifest_repositories` | which repositories link a manifest |
 | `manifest_blobs` | reference edges manifest → config/layer blobs (GC) |
 | `manifest_children` | reference edges index → child manifests, with platform |

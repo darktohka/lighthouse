@@ -154,34 +154,36 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
       ? `Layers for ${formatPlatform(active.os, active.architecture, active.variant)}`
       : 'Layers referenced by this tag'
 
-    // Attestations follow the platform scope: a selected platform that carries
-    // attestations narrows the table to them. Otherwise every attestation of
-    // the tag is listed, so a platform without its own attestation never hides
-    // the ones the other platforms have.
-    const scopedAttestations =
+    // Attestations follow the platform scope the same way layers do: a
+    // selected platform lists only the attestations that describe it.
+    const viewAttestations =
       active === null
-        ? []
+        ? detail.attestations.toSorted((left, right) => {
+            // Attestations with an unknown target sort last.
+            const leftLabel = attestationPlatformLabel(left)
+            const rightLabel = attestationPlatformLabel(right)
+            if (leftLabel !== rightLabel) {
+              if (leftLabel.length === 0) return 1
+              if (rightLabel.length === 0) return -1
+              return leftLabel.localeCompare(rightLabel)
+            }
+            return left.digest.localeCompare(right.digest)
+          })
         : detail.attestations.filter(
             (attestation) => attestation.target?.digest === active.digest,
           )
-    const scopeHasAttestations = scopedAttestations.length > 0
-    const viewAttestations = scopeHasAttestations
-      ? scopedAttestations
-      : detail.attestations.toSorted((left, right) => {
-          // Attestations with an unknown target sort last.
-          const leftLabel = attestationPlatformLabel(left)
-          const rightLabel = attestationPlatformLabel(right)
-          if (leftLabel !== rightLabel) {
-            if (leftLabel.length === 0) return 1
-            if (rightLabel.length === 0) return -1
-            return leftLabel.localeCompare(rightLabel)
-          }
-          return left.digest.localeCompare(right.digest)
-        })
+    const activePlatformLabel =
+      active === null
+        ? null
+        : formatPlatform(active.os, active.architecture, active.variant)
     const attestationsCaption =
-      scopeHasAttestations && active !== null
-        ? `in-toto attestations attached to ${formatPlatform(active.os, active.architecture, active.variant)}`
-        : 'in-toto attestations attached to this tag'
+      activePlatformLabel === null
+        ? 'in-toto attestations attached to this tag'
+        : `in-toto attestations attached to ${activePlatformLabel}`
+    const attestationsEmptyDescription =
+      activePlatformLabel === null
+        ? 'No in-toto attestation manifests are attached to this tag.'
+        : `No in-toto attestation manifests are attached to ${activePlatformLabel}.`
 
     const attestationColumns: TableColumn<Attestation>[] = [
       {
@@ -536,11 +538,7 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
               viewAttestations.length === 0 ? (
                 <EmptyState
                   title="No attestations"
-                  description={
-                    detail.attestations.length > 0
-                      ? 'No in-toto attestation manifests are attached to this platform.'
-                      : 'No in-toto attestation manifests are attached to this tag.'
-                  }
+                  description={attestationsEmptyDescription}
                   icon={<ShieldCheckIcon size={24} aria-hidden="true" />}
                 />
               ) : (

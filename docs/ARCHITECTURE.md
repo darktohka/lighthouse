@@ -68,6 +68,8 @@ src/
 │   ├── blobs.rs             GET/HEAD/DELETE /v2/<name>/blobs/<digest>
 │   ├── uploads.rs           POST/PATCH/PUT/GET/DELETE upload lifecycle
 │   ├── manifests.rs         GET/HEAD/PUT/DELETE /v2/<name>/manifests/<reference>
+│   ├── referrers.rs         GET /v2/<name>/referrers/<digest> (OCI 1.1)
+│   ├── attestations.rs      in-toto statement extraction + predicate labels
 │   ├── tags.rs              GET /v2/<name>/tags/list
 │   └── catalog.rs           GET /v2/_catalog
 │

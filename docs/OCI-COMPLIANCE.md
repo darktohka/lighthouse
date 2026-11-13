@@ -26,9 +26,96 @@ including errors and the router fallback.
 | PUT | `/v2/<name>/blobs/uploads/<uuid>?digest=` | 201 | digest verified cryptographically |
 | DELETE | `/v2/<name>/blobs/uploads/<uuid>` | 204 | cancel |
 | GET | `/v2/_catalog` | 200 | `?n`/`?last`, `Link: rel="next"` |
+| GET | `/v2/<name>/referrers/<digest>` | 200 | OCI 1.1 referrers index; `?artifactType=` filter (`OCI-Filters-Applied: artifactType`) |
 
 Repository names may be nested (`alice/more/complicated/app`); the router
 disambiguates a single catch-all into the concrete endpoint.
+
+---
+
+## 1a. in-toto attestations
+
+Attestations (SLSA provenance, SBOMs, …) are recognised, surfaced in the control
+plane and served back untouched. The registry never verifies a signature: an
+attestation is opaque content addressed by digest.
+
+Both of the shapes clients use are supported:
+
+**In-index (BuildKit `--provenance` / `--sbom`).** Attestations are extra entries
+in the image index, with the placeholder platform `unknown/unknown` and the
+annotations
+
+```
+vnd.docker.reference.type:   attestation-manifest
+vnd.docker.reference.digest: sha256:<digest of the image manifest it belongs to>
+```
+
+Each such entry is a manifest whose `artifactType` is
+`application/vnd.docker.attestation.manifest.v1+json` and whose layers are
+`application/vnd.in-toto+json` statements, one per predicate. The
+`vnd.docker.reference.digest` annotation is what ties an attestation to the
+platform it was built for.
+
+**Referrers (OCI 1.1).** The attestation is a separate manifest with a `subject`
+pointing at the image manifest, discovered through the referrers API.
+
+Media types and annotations:
+
+| Kind | Value |
+|---|---|
+| Statement layer | `application/vnd.in-toto+json` (also `application/vnd.in-toto.<predicate>+json`) |
+| Attestation manifest `artifactType` | `application/vnd.docker.attestation.manifest.v1+json` |
+| Predicate annotation | `in-toto.io/predicate-type` |
+| Reference annotations | `vnd.docker.reference.type`, `vnd.docker.reference.digest` |
+
+`GET /v2/<name>/referrers/<digest>` returns an image index whose `manifests`
+array holds one descriptor per referrer, each carrying its own `artifactType`
+and annotations. A subject with no referrers returns `200` with an empty
+`manifests` array — never `404`, so clients do not fall back to tag scanning. A
+digest that is not present in the repository is `404 MANIFEST_UNKNOWN`.
+
+### Control plane
+
+`GET /api/repositories/{namespace}/{repo}/tags/{tag}` gains an `attestations`
+array, always present (possibly empty):
+
+```json
+{
+  "attestations": [
+    {
+      "digest": "sha256:a77201ec…",
+      "media_type": "application/vnd.oci.image.manifest.v1+json",
+      "artifact_type": "application/vnd.docker.attestation.manifest.v1+json",
+      "size": 837,
+      "kinds": ["provenance"],
+      "predicates": [
+        {
+          "predicate_type": "https://slsa.dev/provenance/v1",
+          "kind": "provenance",
+          "digest": "sha256:fc4f36c839eb…",
+          "media_type": "application/vnd.in-toto+json",
+          "size": 1741
+        }
+      ],
+      "subject_digest": "sha256:15b657ae…",
+      "referenced_digest": "sha256:15b657ae…",
+      "target": { "digest": "sha256:15b657ae…", "os": "linux", "architecture": "amd64", "variant": null }
+    }
+  ]
+}
+```
+
+- `kinds` are the deduplicated short labels derived from each statement's
+  predicate type, in statement order: `https://slsa.dev/provenance/v1` →
+  `provenance`, `https://spdx.dev/Document` → `sbom`.
+- `target` is the image platform the attestation was built for. It is `null` only
+  when the attestation names no subject at all.
+- **Attestation manifests are excluded from `platforms` and `platform_details`.**
+  The index's `unknown/unknown` entries are not image platforms, so they no
+  longer appear as bogus platform badges.
+
+The UI renders each attestation against its platform, e.g.
+`linux/arm64 (provenance)` or `linux/amd64 (provenance, sbom)`.
 
 ---
 
@@ -134,6 +221,11 @@ Executed against Docker Engine 29.8.0 and `buildx` v0.35.0 on a local instance:
 | Audit trail | `registry_events` rows for `blob.push`, `manifest.push`, `blob.pull`, `manifest.pull` with actor, IP and user agent |
 | Pull statistics | `pull_stats` daily rollups per repository and per tag |
 | Login history | `login_events` rows for password and Basic-auth use |
+| `buildx --provenance=mode=max --sbom=true` push (2 platforms) | Index accepted with both `unknown/unknown` attestation entries; tag detail reports `linux/amd64 (sbom, provenance)` and `linux/arm64 (sbom, provenance)` |
+| Tag detail of `registry.tohka.us/base/planka:latest` copied with `imagetools create` | `platforms` = `linux/amd64`, `linux/arm64` only; attestations = `linux/amd64 (provenance)`, `linux/arm64 (provenance)` |
+| `GET /v2/<name>/referrers/<image digest>` | `200` index listing the attestation manifest with `artifactType` |
+| `?artifactType=` mismatch | `200` with an empty `manifests` array |
+| Referrers of a digest absent from the repository | `404 MANIFEST_UNKNOWN` |
 
 The automated suite additionally covers chunked/resumable uploads, out-of-order
 `Content-Range` (416), `Content-Length` mismatch (400), cross-repo mounts, upload

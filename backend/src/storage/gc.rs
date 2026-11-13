@@ -670,3 +670,193 @@ mod tests {
         assert!(storage.blobs_dir().exists(), "blob root must survive");
     }
 }
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::*;
+    use crate::oci::media_types;
+    use crate::storage::registry::Registry;
+    use std::sync::Arc;
+
+    async fn setup() -> (tempfile::TempDir, Registry, Storage) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display());
+        let pool = crate::db::connect(&url).await.expect("connect");
+        crate::db::migrate(&pool).await.expect("migrate");
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO namespaces \
+             (name, kind, owner_user_id, description, is_public, created_at, updated_at) \
+             VALUES ('darktohka', 'user', NULL, NULL, 0, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("namespace");
+        let storage = Storage::at(dir.path().join("data"));
+        storage.ensure_layout().await.expect("layout");
+        let registry = Registry::new(pool, Arc::new(storage.clone()));
+        (dir, registry, storage)
+    }
+
+    fn image_manifest(config: &str) -> Vec<u8> {
+        serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": media_types::OCI_IMAGE_MANIFEST,
+            "config": {
+                "mediaType": media_types::OCI_IMAGE_CONFIG,
+                "digest": config,
+                "size": 2
+            },
+            "layers": []
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn attestation_manifest(subject: &str, statement_digest: &str) -> Vec<u8> {
+        serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": media_types::OCI_IMAGE_MANIFEST,
+            "artifactType": media_types::DOCKER_ATTESTATION_MANIFEST,
+            "config": {
+                "mediaType": media_types::OCI_EMPTY,
+                "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "size": 2
+            },
+            "layers": [{
+                "mediaType": media_types::IN_TOTO_JSON,
+                "digest": statement_digest,
+                "size": 10,
+                "annotations": { media_types::PREDICATE_TYPE_ANNOTATION: "https://slsa.dev/provenance/v1" }
+            }],
+            "subject": {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": subject,
+                "size": 100
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// An index whose attestation entry is the only thing keeping the
+    /// attestation manifest and its statement blob alive.
+    async fn build_attested_index(registry: &Registry) -> (i64, Digest, Digest, Digest) {
+        let repo = registry
+            .ensure_repository("darktohka/attested")
+            .await
+            .expect("repository");
+
+        let config = Digest::from_bytes(b"config").to_string();
+        let image = image_manifest(&config);
+        let image_digest = Digest::from_bytes(&image);
+        registry
+            .put_manifest(repo.id, media_types::OCI_IMAGE_MANIFEST, &image)
+            .await
+            .expect("image");
+
+        let statement = Digest::from_bytes(b"statement").to_string();
+        let attestation = attestation_manifest(&image_digest.to_string(), &statement);
+        let attestation_digest = Digest::from_bytes(&attestation);
+        registry
+            .put_manifest(repo.id, media_types::OCI_IMAGE_MANIFEST, &attestation)
+            .await
+            .expect("attestation");
+
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": media_types::OCI_IMAGE_INDEX,
+            "manifests": [
+                {
+                    "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                    "digest": image_digest.to_string(),
+                    "size": 100,
+                    "platform": { "os": "linux", "architecture": "amd64" }
+                },
+                {
+                    "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                    "digest": attestation_digest.to_string(),
+                    "size": 100,
+                    "annotations": {
+                        media_types::REFERENCE_TYPE_ANNOTATION: media_types::ATTESTATION_MANIFEST_REFERENCE,
+                        media_types::REFERENCE_DIGEST_ANNOTATION: image_digest.to_string()
+                    },
+                    "platform": { "os": "unknown", "architecture": "unknown" }
+                }
+            ]
+        })
+        .to_string()
+        .into_bytes();
+        let index_digest = Digest::from_bytes(&index);
+        registry
+            .put_manifest(repo.id, media_types::OCI_IMAGE_INDEX, &index)
+            .await
+            .expect("index");
+        registry
+            .set_tag(repo.id, "latest", &index_digest)
+            .await
+            .expect("tag");
+
+        (repo.id, index_digest, image_digest, attestation_digest)
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_attestation_manifests_reachable_from_the_index() {
+        let (_dir, registry, storage) = setup().await;
+        let (_repo_id, _index, _image, attestation_digest) = build_attested_index(&registry).await;
+
+        let report = collect(&registry, &storage, false, 0)
+            .await
+            .expect("collect");
+        assert_eq!(report.manifests_deleted, 0, "nothing is unreachable");
+        assert_eq!(report.blobs_deleted, 0);
+
+        // The attestation manifest survives, so attestations keep resolving.
+        assert!(
+            registry
+                .manifest(&attestation_digest)
+                .await
+                .expect("query")
+                .is_some(),
+            "the attestation manifest must survive GC"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_reclaims_attestations_once_the_tag_is_removed() {
+        let (_dir, registry, storage) = setup().await;
+        let (repo_id, _index, image, attestation_digest) = build_attested_index(&registry).await;
+
+        registry
+            .delete_tag(repo_id, "latest")
+            .await
+            .expect("delete tag");
+        // Drop the repository links so the tag is the only root.
+        sqlx::query("DELETE FROM manifest_repositories")
+            .execute(registry.db())
+            .await
+            .expect("unlink");
+
+        let report = collect(&registry, &storage, false, 0)
+            .await
+            .expect("collect");
+        assert!(report.manifests_deleted >= 3, "index, image and attestation");
+        assert!(
+            registry
+                .manifest(&attestation_digest)
+                .await
+                .expect("query")
+                .is_none(),
+            "the attestation manifest is reclaimed with its tag"
+        );
+        assert!(
+            registry
+                .manifest(&image)
+                .await
+                .expect("query")
+                .is_none()
+        );
+    }
+}

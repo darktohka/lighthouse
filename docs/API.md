@@ -134,10 +134,17 @@ TagSummary  { name, digest, media_type, size, compressed_size,
               platforms: Platform[], pull_count, updated_at }
 TagDetail   { ...TagSummary, manifest: object,
               config: object|null, layers: LayerInfo[],
-              platform_details: PlatformDetail[], can_pull, can_push }
+              platform_details: PlatformDetail[],
+              attestations: Attestation[], can_pull, can_push }
 Platform      { os, architecture, variant|null, digest, size }
 PlatformDetail{ os, architecture, variant|null, digest, media_type, size,
                 manifest: object, config: object|null, layers: LayerInfo[] }
+Attestation   { digest, media_type, artifact_type: string|null, size,
+                kinds: string[], predicates: AttestationPredicate[],
+                subject_digest: string|null, referenced_digest: string|null,
+                target: AttestationTarget|null }
+AttestationPredicate { predicate_type: string|null, kind, digest, media_type, size }
+AttestationTarget    { digest, os, architecture, variant: string|null }
 LayerInfo   { digest, media_type, size, role: "config"|"layer",
               created: string|null, created_by: string|null, comment: string|null }
 TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
@@ -165,6 +172,15 @@ TagSizeEntry{ repository, namespace, tag, total_size, unique_size, shared_size,
   order each manifest declares in its own `layers` array, never digest order; the
   combined view concatenates each child manifest's order (platform by platform)
   and deduplicates by digest, with the config blob first.
+- `platforms` and `platform_details` contain **image platforms only**. BuildKit
+  stores in-toto attestations as index entries with the placeholder platform
+  `unknown/unknown`; those are excluded here and reported through
+  `attestations` instead. `attestations` is always present (possibly `[]`) and
+  holds one entry per attestation manifest, each carrying the short predicate
+  `kinds` and the image platform it was built for in `target` (see
+  `docs/OCI-COMPLIANCE.md` §1a). `target` is `null` only when the attestation
+  names no subject; an attestation whose referenced manifest is not part of the
+  tag keeps its digest with empty `os`/`architecture`.
 - `created`, `created_by` and `comment` come from the image config's `history`
   array: entries with `empty_layer: true` are skipped and the remaining entries
   are mapped to the manifest's layers in order (the Nth non-empty entry is the
