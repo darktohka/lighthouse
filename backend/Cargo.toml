@@ -2,7 +2,7 @@
 name = "lighthouse-registry"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.98"
 description = "Lighthouse — a Rust OCI/Docker image registry with a web control plane"
 license = "AGPL-3.0-or-later"
 
@@ -13,14 +13,14 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.6.0"
-async-compression = { version = "0.4.48", features = ["tokio", "gzip", "zstd"] }
+async-compression = { version = "0.4.52", features = ["tokio", "gzip", "zstd"] }
 axum = { version = "0.8.9", features = ["macros", "http2"] }
 base64 = "0.23.1"
 bytes = "1.12.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 digest = "0.11.3"
 dotenvy = "0.15.7"
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 governor = "0.10.4"
 hex = "0.4.3"
 http = "1.5.0"
@@ -28,31 +28,31 @@ http-body-util = "0.1.5"
 httpdate = "1.0.3"
 im = "15.1.0"
 ipnet = "2.12.2"
-jsonwebtoken = "11.1.0"
-mime = "0.3.17"
+jsonwebtoken = "12.0.0"
+mime = "0.3.18"
 mime_guess = "2.0.5"
 password-hash = "0.6.1"
 percent-encoding = "2.3.2"
 pow-captcha-axum = "0.2.0"
-rand = "0.10.2"
+rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["json"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 sha1 = "0.11.0"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "json"] }
 subtle = "2.6.1"
 tar = "0.4.46"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["full"] }
-tokio-util = { version = "0.7.19", features = ["io"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["trace", "cors", "compression-gzip", "fs", "request-id", "timeout", "limit", "catch-panic", "set-header", "normalize-path"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5.8"
-uuid = { version = "1.26.1", features = ["v4", "serde"] }
-zstd = "0.14.0"
+uuid = { version = "1.29.2", features = ["v4", "serde"] }
+zstd = "0.14.4"
 
 [dev-dependencies]
 http-body-util = "0.1.5"

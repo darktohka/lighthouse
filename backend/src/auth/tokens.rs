@@ -195,14 +195,14 @@ fn issue_access_token_at(
         jti: session_id.to_string(),
     };
     let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(config.jwt_secret.as_bytes());
+    let key = EncodingKey::from_secret(config.jwt_secret.as_bytes())?;
     encode(&header, &claims, &key).map_err(|err| anyhow!("failed to issue access token: {err}"))
 }
 
 /// Verifies an access token's signature, expiry and `kind` claim.
 pub fn verify_access_token(config: &Config, token: &str) -> Result<Claims> {
     ensure_provider();
-    let key = DecodingKey::from_secret(config.jwt_secret.as_bytes());
+    let key = DecodingKey::from_secret(config.jwt_secret.as_bytes())?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 0;
     validation.required_spec_claims = HashSet::from(["exp".to_string()]);
@@ -291,14 +291,14 @@ pub fn issue_registry_token(
         access,
     };
     let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(&derived_key(&config.jwt_secret, "registry"));
+    let key = EncodingKey::from_secret(&derived_key(&config.jwt_secret, "registry"))?;
     encode(&header, &claims, &key).map_err(|err| anyhow!("failed to issue registry token: {err}"))
 }
 
 /// Verifies a registry token's signature, expiry, audience and `kind` claim.
 pub fn verify_registry_token(config: &Config, token: &str) -> Result<RegistryClaims> {
     ensure_provider();
-    let key = DecodingKey::from_secret(&derived_key(&config.jwt_secret, "registry"));
+    let key = DecodingKey::from_secret(&derived_key(&config.jwt_secret, "registry"))?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 0;
     validation.required_spec_claims = HashSet::from(["exp".to_string()]);
@@ -327,14 +327,14 @@ pub fn issue_mfa_token(config: &Config, user_id: i64) -> Result<String> {
         jti: hex::encode(id),
     };
     let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(&derived_key(&config.jwt_secret, "mfa"));
+    let key = EncodingKey::from_secret(&derived_key(&config.jwt_secret, "mfa"))?;
     encode(&header, &claims, &key).map_err(|err| anyhow!("failed to issue mfa token: {err}"))
 }
 
 /// Verifies an MFA token. Never yields an identity on its own.
 pub fn verify_mfa_token(config: &Config, token: &str) -> Result<MfaClaims> {
     ensure_provider();
-    let key = DecodingKey::from_secret(&derived_key(&config.jwt_secret, "mfa"));
+    let key = DecodingKey::from_secret(&derived_key(&config.jwt_secret, "mfa"))?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 0;
     validation.required_spec_claims = HashSet::from(["exp".to_string()]);
@@ -477,7 +477,7 @@ mod tests {
             exp: 1_001,
             jti: "s".to_string(),
         };
-        let key = EncodingKey::from_secret(config.jwt_secret.as_bytes());
+        let key = EncodingKey::from_secret(config.jwt_secret.as_bytes()).expect("key");
         let token = encode(&Header::new(Algorithm::HS256), &expired, &key).expect("encode");
         assert!(verify_access_token(&config, &token).is_err());
     }
