@@ -284,24 +284,34 @@ required only when `subject_type == "user"`.
 | GET | `/service-accounts` | required | caller's service accounts |
 | POST | `/service-accounts` | required | create; token returned **once** |
 | GET | `/service-accounts/{id}` | required | detail with grants |
+| PATCH | `/service-accounts/{id}` | required | set/clear the category |
 | DELETE | `/service-accounts/{id}` | required | delete |
 | POST | `/service-accounts/{id}/token` | required | rotate; new token returned once |
 | POST | `/service-accounts/{id}/grants` | required | add a grant |
 | DELETE | `/service-accounts/{id}/grants/{grant_id}` | required | remove a grant |
 | POST | `/service-accounts/{id}/ip-ranges` | required | add an IP allowlist entry `{cidr}` |
 | DELETE | `/service-accounts/{id}/ip-ranges/{range_id}` | required | remove an IP allowlist entry |
+| GET | `/service-account-categories` | required | caller's categories with counts |
+| POST | `/service-account-categories` | required | create a category |
+| DELETE | `/service-account-categories/{id}` | required | delete an empty category |
 
 ```
-ServiceAccount { id, name, username, description, token_prefix, token_suffix,
-                 created_at, last_used_at, grants: ServiceAccountGrant[],
+ServiceAccount { id, name, username, description, category_id: number|null,
+                 token_prefix, token_suffix, created_at, last_used_at,
+                 grants: ServiceAccountGrant[],
                  ip_ranges: ServiceAccountIpRange[] }
 CreatedServiceAccount { account: ServiceAccount, token: string }
 ServiceAccountGrant { id, namespace: string|null, repository: string|null,
                       can_pull, can_push }
 ServiceAccountIpRange { id, cidr }
-CreateServiceAccount { name, description?, ip_ranges?: string[] }
+ServiceAccountCategory { id, name, account_count }
+CreateServiceAccount { name, description?, category_id?: number|null,
+                       ip_ranges?: string[],
+                       grants?: CreateServiceAccountGrant[] }
+UpdateServiceAccount { category_id: number|null }
 CreateServiceAccountGrant { namespace?: string, repository?: string, can_push: bool }
 CreateServiceAccountIpRange { cidr: string }
+CreateServiceAccountCategory { name: string }
 ```
 
 The plaintext token (`lhr_…`) is present only in the create/rotate response.
@@ -317,6 +327,28 @@ account not owned by the caller with `404 not_found`, and a list that exceeds th
 cap with `400 bad_request`. `DELETE .../ip-ranges/{range_id}` returns `204`, or
 `404 not_found` for an unknown range. See `docs/AUTH.md` for how the allowlist is
 enforced during authentication.
+
+`category_id` groups an account under one of the caller's categories (or `null`).
+A category id that the caller does not own is always reported as `404 not_found`
+("category not found"), both on create and on patch. `PATCH /service-accounts/{id}`
+requires the `category_id` key (there are no other patchable fields), returns the
+full `ServiceAccount` with `200`, and `null` clears the assignment. Deleting an
+account leaves its category in place.
+
+`grants` on create is an atomic batch: each entry is validated exactly like
+`POST .../grants` (`namespace` xor `repository`, namespace-admin required, no
+duplicates) and the created account is returned with them in `account.grants`. If
+any entry fails, the whole creation is rolled back — the account row is deleted
+(which cascades grants and IP ranges) and the failing grant's status is returned,
+so a rejected request never leaves an account behind.
+
+Categories are owner-scoped:
+
+| Method | Path | Result |
+|---|---|---|
+| GET | `/service-account-categories` | `200` bare array `[{ id, name, account_count }]`, ordered by `name` (`COLLATE NOCASE`); `account_count` counts only the caller's accounts in that category |
+| POST | `/service-account-categories` | `201 { id, name, account_count: 0 }`; the name is trimmed, empty or > 40 characters is `400 bad_request`, a duplicate (case-insensitive) name for the same owner is `409 conflict` |
+| DELETE | `/service-account-categories/{id}` | `204`; `404 not_found` when the category is unknown or not owned by the caller, `409 conflict` ("category is not empty") while any service account still references it — accounts are never reassigned or deleted |
 
 ---
 

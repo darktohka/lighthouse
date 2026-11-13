@@ -2873,6 +2873,476 @@ async fn service_account_create_with_invalid_range_is_rejected() {
     assert_eq!(accounts, 0, "a rejected creation leaves no account behind");
 }
 
+#[tokio::test]
+async fn service_account_categories_are_listed_and_counted() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        body_json(response)
+            .await
+            .as_array()
+            .expect("list")
+            .is_empty()
+    );
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "  CI  " })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert_eq!(created["name"], "CI", "the name is trimmed");
+    assert_eq!(created["account_count"], 0);
+    let category_id = created["id"].as_i64().expect("category id");
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci" })),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "duplicate names are case-insensitive per owner"
+    );
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "   " })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "x".repeat(41) })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    for name in ["zeta", "alpha"] {
+        let response = call(
+            &app,
+            Method::POST,
+            "/api/service-account-categories",
+            Some(actor(&alice)),
+            Some(json!({ "name": name })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci", "username": "alice-ci", "category_id": category_id })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let categories = body_json(response).await;
+    let names: Vec<&str> = categories
+        .as_array()
+        .expect("categories")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["alpha", "CI", "zeta"],
+        "sorted case-insensitively"
+    );
+    let ci = categories
+        .as_array()
+        .expect("categories")
+        .iter()
+        .find(|entry| entry["id"] == json!(category_id))
+        .expect("CI category");
+    assert_eq!(ci["account_count"], 1);
+    assert_eq!(
+        categories
+            .as_array()
+            .expect("categories")
+            .iter()
+            .filter(|entry| entry["account_count"] == json!(0))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn service_account_category_is_assigned_and_cleared() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "CI" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let category_id = body_json(response).await["id"]
+        .as_i64()
+        .expect("category id");
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci", "username": "alice-ci" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert!(created["account"]["category_id"].is_null());
+    let account_id = created["account"]["id"].as_i64().expect("account id");
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        Some(json!({ "category_id": category_id })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["category_id"], json!(category_id));
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let listed = body_json(response).await;
+    assert_eq!(listed[0]["category_id"], json!(category_id));
+
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body_json(response).await["category_id"],
+        json!(category_id),
+        "detail reports the category"
+    );
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        Some(json!({ "category_id": null })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_json(response).await["category_id"].is_null());
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        "/api/service-accounts/9999",
+        Some(actor(&alice)),
+        Some(json!({ "category_id": null })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "category_id is a required key"
+    );
+}
+
+#[tokio::test]
+async fn service_account_category_of_another_user_is_rejected() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let bob = create_user(&state, "bob").await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&bob)),
+        Some(json!({ "name": "Bob's CI" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bob_category = body_json(response).await["id"]
+        .as_i64()
+        .expect("category id");
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci", "username": "alice-ci" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let account_id = body_json(response).await["account"]["id"]
+        .as_i64()
+        .expect("account id");
+
+    let response = call(
+        &app,
+        Method::PATCH,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        Some(json!({ "category_id": bob_category })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci-2", "username": "alice-ci-2", "category_id": bob_category })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_accounts")
+        .fetch_one(&state.db)
+        .await
+        .expect("accounts counted");
+    assert_eq!(accounts, 1, "only the first account exists");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert!(
+        body_json(response)
+            .await
+            .as_array()
+            .expect("list")
+            .is_empty(),
+        "another user's categories are never listed"
+    );
+}
+
+#[tokio::test]
+async fn service_account_category_delete_requires_an_empty_category() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-account-categories",
+        Some(actor(&alice)),
+        Some(json!({ "name": "CI" })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let category_id = body_json(response).await["id"]
+        .as_i64()
+        .expect("category id");
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({ "name": "ci", "username": "alice-ci", "category_id": category_id })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let account_id = body_json(response).await["account"]["id"]
+        .as_i64()
+        .expect("account id");
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/service-account-categories/{category_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/service-accounts/{account_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/service-account-categories/{category_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/service-account-categories/{category_id}"),
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn service_account_create_with_grants_is_atomic() {
+    let (_dir, state, app) = harness().await;
+    let alice = create_user(&state, "alice").await;
+    let bob = create_user(&state, "bob").await;
+    seed_image(&state, "alice/app", "latest", b"config", &layer_archive()).await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({
+            "name": "ci",
+            "username": "alice-ci",
+            "grants": [
+                { "namespace": "alice", "can_push": true },
+                { "repository": "alice/app", "can_push": false },
+            ],
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    let grants = created["account"]["grants"].as_array().expect("grants");
+    assert_eq!(grants.len(), 2);
+    assert_eq!(grants[0]["namespace"], "alice");
+    assert_eq!(grants[0]["can_push"], true);
+    assert_eq!(grants[1]["repository"], "alice/app");
+    assert_eq!(grants[1]["can_push"], false);
+    assert!(
+        created["token"]
+            .as_str()
+            .expect("token")
+            .starts_with("lhr_"),
+        "creation still returns the token"
+    );
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        Some(json!({
+            "name": "rogue",
+            "username": "alice-rogue",
+            "grants": [{ "namespace": "bob", "can_push": true }],
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-accounts",
+        Some(actor(&alice)),
+        None,
+    )
+    .await;
+    let listed = body_json(response).await;
+    assert_eq!(
+        listed.as_array().expect("list").len(),
+        1,
+        "the failed creation left no account behind"
+    );
+    let ids: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_account_grants")
+        .fetch_one(&state.db)
+        .await
+        .expect("grants counted");
+    assert_eq!(ids, 2, "only the successful creation's grants remain");
+
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/service-accounts",
+        Some(actor(&bob)),
+        None,
+    )
+    .await;
+    assert!(
+        body_json(response)
+            .await
+            .as_array()
+            .expect("list")
+            .is_empty()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Analytics, activity and dashboard
 // ---------------------------------------------------------------------------

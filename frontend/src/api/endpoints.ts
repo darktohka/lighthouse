@@ -33,6 +33,7 @@ import {
   repositoryDetailSchema,
   repositorySummarySchema,
   resetPasswordResponseSchema,
+  serviceAccountCategorySchema,
   serviceAccountIpRangeSchema,
   serviceAccountSchema,
   tagDetailSchema,
@@ -50,6 +51,7 @@ import {
   type CreateNamespace,
   type CreateRepository,
   type CreateServiceAccount,
+  type CreateServiceAccountCategory,
   type CreateServiceAccountGrant,
   type CreateServiceAccountIpRange,
   type ForgotPasswordRequest,
@@ -58,6 +60,7 @@ import {
   type ResetPasswordRequest,
   type UpdateProfile,
   type UpdateRepository,
+  type UpdateServiceAccountCategory,
 } from './schemas'
 import {
   blobApiPath,
@@ -608,6 +611,11 @@ export const serviceAccounts = {
   removeIpRange(id: number, rangeId: number) {
     return api.deleteVoid(`/service-accounts/${id}/ip-ranges/${rangeId}`)
   },
+
+  /** Reassign the account to a category, or clear it with `category_id: null`. */
+  updateCategory(id: number, body: UpdateServiceAccountCategory) {
+    return api.patch(`/service-accounts/${id}`, serviceAccountSchema, body)
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +752,40 @@ export const serviceAccountGrants = {
       serviceAccountGrantSchema,
       body,
     )
+  },
+}
+
+/**
+ * Categories group service accounts. `GET` answers either a bare array (what
+ * the backend ships today) or the documented page envelope; both normalize to
+ * a plain array, ordered by name.
+ */
+const serviceAccountCategoryListSchema = v.union([
+  v.array(serviceAccountCategorySchema),
+  pageSchema(serviceAccountCategorySchema),
+])
+
+export const serviceAccountCategories = {
+  list(options?: RequestOptions) {
+    return api
+      .get(
+        '/service-account-categories',
+        serviceAccountCategoryListSchema,
+        options,
+      )
+      .then((value) => (Array.isArray(value) ? value : value.items))
+  },
+
+  create(body: CreateServiceAccountCategory) {
+    return api.post(
+      '/service-account-categories',
+      serviceAccountCategorySchema,
+      body,
+    )
+  },
+
+  remove(id: number) {
+    return api.deleteVoid(`/service-account-categories/${id}`)
   },
 }
 

@@ -166,11 +166,20 @@ pub struct ServiceAccount {
     pub name: String,
     pub username: String,
     pub description: Option<String>,
+    pub category_id: Option<i64>,
     pub token_prefix: String,
     pub token_suffix: String,
     pub token_hash: String,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct ServiceAccountCategory {
+    pub id: i64,
+    pub owner_user_id: i64,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]

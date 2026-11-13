@@ -1,6 +1,6 @@
 import { cx } from './cx'
 
-export type ButtonVariant = 'default' | 'primary' | 'danger'
+export type ButtonVariant = 'default' | 'primary' | 'success' | 'danger'
 export type ButtonSize = 'sm' | 'md'
 export type LabelVariant =
   | 'default'
@@ -23,6 +23,8 @@ const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
     'border-border bg-canvas-subtle text-foreground hover:bg-neutral-subtle active:bg-neutral-muted',
   primary:
     'border-accent-emphasis bg-accent-emphasis text-on-emphasis hover:border-accent hover:bg-accent',
+  success:
+    'border-success-emphasis bg-success-emphasis text-on-emphasis hover:bg-success',
   danger:
     'border-border bg-canvas-subtle text-danger hover:border-danger-emphasis hover:bg-danger-emphasis hover:text-on-emphasis',
 }
@@ -38,6 +40,20 @@ export function buttonClasses(
 export function inputClasses(extra?: string): string {
   return cx(
     'block w-full rounded-md border border-border bg-canvas-default px-2.5 py-1.5 text-sm text-foreground transition-colors placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60',
+    extra,
+  )
+}
+
+/**
+ * Compact variant of `inputClasses` for inline/list rows.
+ *
+ * Kept as its own helper rather than `inputClasses('h-7 py-0')` because Tailwind
+ * orders same-property utilities numerically (`py-1.5` is emitted after `py-0`),
+ * so padding overrides silently lose. Width still comes from the wrapper.
+ */
+export function compactInputClasses(extra?: string): string {
+  return cx(
+    'block w-full rounded-md border border-border bg-canvas-default px-2 py-0.5 text-xs text-foreground transition-colors placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60',
     extra,
   )
 }

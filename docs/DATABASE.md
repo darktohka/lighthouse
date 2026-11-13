@@ -60,7 +60,8 @@ backoff for operations that can still collide.
 |---|---|
 | `namespace_permissions` | grants on a namespace (user or anonymous) |
 | `repository_permissions` | grants on a single image |
-| `service_accounts` | Basic-auth machine credentials (hash + prefix/suffix) |
+| `service_accounts` | Basic-auth machine credentials (hash + prefix/suffix); `category_id` groups them |
+| `service_account_categories` | owner-scoped groupings for service accounts |
 | `service_account_grants` | namespace- or repository-scoped grants |
 | `service_account_ip_ranges` | per-account CIDR allowlist entries; empty means unrestricted |
 
@@ -122,6 +123,29 @@ Indexes:
 |---|---|---|
 | `idx_service_account_ip_ranges_unique` | `service_account_id`, `cidr` | unique |
 
+### Service-account categories
+| Table | Purpose |
+|---|---|
+| `service_account_categories` | owner-scoped labels used to group service accounts |
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | primary key, autoincrement |
+| `owner_user_id` | INTEGER | FK `users(id)`, `ON DELETE CASCADE`; categories are never shared |
+| `name` | TEXT | trimmed, at most 40 characters, unique per owner (case-insensitive) |
+| `created_at` | TEXT | insertion time |
+
+Indexes:
+
+| Index | Columns | Kind |
+|---|---|---|
+| `idx_service_account_categories_owner_name` | `owner_user_id`, `name COLLATE NOCASE` | unique |
+
+`service_accounts.category_id` (INTEGER, nullable, FK
+`service_account_categories(id)`, `ON DELETE SET NULL`) points at the account's
+category. A category can only be deleted once no account references it; the
+`SET NULL` is a safety net for cascaded owner deletion, not a reassignment path.
+
 ## Reference graph
 
 ```
@@ -152,6 +176,9 @@ Migrations run in filename order at startup.
 - `0006_repository_hidden.sql` adds the `repositories.is_hidden` column
   (default `0`) backing the unlisted-repository flag; repositories created before
   the migration stay visible.
+- `0007_service_account_categories.sql` creates `service_account_categories`
+  (owner-scoped, unique `(owner_user_id, name COLLATE NOCASE)`) and adds the
+  nullable `service_accounts.category_id` reference with `ON DELETE SET NULL`.
 
 ## Maintenance
 

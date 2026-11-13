@@ -9,6 +9,8 @@ export type {
 } from './Button'
 export { CounterLabel } from './CounterLabel'
 export type { CounterLabelProps } from './CounterLabel'
+export { Dialog } from './Dialog'
+export type { DialogProps } from './Dialog'
 export { Flash } from './Flash'
 export type { FlashProps, FlashVariant } from './Flash'
 export { Label } from './Label'

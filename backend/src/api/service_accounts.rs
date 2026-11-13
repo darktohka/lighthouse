@@ -17,8 +17,8 @@ use serde_json::json;
 use crate::auth::middleware::Authenticated;
 use crate::auth::{ip_ranges, service_accounts as registry_accounts, tokens};
 use crate::error::{ApiError, ApiResult};
-use crate::models::{ServiceAccount, ServiceAccountIpRange};
-use crate::state::AppState;
+use crate::models::{ServiceAccount, ServiceAccountCategory, ServiceAccountIpRange};
+use crate::state::{AppState, AuthContext};
 
 use super::{is_namespace_admin, load_namespace, namespace_by_id};
 
@@ -30,7 +30,34 @@ struct CreateServiceAccount {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    category_id: Option<i64>,
+    #[serde(default)]
     ip_ranges: Vec<String>,
+    #[serde(default)]
+    grants: Vec<CreateServiceAccountGrant>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateServiceAccount {
+    /// Mandatory key: `null` clears the category, a number assigns one. A
+    /// request without the key is rejected rather than treated as "no change",
+    /// hence the double option (missing vs. explicit `null`).
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    category_id: Option<Option<i64>>,
+}
+
+/// Distinguishes a missing key (`None`) from an explicit `null`
+/// (`Some(None)`), which plain `Option` collapses.
+fn deserialize_present_option<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateServiceAccountCategory {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +96,7 @@ struct ServiceAccountView {
     name: String,
     username: String,
     description: Option<String>,
+    category_id: Option<i64>,
     token_prefix: String,
     token_suffix: String,
     created_at: DateTime<Utc>,
@@ -83,10 +111,20 @@ struct CreatedServiceAccount {
     token: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ServiceAccountCategoryView {
+    id: i64,
+    name: String,
+    account_count: i64,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/service-accounts", get(list).post(create))
-        .route("/api/service-accounts/{id}", get(detail).delete(remove))
+        .route(
+            "/api/service-accounts/{id}",
+            get(detail).patch(update).delete(remove),
+        )
         .route("/api/service-accounts/{id}/token", post(rotate))
         .route("/api/service-accounts/{id}/grants", post(add_grant))
         .route(
@@ -97,6 +135,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/service-accounts/{id}/ip-ranges/{range_id}",
             axum::routing::delete(remove_ip_range),
+        )
+        .route(
+            "/api/service-account-categories",
+            get(list_categories).post(create_category),
+        )
+        .route(
+            "/api/service-account-categories/{id}",
+            axum::routing::delete(remove_category),
         )
 }
 
@@ -179,6 +225,7 @@ async fn account_view(state: &AppState, account: &ServiceAccount) -> ApiResult<S
         name: account.name.clone(),
         username: account.username.clone(),
         description: account.description.clone(),
+        category_id: account.category_id,
         token_prefix: account.token_prefix.clone(),
         token_suffix: account.token_suffix.clone(),
         created_at: account.created_at,
@@ -186,6 +233,57 @@ async fn account_view(state: &AppState, account: &ServiceAccount) -> ApiResult<S
         grants: account_grants(state, account.id).await?,
         ip_ranges: account_ip_ranges(state, account.id).await?,
     })
+}
+
+const CATEGORY_NAME_MAX_LEN: usize = 40;
+
+async fn category_for_owner(
+    state: &AppState,
+    user_id: i64,
+    id: i64,
+) -> ApiResult<ServiceAccountCategory> {
+    let category = sqlx::query_as::<_, ServiceAccountCategory>(
+        "SELECT * FROM service_account_categories WHERE id = ? LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("category not found"))?;
+    if category.owner_user_id != user_id {
+        return Err(ApiError::not_found("category not found"));
+    }
+    Ok(category)
+}
+
+#[derive(sqlx::FromRow)]
+struct CategoryRow {
+    id: i64,
+    name: String,
+    account_count: i64,
+}
+
+async fn category_views(
+    state: &AppState,
+    user_id: i64,
+) -> ApiResult<Vec<ServiceAccountCategoryView>> {
+    let rows = sqlx::query_as::<_, CategoryRow>(
+        "SELECT c.id AS id, c.name AS name, COUNT(a.id) AS account_count \
+         FROM service_account_categories c \
+         LEFT JOIN service_accounts a ON a.category_id = c.id AND a.owner_user_id = c.owner_user_id \
+         WHERE c.owner_user_id = ? \
+         GROUP BY c.id ORDER BY c.name COLLATE NOCASE",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ServiceAccountCategoryView {
+            id: row.id,
+            name: row.name,
+            account_count: row.account_count,
+        })
+        .collect())
 }
 
 async fn list(
@@ -268,6 +366,10 @@ async fn create(
         return Err(ApiError::conflict("service account name is taken"));
     }
 
+    if let Some(category_id) = request.category_id {
+        category_for_owner(&state, user_id, category_id).await?;
+    }
+
     let (account, token) = registry_accounts::create(
         &state,
         registry_accounts::NewServiceAccount {
@@ -279,14 +381,38 @@ async fn create(
     )
     .await?;
 
-    // The account must never be left unrestricted when the caller asked for
-    // ranges, so a failed range write rolls the whole creation back.
+    // Everything below must be atomic: a partially configured account would be
+    // reachable with a token the caller already holds, so any failure deletes
+    // the row (cascading grants and IP ranges) and reports the original error.
+    if let Err(err) = sqlx::query("UPDATE service_accounts SET category_id = ? WHERE id = ?")
+        .bind(request.category_id)
+        .bind(account.id)
+        .execute(&state.db)
+        .await
+    {
+        rollback_account(&state, account.id).await;
+        return Err(err.into());
+    }
+
     if let Err(err) = ip_ranges::replace_all(&state.db, account.id, &normalized_ranges).await {
-        let _ = sqlx::query("DELETE FROM service_accounts WHERE id = ?")
-            .bind(account.id)
-            .execute(&state.db)
-            .await;
+        rollback_account(&state, account.id).await;
         return Err(err);
+    }
+
+    for grant in &request.grants {
+        if let Err(err) = insert_grant(
+            &state,
+            &ctx,
+            &account,
+            grant.namespace.as_deref(),
+            grant.repository.as_deref(),
+            grant.can_push,
+        )
+        .await
+        {
+            rollback_account(&state, account.id).await;
+            return Err(err);
+        }
     }
 
     super::record_activity(
@@ -301,6 +427,11 @@ async fn create(
     )
     .await;
 
+    let account =
+        sqlx::query_as::<_, ServiceAccount>("SELECT * FROM service_accounts WHERE id = ? LIMIT 1")
+            .bind(account.id)
+            .fetch_one(&state.db)
+            .await?;
     let view = account_view(&state, &account).await?;
     Ok((
         StatusCode::CREATED,
@@ -321,6 +452,109 @@ async fn detail(
     let account = account_for_owner(&state, user_id, id).await?;
     let view = account_view(&state, &account).await?;
     Ok(Json(view).into_response())
+}
+
+async fn update(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateServiceAccount>,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let account = account_for_owner(&state, user_id, id).await?;
+    let category_id = request
+        .category_id
+        .ok_or_else(|| ApiError::bad_request("category_id is required"))?;
+    if let Some(category_id) = category_id {
+        category_for_owner(&state, user_id, category_id).await?;
+    }
+    sqlx::query("UPDATE service_accounts SET category_id = ? WHERE id = ?")
+        .bind(category_id)
+        .bind(account.id)
+        .execute(&state.db)
+        .await?;
+    let account =
+        sqlx::query_as::<_, ServiceAccount>("SELECT * FROM service_accounts WHERE id = ? LIMIT 1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
+    let view = account_view(&state, &account).await?;
+    Ok(Json(view).into_response())
+}
+
+async fn list_categories(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let views = category_views(&state, user_id).await?;
+    Ok(Json(views).into_response())
+}
+
+async fn create_category(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Json(request): Json<CreateServiceAccountCategory>,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("name is required"));
+    }
+    if name.chars().count() > CATEGORY_NAME_MAX_LEN {
+        return Err(ApiError::bad_request(format!(
+            "name must be at most {CATEGORY_NAME_MAX_LEN} characters"
+        )));
+    }
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM service_account_categories \
+         WHERE owner_user_id = ? AND name = ? COLLATE NOCASE LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(&name)
+    .fetch_optional(&state.db)
+    .await?;
+    if existing.is_some() {
+        return Err(ApiError::conflict("category name is taken"));
+    }
+    let id = sqlx::query(
+        "INSERT INTO service_account_categories (owner_user_id, name, created_at) VALUES (?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(&name)
+    .bind(Utc::now())
+    .execute(&state.db)
+    .await?
+    .last_insert_rowid();
+    let view = ServiceAccountCategoryView {
+        id,
+        name,
+        account_count: 0,
+    };
+    Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+async fn remove_category(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let category = category_for_owner(&state, user_id, id).await?;
+    let in_use: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM service_accounts WHERE category_id = ?")
+            .bind(category.id)
+            .fetch_one(&state.db)
+            .await?;
+    if in_use > 0 {
+        return Err(ApiError::conflict("category is not empty"));
+    }
+    sqlx::query("DELETE FROM service_account_categories WHERE id = ? AND owner_user_id = ?")
+        .bind(category.id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn remove(
@@ -372,25 +606,27 @@ async fn rotate(
     .into_response())
 }
 
-async fn add_grant(
-    State(state): State<AppState>,
-    Authenticated(ctx): Authenticated,
-    Path(id): Path<i64>,
-    Json(request): Json<CreateServiceAccountGrant>,
-) -> ApiResult<Response> {
-    let user_id = actor_user_id(&ctx)?;
-    let account = account_for_owner(&state, user_id, id).await?;
+/// Deletes a freshly created account so a failed multi-step creation leaves
+/// nothing behind; grants and IP ranges cascade.
+async fn rollback_account(state: &AppState, account_id: i64) {
+    let _ = sqlx::query("DELETE FROM service_accounts WHERE id = ?")
+        .bind(account_id)
+        .execute(&state.db)
+        .await;
+}
 
-    let namespace_name = request
-        .namespace
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let repository_name = request
-        .repository
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+/// Validates and inserts one grant. Shared by `add_grant` and account creation
+/// so the two paths can never diverge.
+async fn insert_grant(
+    state: &AppState,
+    ctx: &AuthContext,
+    account: &ServiceAccount,
+    namespace: Option<&str>,
+    repository: Option<&str>,
+    can_push: bool,
+) -> ApiResult<ServiceAccountGrantView> {
+    let namespace_name = namespace.map(str::trim).filter(|value| !value.is_empty());
+    let repository_name = repository.map(str::trim).filter(|value| !value.is_empty());
 
     let (namespace_id, repository_id) = match (namespace_name, repository_name) {
         (Some(_), Some(_)) => {
@@ -402,7 +638,7 @@ async fn add_grant(
             let namespace = load_namespace(&state.db, namespace_name)
                 .await?
                 .ok_or_else(|| ApiError::not_found("namespace not found"))?;
-            if !is_namespace_admin(&state, &ctx, &namespace).await? {
+            if !is_namespace_admin(state, ctx, &namespace).await? {
                 return Err(ApiError::forbidden("namespace owner required"));
             }
             (Some(namespace.id), None)
@@ -417,7 +653,7 @@ async fn add_grant(
             let namespace = namespace_by_id(&state.db, repository.namespace_id)
                 .await?
                 .ok_or_else(|| ApiError::not_found("repository not found"))?;
-            if !is_namespace_admin(&state, &ctx, &namespace).await? {
+            if !is_namespace_admin(state, ctx, &namespace).await? {
                 return Err(ApiError::forbidden("namespace owner required"));
             }
             (None, Some(repository.id))
@@ -429,7 +665,6 @@ async fn add_grant(
         }
     };
 
-    let can_push = request.can_push;
     let can_pull = true;
     let duplicate: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM service_account_grants \
@@ -460,13 +695,32 @@ async fn add_grant(
     .await?
     .last_insert_rowid();
 
-    let view = ServiceAccountGrantView {
+    Ok(ServiceAccountGrantView {
         id,
         namespace: namespace_name.map(str::to_string),
         repository: repository_name.map(str::to_string),
         can_pull,
         can_push,
-    };
+    })
+}
+
+async fn add_grant(
+    State(state): State<AppState>,
+    Authenticated(ctx): Authenticated,
+    Path(id): Path<i64>,
+    Json(request): Json<CreateServiceAccountGrant>,
+) -> ApiResult<Response> {
+    let user_id = actor_user_id(&ctx)?;
+    let account = account_for_owner(&state, user_id, id).await?;
+    let view = insert_grant(
+        &state,
+        &ctx,
+        &account,
+        request.namespace.as_deref(),
+        request.repository.as_deref(),
+        request.can_push,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(view)).into_response())
 }
 

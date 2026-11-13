@@ -305,21 +305,71 @@ Service accounts (`ServiceAccountsPanel`) and app passwords
 tab is deep-linked through the `tab` query parameter (for example
 `/settings?tab=service-accounts`).
 
+### Service accounts
+
+The panel is one bordered list grouped by **category**, not a stack of cards:
+
+- **Toolbar.** A live search box (`type="search"`, keyboard-clearable) and a
+  green **New service account** button (`variant="success"`). There is no
+  always-visible create form; creation happens in a modal dialog.
+- **Create dialog** (`CreateServiceAccountDialog` over the `Dialog` primitive).
+  Name, description, optional category (including "Uncategorized"), the IP
+  allowlist and the grants are all queued in the dialog and submitted as one
+  atomic `POST /api/service-accounts` (`{ name, description?, category_id?,
+  ip_ranges?, grants[] }`). Queued grant/IP rows render as list rows with a
+  remove button, and each list keeps a trailing "implicit" add row; the target
+  still typed in that trailing row is included on submit. A failing grant fails
+  the whole creation, which surfaces as a `Flash` inside the dialog. On success
+  the dialog closes and the one-time token appears above the list
+  (`OneTimeToken`).
+- **Rows** (`ServiceAccountCard`) are collapsed by default and one line tall:
+  name, `token_prefix…token_suffix`, grant/IP summary, relative last use and a
+  chevron. The expanded body holds the username, category, created date,
+  description, the grants list and the IP allowlist (each ending in its implicit
+  add row, with inline `Flash` errors) plus rotate/delete. Expanded state is
+  local component state and is deliberately not persisted.
+- **Categories.** Every category section shows its name, a count (`n of m` while
+  a search filters it) and a delete affordance that is only enabled when the
+  category is empty — otherwise it renders as a disabled label with a title
+  explaining it must be emptied first. A "New category" inline form at the foot
+  of the list keeps freshly created empty categories visible, each with an
+  "Add account" shortcut that prefills the dialog's category. Accounts with
+  `category_id === null` appear in a trailing **Uncategorized** section, which is
+  shown only when non-empty. The per-row category `<select>` PATCHes
+  `/service-accounts/{id}` and reflects the result after reload.
+- **Search** filters on account name, username, description, grant targets, IP
+  ranges, category name and the literal word "uncategorized"; sections that
+  still match stay visible, and an all-out filter shows
+  `No service accounts match "<query>"`.
+
 Supporting components: `AnalyticsCharts`, `Heatmap`, `DelegationsPanel`,
-`UserAutocomplete`, `MembersPanel`, `ServiceAccountCard`, `TagSizeTable`,
+`UserAutocomplete`, `MembersPanel`, `ServiceAccountCard`,
+`CreateServiceAccountDialog`, `ServiceAccountRows`, `TagSizeTable`,
 `ConfirmAction`, `FormFields`, `Tabs`, `OneTimeToken`, `ProfileHeader`,
 `ProfileSettingsForm`, `AvatarSettingsPanel`, `SessionsPanel`,
 `LoginHistoryPanel`, `PasswordSettingsForm`, `FollowPanel`, `UserRepositories`,
 `NamespaceGeneralPanel`, `RepositoryGeneralPanel`, `LibravatarAvatar`.
+
+Primitives live in `src/components/primitives/`: `Box`, `Button` (`default`,
+`primary`, `success`, `danger`), `Label`, `TextInput`, `Flash`, `Table`,
+`Timeline`, `Avatar`, `CounterLabel`, `StateViews` and `Dialog` (portal modal:
+`role="dialog"`/`aria-modal`, `aria-labelledby`, Escape and backdrop-to-close,
+initial focus, Tab containment, body scroll lock). `src/lib/ui.ts` also exports
+`compactInputClasses` for inline/list-row inputs — Tailwind orders same-property
+utilities numerically, so `inputClasses('py-0')` silently loses to its own
+`py-1.5`.
 
 ### Contract notes
 
 - `src/api/endpoints.ts` and `src/api/schemas.ts` receive **append-only**
   additions: tolerant list bindings that accept either the documented page
   envelope or the bare array the shipped backend returns (`/users/search`,
-  namespace members, namespace/repository permissions, service accounts), the
-  session/login-history bindings, the single-grant service-account binding, and
-  the wave-3 form schemas. No frozen binding is modified.
+  namespace members, namespace/repository permissions, service accounts,
+  `/service-account-categories`), the session/login-history bindings, the
+  single-grant service-account binding, `serviceAccountCategories`
+  (list/create/remove), `serviceAccounts.updateCategory`, the category fields on
+  the service-account schemas and the wave-3 form schemas. No frozen binding is
+  modified.
 - `recharts` colours are read from the `--lh-*` tokens at runtime through a
   `MutationObserver` on the root class, so light and dark render without any
   hard-coded hex.

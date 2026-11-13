@@ -338,6 +338,8 @@ export const serviceAccountSchema = v.object({
   name: v.string(),
   username: v.string(),
   description: v.nullable(v.string()),
+  /** `null` means the account is uncategorized. */
+  category_id: v.nullable(v.number()),
   token_prefix: v.string(),
   token_suffix: v.string(),
   created_at: timestampSchema,
@@ -347,21 +349,21 @@ export const serviceAccountSchema = v.object({
 })
 export type ServiceAccount = v.InferOutput<typeof serviceAccountSchema>
 
+export const serviceAccountCategorySchema = v.object({
+  id: v.number(),
+  name: v.string(),
+  account_count: v.number(),
+})
+export type ServiceAccountCategory = v.InferOutput<
+  typeof serviceAccountCategorySchema
+>
+
 export const createdServiceAccountSchema = v.object({
   account: serviceAccountSchema,
   token: v.string(),
 })
 export type CreatedServiceAccount = v.InferOutput<
   typeof createdServiceAccountSchema
->
-
-export const createServiceAccountSchema = v.object({
-  name: v.string(),
-  description: v.optional(v.string()),
-  ip_ranges: v.optional(v.array(v.string())),
-})
-export type CreateServiceAccount = v.InferOutput<
-  typeof createServiceAccountSchema
 >
 
 export const createServiceAccountGrantSchema = v.object({
@@ -371,6 +373,41 @@ export const createServiceAccountGrantSchema = v.object({
 })
 export type CreateServiceAccountGrant = v.InferOutput<
   typeof createServiceAccountGrantSchema
+>
+
+export const createServiceAccountSchema = v.object({
+  name: v.string(),
+  description: v.optional(v.string()),
+  /** Omit or `null` for an uncategorized account. */
+  category_id: v.optional(v.nullable(v.number())),
+  ip_ranges: v.optional(v.array(v.string())),
+  /**
+   * Applied atomically with the account itself: if any grant is rejected the
+   * whole creation fails and no account is created.
+   */
+  grants: v.optional(v.array(createServiceAccountGrantSchema)),
+})
+export type CreateServiceAccount = v.InferOutput<
+  typeof createServiceAccountSchema
+>
+
+export const updateServiceAccountCategorySchema = v.object({
+  category_id: v.nullable(v.number()),
+})
+export type UpdateServiceAccountCategory = v.InferOutput<
+  typeof updateServiceAccountCategorySchema
+>
+
+export const createServiceAccountCategorySchema = v.object({
+  name: v.pipe(
+    v.string(),
+    v.trim(),
+    v.nonEmpty('Give the category a name'),
+    v.maxLength(40, 'Category names are at most 40 characters'),
+  ),
+})
+export type CreateServiceAccountCategory = v.InferOutput<
+  typeof createServiceAccountCategorySchema
 >
 
 export const createServiceAccountIpRangeSchema = v.object({ cidr: v.string() })
