@@ -9,6 +9,7 @@ import type {
   PlatformDetail,
   TagDetail,
 } from '../api/schemas'
+import { AttestationJsonDialog } from '../components/AttestationJsonDialog'
 import { CopyButton } from '../components/CopyButton'
 import { JsonViewer } from '../components/json-viewer'
 import { PageHeader } from '../components/PageHeader'
@@ -44,9 +45,9 @@ type TabId = 'manifest' | 'config' | 'layers' | 'attestations'
 
 const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
   { id: 'layers', label: 'Layers' },
-  { id: 'attestations', label: 'Attestations' },
   { id: 'manifest', label: 'Manifest' },
   { id: 'config', label: 'Config' },
+  { id: 'attestations', label: 'Attestations' },
 ]
 
 function defaultPlatformDigest(
@@ -92,9 +93,9 @@ function attestationPlatformLabel(attestation: Attestation): string {
 /**
  * Short labels of the attestations that describe one image manifest.
  *
- * Attestation manifests belong to a specific platform, so the platform scope
- * buttons read `linux/arm64 (provenance, sbom)`. An attestation whose target is
- * unknown is left out of every platform.
+ * Attestation manifests belong to a specific platform; the platform scope
+ * buttons use this to decide whether to show the attestation shield. An
+ * attestation whose target is unknown is left out of every platform.
  */
 function attestationKindsFor(
   attestations: readonly Attestation[],
@@ -120,6 +121,7 @@ function tabClass(active: boolean): string {
 export function TagPage({ namespace, repo, tag }: TagPageProps) {
   const [tab, setTab] = useState<TabId>('layers')
   const [platform, setPlatform] = useState<string | null>(null)
+  const [viewing, setViewing] = useState<Attestation | null>(null)
   const state = useAsync(
     (signal) => repositoriesApi.tag(namespace, repo, tag, { signal }),
     `tag:${namespace}:${repo}:${tag}`,
@@ -154,9 +156,9 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
       ? `Layers for ${formatPlatform(active.os, active.architecture, active.variant)}`
       : 'Layers referenced by this tag'
 
-    // Attestation labels per platform, used by the platform badges so a tag with
-    // attestations reads `linux/arm64 (provenance)` even when it has a single
-    // platform (and therefore no scope button row).
+    // Attestation labels per platform, used by the platform badges so a platform
+    // with attestations grows a shield icon (even for a single-platform tag,
+    // which has no scope button row).
     const platformKinds = new Map<string, string[]>()
     for (const item of platformDetails) {
       const kinds = attestationKindsFor(detail.attestations, item.digest)
@@ -262,29 +264,11 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
         key: 'actions',
         header: <span className="sr-only">Actions</span>,
         align: 'right',
-        render: (attestation) => {
-          const statementDigest = attestation.predicates[0]?.digest
-          // The app has no blob-viewer route; the statement is a blob the
-          // registry API can serve, so expose its digest for copy/paste.
-          if (statementDigest === undefined) {
-            return <span className="text-muted">-</span>
-          }
-          return (
-            <span className="flex items-center justify-end gap-1.5">
-              <span
-                className="font-mono text-xs text-muted"
-                title={statementDigest}
-              >
-                {shortDigest(statementDigest)}
-              </span>
-              <CopyButton
-                value={statementDigest}
-                label="Copy"
-                ariaLabel="Copy statement digest"
-              />
-            </span>
-          )
-        },
+        render: (attestation) => (
+          <Button size="sm" onClick={() => setViewing(attestation)}>
+            View JSON
+          </Button>
+        ),
       },
     ]
 
@@ -463,10 +447,10 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
                   item.digest,
                 )
                 const selected = scope === item.digest
-                const title =
-                  kinds.length > 0
-                    ? `${label} · ${formatBytes(item.size)} · ${kinds.join(', ')}`
-                    : `${label} · ${formatBytes(item.size)}`
+                const attested = kinds.length > 0
+                const title = attested
+                  ? `${label} · ${formatBytes(item.size)} · ${kinds.join(', ')}`
+                  : `${label} · ${formatBytes(item.size)}`
                 return (
                   <Button
                     key={item.digest}
@@ -477,15 +461,17 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
                     onClick={() => setPlatform(item.digest)}
                   >
                     <span className="font-mono">{label}</span>
-                    {kinds.length > 0 ? (
-                      <span
-                        className={cx(
-                          'text-xs font-normal',
-                          selected ? 'opacity-75' : 'text-muted',
-                        )}
-                      >
-                        ({kinds.join(', ')})
-                      </span>
+                    {attested ? (
+                      <>
+                        <ShieldCheckIcon
+                          size={12}
+                          aria-hidden="true"
+                          className={selected ? 'opacity-75' : 'text-success'}
+                        />
+                        <span className="sr-only">
+                          {`, ${kinds.join(', ')}`}
+                        </span>
+                      </>
                     ) : null}
                   </Button>
                 )
@@ -621,6 +607,13 @@ export function TagPage({ namespace, repo, tag }: TagPageProps) {
       ) : null}
 
       {detail ? renderTagDetail(detail) : null}
+
+      <AttestationJsonDialog
+        attestation={viewing}
+        namespace={namespace}
+        repo={repo}
+        onClose={() => setViewing(null)}
+      />
     </div>
   )
 }

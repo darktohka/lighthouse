@@ -162,14 +162,6 @@ impl Attestation {
             .as_deref()
             .or(self.subject_digest.as_deref())
     }
-
-    /// `linux/arm64 (provenance)`-style suffix: `(provenance, sbom)`.
-    pub fn kinds_suffix(&self) -> String {
-        if self.kinds.is_empty() {
-            return String::new();
-        }
-        format!("({})", self.kinds.join(", "))
-    }
 }
 
 /// True when a manifest body is an attestation wrapper rather than an image.
@@ -266,7 +258,6 @@ mod tests {
             attestation.target_digest(),
             Some("sha256:15b657aed6e28ad2777367458605920a0f806395501ff264df77c18b27844e59")
         );
-        assert_eq!(attestation.kinds_suffix(), "(provenance)");
         assert!(is_attestation(&body, Some(&entry)));
     }
 
@@ -303,7 +294,6 @@ mod tests {
             attestation.kinds,
             vec!["sbom".to_string(), "provenance".to_string()]
         );
-        assert_eq!(attestation.kinds_suffix(), "(sbom, provenance)");
         assert_eq!(attestation.predicates.len(), 3);
         assert_eq!(attestation.predicates[2].digest, "sha256:cc");
     }

@@ -114,8 +114,12 @@ array, always present (possibly empty):
   The index's `unknown/unknown` entries are not image platforms, so they no
   longer appear as bogus platform badges.
 
-The UI renders each attestation against its platform, e.g.
-`linux/arm64 (provenance)` or `linux/amd64 (provenance, sbom)`.
+The UI marks a platform that has attestations with a shield icon on its badge
+and in the platform scope row; the predicate labels are exposed through the
+tooltip and to assistive technology rather than as visible text. The
+**Attestations** tab (last) lists one row per attestation and offers **View
+JSON**, which opens the attestation manifest and each in-toto statement in the
+same JSON viewer the Manifest and Config tabs use.
 
 ---
 
@@ -221,8 +225,8 @@ Executed against Docker Engine 29.8.0 and `buildx` v0.35.0 on a local instance:
 | Audit trail | `registry_events` rows for `blob.push`, `manifest.push`, `blob.pull`, `manifest.pull` with actor, IP and user agent |
 | Pull statistics | `pull_stats` daily rollups per repository and per tag |
 | Login history | `login_events` rows for password and Basic-auth use |
-| `buildx --provenance=mode=max --sbom=true` push (2 platforms) | Index accepted with both `unknown/unknown` attestation entries; tag detail reports `linux/amd64 (sbom, provenance)` and `linux/arm64 (sbom, provenance)` |
-| Tag detail of `registry.tohka.us/base/planka:latest` copied with `imagetools create` | `platforms` = `linux/amd64`, `linux/arm64` only; attestations = `linux/amd64 (provenance)`, `linux/arm64 (provenance)` |
+| `buildx --provenance=mode=max --sbom=true` push (2 platforms) | Index accepted with both `unknown/unknown` attestation entries; tag detail reports an attestation per platform with kinds `[sbom, provenance]` |
+| Tag detail of `registry.tohka.us/base/planka:latest` copied with `imagetools create` | `platforms` = `linux/amd64`, `linux/arm64` only; one `provenance` attestation targeting each |
 | `GET /v2/<name>/referrers/<image digest>` | `200` index listing the attestation manifest with `artifactType` |
 | `?artifactType=` mismatch | `200` with an empty `manifests` array |
 | Referrers of a digest absent from the repository | `404 MANIFEST_UNKNOWN` |

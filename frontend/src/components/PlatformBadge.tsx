@@ -8,8 +8,9 @@ export type PlatformBadgeProps = {
   platform: Platform
   /**
    * Short in-toto predicate labels attached to this platform, e.g.
-   * `['provenance', 'sbom']`. Rendered as a `(provenance, sbom)` suffix so the
-   * badge reads `linux/arm64 (provenance)`.
+   * `['provenance', 'sbom']`. They are never rendered as text: the badge grows a
+   * shield icon, and the labels are exposed through the tooltip and to assistive
+   * technology.
    */
   kinds?: readonly string[]
 }
@@ -20,22 +21,22 @@ export function PlatformBadge({ platform, kinds = [] }: PlatformBadgeProps) {
     platform.architecture,
     platform.variant,
   )
-  const suffix = kinds.length > 0 ? ` (${kinds.join(', ')})` : ''
+  const attested = kinds.length > 0
   return (
     <Label
       variant="muted"
       title={`${label} · ${formatBytes(platform.size)}${
-        suffix.length > 0 ? ` · in-toto ${kinds.join(', ')}` : ''
+        attested ? ` · ${kinds.join(', ')}` : ''
       }`}
       className="font-mono"
     >
       <ContainerIcon size={12} aria-hidden="true" />
       {label}
-      {suffix.length > 0 ? (
-        <span className="inline-flex items-center gap-0.5 text-muted">
-          <ShieldCheckIcon size={10} aria-hidden="true" />
-          {suffix}
-        </span>
+      {attested ? (
+        <>
+          <ShieldCheckIcon size={12} aria-hidden="true" className="text-success" />
+          <span className="sr-only">{`, ${kinds.join(', ')}`}</span>
+        </>
       ) : null}
     </Label>
   )
@@ -45,10 +46,7 @@ export type PlatformBadgesProps = {
   platforms: readonly Platform[]
   limit?: number
   className?: string
-  /**
-   * Attestation labels per platform digest. When a platform has attestations the
-   * badge gains a `(provenance)`-style suffix.
-   */
+  /** Attestation labels per platform digest; the badge shows a shield when set. */
   kindsByDigest?: ReadonlyMap<string, readonly string[]>
 }
 
