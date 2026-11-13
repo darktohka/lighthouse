@@ -5,7 +5,7 @@ import {
   TagIcon,
   TrashIcon,
 } from '@primer/octicons-react'
-import { useId, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 
 import { isApiError } from '../api/client'
 import {
@@ -21,7 +21,6 @@ import { validateForm } from '../lib/forms'
 import { compactInputClasses } from '../lib/ui'
 import { useAsync } from '../lib/useAsync'
 import { CreateServiceAccountDialog } from './CreateServiceAccountDialog'
-import { OneTimeToken } from './OneTimeToken'
 import { ServiceAccountCard } from './ServiceAccountCard'
 import { Box, BoxHeader } from './primitives/Box'
 import { Button } from './primitives/Button'
@@ -74,7 +73,15 @@ export function ServiceAccountsPanel() {
   const [query, setQuery] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [createCategoryFor, setCreateCategoryFor] = useState<number | null>(null)
-  const [issued, setIssued] = useState<{ token: string; label: string } | null>(null)
+  /** Token shown once, inside the account it belongs to. */
+  const [issued, setIssued] = useState<{
+    accountId: number
+    token: string
+    label: string
+  } | null>(null)
+  /** Only one account is expanded at a time; null means all collapsed. */
+  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const scrollTargetRef = useRef<number | null>(null)
 
   const [newCategoryName, setNewCategoryName] = useState('')
   const [creatingCategory, setCreatingCategory] = useState(false)
@@ -90,9 +97,27 @@ export function ServiceAccountsPanel() {
     [categoriesState.data],
   )
 
+  // After a creation the list is re-fetched; scroll once the new row exists.
+  useEffect(() => {
+    const target = scrollTargetRef.current
+    if (target === null) return
+    const row = document.querySelector<HTMLElement>(
+      `[data-service-account="${target}"]`,
+    )
+    if (!row) return
+    scrollTargetRef.current = null
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [accounts, expandedId])
+
   const reloadAll = () => {
     accountsState.reload()
     categoriesState.reload()
+  }
+
+  /** Reveal a freshly minted token in the row it belongs to. */
+  const showToken = (accountId: number, token: string, label: string) => {
+    setIssued({ accountId, token, label })
+    setExpandedId(accountId)
   }
 
   const createCategory = (event: FormEvent<HTMLFormElement>) => {
@@ -169,19 +194,25 @@ export function ServiceAccountsPanel() {
       return searchIndex(account, category).includes(normalizedQuery)
     }
 
+    // Alphabetical by name (case-insensitive) within every section.
+    const byName = (left: ServiceAccount, right: ServiceAccount) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+
     const result: Section[] = categories.map((category) => {
       const bucket = byCategory.get(category.id) ?? []
       return {
         key: `category-${category.id}`,
         category,
-        accounts: bucket.filter((account) => matches(account, category)),
+        accounts: bucket
+          .filter((account) => matches(account, category))
+          .sort(byName),
         total: bucket.length,
       }
     })
 
-    const uncategorizedMatches = uncategorized.filter((account) =>
-      matches(account, null),
-    )
+    const uncategorizedMatches = uncategorized
+      .filter((account) => matches(account, null))
+      .sort(byName)
     if (uncategorizedMatches.length > 0) {
       result.push({
         key: UNCATEGORIZED_KEY,
@@ -203,14 +234,6 @@ export function ServiceAccountsPanel() {
 
   return (
     <div className="space-y-3">
-      {issued ? (
-        <OneTimeToken
-          token={issued.token}
-          title={`Token for ${issued.label}`}
-          onDismiss={() => setIssued(null)}
-        />
-      ) : null}
-
       <Box>
         <BoxHeader className="gap-2">
           <span className="flex items-center gap-2 text-sm font-medium">
@@ -265,8 +288,16 @@ export function ServiceAccountsPanel() {
                     ? () => setCreateCategoryFor(section.category?.id ?? null)
                     : null
                 }
+                expandedId={expandedId}
+                onToggleAccount={(accountId) =>
+                  setExpandedId((current) =>
+                    current === accountId ? null : accountId,
+                  )
+                }
+                issued={issued}
+                onTokenDismiss={() => setIssued(null)}
                 onChanged={reloadAll}
-                onToken={(token, label) => setIssued({ token, label })}
+                onToken={showToken}
               />
             ))}
 
@@ -313,7 +344,11 @@ export function ServiceAccountsPanel() {
             setCreateCategoryFor(null)
           }}
           onCreated={(result) => {
-            setIssued(result)
+            // Collapse every other account, open the new one, then scroll to it
+            // once the refreshed list contains it.
+            setExpandedId(result.accountId)
+            scrollTargetRef.current = result.accountId
+            showToken(result.accountId, result.token, result.label)
             reloadAll()
           }}
         />
@@ -329,8 +364,12 @@ type CategorySectionProps = {
   removingCategory: number | null
   onRemoveCategory: (category: ServiceAccountCategory) => void
   onCreateAccountHere: (() => void) | null
+  expandedId: number | null
+  onToggleAccount: (accountId: number) => void
+  issued: { accountId: number; token: string; label: string } | null
+  onTokenDismiss: () => void
   onChanged: () => void
-  onToken: (token: string, label: string) => void
+  onToken: (accountId: number, token: string, label: string) => void
 }
 
 function CategorySection({
@@ -340,6 +379,10 @@ function CategorySection({
   removingCategory,
   onRemoveCategory,
   onCreateAccountHere,
+  expandedId,
+  onToggleAccount,
+  issued,
+  onTokenDismiss,
   onChanged,
   onToken,
 }: CategorySectionProps) {
@@ -424,8 +467,14 @@ function CategorySection({
               key={account.id}
               account={account}
               categories={categories}
+              expanded={expandedId === account.id}
+              onToggle={() => onToggleAccount(account.id)}
+              pendingToken={
+                issued && issued.accountId === account.id ? issued.token : null
+              }
+              onTokenDismiss={onTokenDismiss}
               onChanged={onChanged}
-              onToken={onToken}
+              onToken={(token, label) => onToken(account.id, token, label)}
             />
           ))}
         </ul>

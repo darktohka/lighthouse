@@ -1,4 +1,3 @@
-import { KeyIcon, PlusIcon } from '@primer/octicons-react'
 import { useId, useState, type FormEvent } from 'react'
 
 import { isApiError } from '../api/client'
@@ -26,7 +25,11 @@ export type CreateServiceAccountDialogProps = {
   /** Defaults to the category the user is currently looking at. */
   initialCategoryId?: number | null
   onClose: () => void
-  onCreated: (result: { token: string; label: string }) => void
+  onCreated: (result: {
+    accountId: number
+    token: string
+    label: string
+  }) => void
 }
 
 /**
@@ -117,6 +120,7 @@ export function CreateServiceAccountDialog({
         (response) => {
           setSubmitting(false)
           onCreated({
+            accountId: response.account.id,
             token: response.token,
             label: response.account.name,
           })

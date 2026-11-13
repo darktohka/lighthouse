@@ -16,6 +16,7 @@ import { formatDateTime, formatRelativeTime } from '../lib/format'
 import { compactInputClasses } from '../lib/ui'
 import { ConfirmAction } from './ConfirmAction'
 import { EMPTY_GRANT_DRAFT } from '../lib/serviceAccountGrants'
+import { OneTimeToken } from './OneTimeToken'
 import { GrantDraftRow, IpRangeDraftRow } from './ServiceAccountRows'
 import { Flash } from './primitives/Flash'
 import { Label } from './primitives/Label'
@@ -23,6 +24,12 @@ import { Label } from './primitives/Label'
 export type ServiceAccountCardProps = {
   account: ServiceAccount
   categories: ServiceAccountCategory[]
+  /** Expansion is owned by the panel so only one row is open at a time. */
+  expanded: boolean
+  onToggle: () => void
+  /** Token minted for this account; rendered inside the account's own section. */
+  pendingToken: string | null
+  onTokenDismiss: () => void
   onChanged: () => void
   onToken: (token: string, label: string) => void
 }
@@ -39,10 +46,13 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
 export function ServiceAccountCard({
   account,
   categories,
+  expanded,
+  onToggle,
+  pendingToken,
+  onTokenDismiss,
   onChanged,
   onToken,
 }: ServiceAccountCardProps) {
-  const [expanded, setExpanded] = useState(false)
   const [grantDraft, setGrantDraft] = useState(EMPTY_GRANT_DRAFT)
   const [newRange, setNewRange] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
@@ -191,13 +201,16 @@ export function ServiceAccountCard({
   ].join(' · ')
 
   return (
-    <li className="border-b border-border last:border-b-0">
+    <li
+      className="scroll-mt-24 border-b border-border last:border-b-0"
+      data-service-account={account.id}
+    >
       <div className="flex items-center gap-2 pr-2 hover:bg-canvas-subtle">
         <button
           type="button"
           aria-expanded={expanded}
           aria-controls={expanded ? bodyId : undefined}
-          onClick={() => setExpanded((value) => !value)}
+          onClick={onToggle}
           className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-3 text-left"
         >
           <ChevronRightIcon
@@ -258,6 +271,16 @@ export function ServiceAccountCard({
 
       {expanded ? (
         <div id={bodyId} className="space-y-3 px-3 pb-3">
+          {pendingToken ? (
+            <div className="pt-2">
+              <OneTimeToken
+                token={pendingToken}
+                title={`Token for ${account.name}`}
+                onDismiss={onTokenDismiss}
+              />
+            </div>
+          ) : null}
+
           {accountError ? (
             <Flash variant="danger" onDismiss={() => setAccountError(null)}>
               {accountError}
