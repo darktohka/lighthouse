@@ -886,7 +886,14 @@ async fn delete(state: AppState, actor: AuthContext, name: String) -> ApiResult<
     )
     .await;
 
-    if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+    if let Ok(report) = crate::storage::gc::collect(
+        &state.registry,
+        &state.storage,
+        false,
+        state.config.gc_grace_secs,
+    )
+    .await
+    {
         for digest in &report.deleted_digests {
             state.layer_cache.invalidate(digest);
         }
@@ -1134,7 +1141,14 @@ async fn delete_tag(
     )
     .await;
 
-    if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+    if let Ok(report) = crate::storage::gc::collect(
+        &state.registry,
+        &state.storage,
+        false,
+        state.config.gc_grace_secs,
+    )
+    .await
+    {
         for digest in &report.deleted_digests {
             state.layer_cache.invalidate(digest);
         }
@@ -1174,7 +1188,14 @@ async fn batch_delete_tags(
         )
         .await;
     }
-    if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+    if let Ok(report) = crate::storage::gc::collect(
+        &state.registry,
+        &state.storage,
+        false,
+        state.config.gc_grace_secs,
+    )
+    .await
+    {
         for digest in &report.deleted_digests {
             state.layer_cache.invalidate(digest);
         }
@@ -1213,7 +1234,14 @@ async fn batch_delete_global(
             .await;
         }
     }
-    if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+    if let Ok(report) = crate::storage::gc::collect(
+        &state.registry,
+        &state.storage,
+        false,
+        state.config.gc_grace_secs,
+    )
+    .await
+    {
         for digest in &report.deleted_digests {
             state.layer_cache.invalidate(digest);
         }

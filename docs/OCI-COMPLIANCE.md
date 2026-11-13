@@ -17,7 +17,7 @@ including errors and the router fallback.
 | GET | `/v2/<name>/tags/list` | 200 | `?n`/`?last`, `Link: rel="next"` |
 | GET/HEAD | `/v2/<name>/manifests/<reference>` | 200 | `Content-Type`, `Content-Length`, `Docker-Content-Digest`, `ETag`, `304` on `If-None-Match` |
 | PUT | `/v2/<name>/manifests/<reference>` | 201 | `Location` (canonical digest URL), `Docker-Content-Digest` |
-| DELETE | `/v2/<name>/manifests/<reference>` | 202 | tag or digest reference |
+| DELETE | `/v2/<name>/manifests/<reference>` | 202 | tag or digest reference; also triggers a garbage-collection pass (subject to the GC grace window) so unreferenced blobs are reclaimed from the database and disk |
 | GET/HEAD | `/v2/<name>/blobs/<digest>` | 200 / 206 / 304 | `Range`, `Accept-Ranges`, `Content-Range`, `ETag` |
 | DELETE | `/v2/<name>/blobs/<digest>` | 202 | `Content-Length: 0` |
 | POST | `/v2/<name>/blobs/uploads/` | 202 | start; `?mount=&from=` → 201; `?digest=` monolithic → 201 |

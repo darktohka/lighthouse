@@ -1043,7 +1043,7 @@ async fn deleting_last_tag_reclaims_blobs() {
         0
     );
 
-    let report = crate::storage::gc::collect(&state.registry, &state.storage, false)
+    let report = crate::storage::gc::collect(&state.registry, &state.storage, false, 0)
         .await
         .expect("collect");
     assert!(report.bytes_reclaimed > 0, "expected reclaimed bytes");
@@ -1262,7 +1262,7 @@ async fn retagging_reclaims_old_manifest() {
         .await
         .expect("retag");
 
-    let report = crate::storage::gc::collect(&state.registry, &state.storage, false)
+    let report = crate::storage::gc::collect(&state.registry, &state.storage, false, 0)
         .await
         .expect("collect");
     assert!(report.bytes_reclaimed > 0, "expected reclaimed bytes");

@@ -25,6 +25,10 @@ pub struct Config {
     pub email_verification_ttl_secs: i64,
     pub password_reset_ttl_secs: i64,
     pub upload_session_ttl_secs: i64,
+    /// Grace window before an unreferenced blob may be collected by GC. Blobs
+    /// written more recently than this are never swept, protecting pushes that
+    /// are still being assembled.
+    pub gc_grace_secs: i64,
     /// Lifetime of a registry bearer token handed to `docker`.
     pub registry_token_ttl_secs: i64,
     /// Lifetime of the half-authenticated token minted after a correct password
@@ -152,6 +156,7 @@ impl Config {
             email_verification_ttl_secs: env_parse("EMAIL_VERIFICATION_TTL_SECS", 60 * 60 * 24)?,
             password_reset_ttl_secs: env_parse("PASSWORD_RESET_TTL_SECS", 60 * 60)?,
             upload_session_ttl_secs: env_parse("UPLOAD_SESSION_TTL_SECS", 60 * 60 * 24)?,
+            gc_grace_secs: env_parse("GC_GRACE_SECS", 600)?,
             registry_token_ttl_secs: env_parse("REGISTRY_TOKEN_TTL_SECS", 300)?,
             mfa_token_ttl_secs: env_parse("MFA_TOKEN_TTL_SECS", 300)?,
             registry_refresh_token_ttl_secs: env_parse(

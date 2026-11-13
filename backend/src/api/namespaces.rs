@@ -298,7 +298,14 @@ async fn remove(
         .execute(&state.db)
         .await?;
 
-    if let Ok(report) = crate::storage::gc::collect(&state.registry, &state.storage, false).await {
+    if let Ok(report) = crate::storage::gc::collect(
+        &state.registry,
+        &state.storage,
+        false,
+        state.config.gc_grace_secs,
+    )
+    .await
+    {
         for digest in &report.deleted_digests {
             state.layer_cache.invalidate(digest);
         }

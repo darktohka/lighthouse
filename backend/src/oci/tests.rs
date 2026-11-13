@@ -1309,12 +1309,31 @@ async fn manifest_delete_by_tag_and_digest() {
     let config_digest = push_blob(&app, "darktohka/site", &config).await;
     let layer_digest = push_blob(&app, "darktohka/site", &layer).await;
     let body = oci_manifest(&config_digest, config.len(), &layer_digest, layer.len());
-    let digest = push_manifest(
+    push_manifest(
         &app,
         "darktohka/site",
         "v1",
         media_types::OCI_IMAGE_MANIFEST,
         &body,
+    )
+    .await;
+
+    // A second manifest pushed by digest only stays rooted until it is deleted.
+    let other_layer = b"lyr-other".to_vec();
+    let other_layer_digest = push_blob(&app, "darktohka/site", &other_layer).await;
+    let other_body = oci_manifest(
+        &config_digest,
+        config.len(),
+        &other_layer_digest,
+        other_layer.len(),
+    );
+    let digest = Digest::from_bytes(&other_body).to_string();
+    push_manifest(
+        &app,
+        "darktohka/site",
+        &digest,
+        media_types::OCI_IMAGE_MANIFEST,
+        &other_body,
     )
     .await;
 
@@ -1350,6 +1369,209 @@ async fn manifest_delete_by_tag_and_digest() {
     )
     .await;
     assert_eq!(delete_digest.status(), StatusCode::ACCEPTED);
+}
+
+async fn gc_harness() -> (tempfile::TempDir, AppState, Router) {
+    let (dir, state) = crate::auth::test_support::test_state_with(|config| {
+        config.gc_grace_secs = 0;
+    })
+    .await;
+    create_user(&state, USER).await;
+    let app = crate::routes::build(state.clone());
+    (dir, state, app)
+}
+
+async fn blob_rows(state: &AppState, digest: &Digest) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE digest = ?")
+        .bind(digest.to_string())
+        .fetch_one(&state.db)
+        .await
+        .expect("blob count")
+}
+
+async fn manifest_rows(state: &AppState, digest: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM manifests WHERE digest = ?")
+        .bind(digest)
+        .fetch_one(&state.db)
+        .await
+        .expect("manifest count")
+}
+
+#[tokio::test]
+async fn manifest_delete_by_tag_reclaims_blobs() {
+    let (_dir, state, app) = gc_harness().await;
+    let config = b"gc-tag-config".to_vec();
+    let layer = b"gc-tag-layer".to_vec();
+    let config_digest = Digest::from_bytes(&config);
+    let layer_digest = Digest::from_bytes(&layer);
+    push_blob(&app, "darktohka/site", &config).await;
+    push_blob(&app, "darktohka/site", &layer).await;
+    let body = oci_manifest(
+        &config_digest.to_string(),
+        config.len(),
+        &layer_digest.to_string(),
+        layer.len(),
+    );
+    let digest = push_manifest(
+        &app,
+        "darktohka/site",
+        "latest",
+        media_types::OCI_IMAGE_MANIFEST,
+        &body,
+    )
+    .await;
+
+    assert_eq!(blob_rows(&state, &config_digest).await, 1);
+    assert_eq!(blob_rows(&state, &layer_digest).await, 1);
+    assert_eq!(manifest_rows(&state, &digest).await, 1);
+
+    let response = send(
+        &app,
+        Method::DELETE,
+        "/v2/darktohka/site/manifests/latest",
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let gone = send(
+        &app,
+        Method::GET,
+        "/v2/darktohka/site/manifests/latest",
+        Some(USER),
+        &[("accept", media_types::OCI_IMAGE_MANIFEST)],
+        &[],
+    )
+    .await;
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+
+    assert_eq!(blob_rows(&state, &config_digest).await, 0);
+    assert_eq!(blob_rows(&state, &layer_digest).await, 0);
+    assert_eq!(manifest_rows(&state, &digest).await, 0);
+    assert!(!state.storage.blob_path(&config_digest).exists());
+    assert!(!state.storage.blob_path(&layer_digest).exists());
+}
+
+#[tokio::test]
+async fn manifest_delete_by_digest_reclaims_blobs() {
+    let (_dir, state, app) = gc_harness().await;
+    let config = b"gc-digest-config".to_vec();
+    let layer = b"gc-digest-layer".to_vec();
+    let config_digest = Digest::from_bytes(&config);
+    let layer_digest = Digest::from_bytes(&layer);
+    push_blob(&app, "darktohka/site", &config).await;
+    push_blob(&app, "darktohka/site", &layer).await;
+    let body = oci_manifest(
+        &config_digest.to_string(),
+        config.len(),
+        &layer_digest.to_string(),
+        layer.len(),
+    );
+    let digest = Digest::from_bytes(&body).to_string();
+    // Pushed by digest (no tag), so the digest delete is what unroots it.
+    push_manifest(
+        &app,
+        "darktohka/site",
+        &digest,
+        media_types::OCI_IMAGE_MANIFEST,
+        &body,
+    )
+    .await;
+
+    let response = send(
+        &app,
+        Method::DELETE,
+        &format!("/v2/darktohka/site/manifests/{digest}"),
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    assert_eq!(blob_rows(&state, &config_digest).await, 0);
+    assert_eq!(blob_rows(&state, &layer_digest).await, 0);
+    assert_eq!(manifest_rows(&state, &digest).await, 0);
+    assert!(!state.storage.blob_path(&config_digest).exists());
+    assert!(!state.storage.blob_path(&layer_digest).exists());
+}
+
+#[tokio::test]
+async fn manifest_delete_keeps_blobs_shared_with_another_tag() {
+    let (_dir, state, app) = gc_harness().await;
+    let shared_layer = b"gc-shared-layer".to_vec();
+    let shared_digest = Digest::from_bytes(&shared_layer);
+    push_blob(&app, "darktohka/site", &shared_layer).await;
+
+    let config_a = b"gc-config-a".to_vec();
+    let config_a_digest = Digest::from_bytes(&config_a);
+    push_blob(&app, "darktohka/site", &config_a).await;
+    let body_a = oci_manifest(
+        &config_a_digest.to_string(),
+        config_a.len(),
+        &shared_digest.to_string(),
+        shared_layer.len(),
+    );
+    push_manifest(
+        &app,
+        "darktohka/site",
+        "a",
+        media_types::OCI_IMAGE_MANIFEST,
+        &body_a,
+    )
+    .await;
+
+    let config_b = b"gc-config-b".to_vec();
+    let config_b_digest = Digest::from_bytes(&config_b);
+    push_blob(&app, "darktohka/site", &config_b).await;
+    let body_b = oci_manifest(
+        &config_b_digest.to_string(),
+        config_b.len(),
+        &shared_digest.to_string(),
+        shared_layer.len(),
+    );
+    push_manifest(
+        &app,
+        "darktohka/site",
+        "b",
+        media_types::OCI_IMAGE_MANIFEST,
+        &body_b,
+    )
+    .await;
+
+    let response = send(
+        &app,
+        Method::DELETE,
+        "/v2/darktohka/site/manifests/a",
+        Some(USER),
+        &[],
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    assert_eq!(blob_rows(&state, &config_a_digest).await, 0);
+    assert_eq!(
+        blob_rows(&state, &shared_digest).await,
+        1,
+        "the layer is still referenced by tag b"
+    );
+    assert_eq!(blob_rows(&state, &config_b_digest).await, 1);
+    assert!(state.storage.blob_path(&shared_digest).exists());
+    assert!(!state.storage.blob_path(&config_a_digest).exists());
+
+    let survivor = send(
+        &app,
+        Method::GET,
+        "/v2/darktohka/site/manifests/b",
+        Some(USER),
+        &[("accept", media_types::OCI_IMAGE_MANIFEST)],
+        &[],
+    )
+    .await;
+    assert_eq!(survivor.status(), StatusCode::OK);
 }
 
 #[tokio::test]

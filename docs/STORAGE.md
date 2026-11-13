@@ -133,8 +133,8 @@ different repositories counts as sharing.
 
 ## 4. Garbage collection
 
-`storage::gc::collect(&registry, &storage, dry_run)` is a mark-and-sweep pass
-over the reference graph (described in `ARCHITECTURE.md §9`):
+`storage::gc::collect(&registry, &storage, dry_run, grace_secs)` is a
+mark-and-sweep pass over the reference graph (described in `ARCHITECTURE.md §9`):
 
 1. **Roots** — every manifest referenced by a tag, plus every manifest linked to
    a repository (`manifest_repositories`).
@@ -144,13 +144,28 @@ over the reference graph (described in `ARCHITECTURE.md §9`):
    links, and its file on disk), then repeatedly delete manifests that are
    unreachable: no repository link, no tag and no surviving parent index.
 
+Blobs younger than the grace window are never swept: any blob whose
+`blobs.created_at` is newer than `now - grace_secs` is left alone (a
+`grace_secs` of zero or less disables the window). The window defaults to
+`GC_GRACE_SECS=600` and protects blobs uploaded by an in-flight push whose
+manifest has not been published yet.
+
 The sweep runs inside a transaction; `dry_run` rolls it back and only reports the
 projected counts. Deleting a parent index cascades its child edges, which may
 make further manifests eligible on the next pass — hence the loop.
 
+File unlinking happens after the row commit and is best-effort: a failed
+`delete_blob` is logged and the sweep continues, because the row is already
+gone. The daily janitor's `sweep_orphan_files` pass reclaims any blob directory
+that lost its row this way (or because the process crashed between the commit
+and the unlink) once the file is older than the same grace window. Deleting a
+blob also prunes its now-empty `<algorithm>/<shard[0..2]>/` directory; the
+algorithm directory and the `blobs/` root are kept.
+
 The control plane triggers collection after repository deletion, namespace
-deletion, single tag deletion and both batch-delete endpoints, so unreferenced
-blobs are reclaimed immediately rather than lingering until a scheduled run.
+deletion, single tag deletion, both batch-delete endpoints and OCI manifest
+deletion (`DELETE /v2/<name>/manifests/<reference>`), so unreferenced blobs are
+reclaimed immediately rather than lingering until a scheduled run.
 In-progress uploads are never touched.
 
 `GcReport` reports `marked`, `blobs_deleted`, `manifests_deleted` and
@@ -169,7 +184,11 @@ Uploads are resumable and out-of-order:
 - `PUT` verifies the content against the client-supplied digest while streaming,
   then atomically renames `uploads/<uuid>/data` into the blob store. The upload
   directory is always removed, even when the digest already existed.
-- Stale uploads are expired using `startedat` and `upload_session_ttl_secs`.
+- Stale uploads are expired by a daily janitor task using `updated_at` and
+  `upload_session_ttl_secs`. The same pass also removes orphan
+  `uploads/<uuid>/` directories that have no `uploads` row and are older than
+  the TTL (left behind by a crash before the row was written or after it was
+  dropped). The janitor runs once a day at 00:00 UTC.
 
 Because the digest is verified at finalization, a partially written upload can
 never leave a half-registered blob behind.

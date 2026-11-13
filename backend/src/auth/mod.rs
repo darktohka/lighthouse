@@ -107,6 +107,7 @@ pub(crate) mod test_support {
             email_verification_ttl_secs: 60 * 60 * 24,
             password_reset_ttl_secs: 60 * 60,
             upload_session_ttl_secs: 60 * 60 * 24,
+            gc_grace_secs: 600,
             registry_token_ttl_secs: 300,
             mfa_token_ttl_secs: 300,
             registry_refresh_token_ttl_secs: 60 * 60 * 24 * 30,

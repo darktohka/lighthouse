@@ -283,6 +283,27 @@ pub async fn delete(
         .await;
     }
 
+    // Reclaim blobs and files that the deletion just unreferenced. Both the
+    // digest and tag branches can orphan a manifest; the grace window keeps
+    // young blobs from an in-flight push out of the sweep.
+    if let Ok(report) = crate::storage::gc::collect(
+        &state.registry,
+        &state.storage,
+        false,
+        state.config.gc_grace_secs,
+    )
+    .await
+    {
+        for digest in &report.deleted_digests {
+            state.layer_cache.invalidate(digest);
+        }
+        tracing::info!(
+            blobs = report.blobs_deleted,
+            manifests = report.manifests_deleted,
+            "oci manifest delete gc"
+        );
+    }
+
     Ok(super::respond(StatusCode::ACCEPTED, Body::empty()))
 }
 

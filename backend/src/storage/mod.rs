@@ -176,13 +176,35 @@ impl Storage {
             .context("blob missing immediately after move")
     }
 
-    /// Removes a blob and its shard directory. Missing blobs are not an error.
+    /// Removes a blob and prunes its now-empty shard directory. Missing blobs
+    /// are not an error.
     pub async fn delete_blob(&self, digest: &Digest) -> Result<()> {
-        match fs::remove_dir_all(self.blob_dir(digest)).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err).context("deleting blob"),
+        let dir = self.blob_dir(digest);
+        let shard = dir.parent().map(|parent| parent.to_path_buf());
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).context("deleting blob"),
         }
+
+        // Best-effort: remove the shard only when nothing else lives in it.
+        // The algorithm directory and the blobs root are kept.
+        if let Some(shard) = shard {
+            match fs::remove_dir(&shard).await {
+                Ok(()) => {}
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound
+                        || err.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                Err(err) => {
+                    tracing::warn!(
+                        path = %shard.display(),
+                        error = %err,
+                        "blob shard prune failed"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Appends `data` to an upload, requiring `offset` to equal the current

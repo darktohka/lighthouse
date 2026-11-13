@@ -9,8 +9,10 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::oci::digest::Digest;
 use crate::storage::Storage;
@@ -31,6 +33,7 @@ struct BlobRow {
     id: i64,
     digest: String,
     size: i64,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -46,7 +49,17 @@ const ORPHAN_MANIFESTS_SQL: &str = "SELECT m.id FROM manifests m \
 
 /// Runs one garbage collection pass. With `dry_run` the database is left
 /// untouched and only the projected report is returned.
-pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> Result<GcReport> {
+///
+/// `grace_secs` protects young blobs: any blob whose `created_at` is newer than
+/// `now - grace_secs` is left untouched, so a push that has uploaded blobs but
+/// not yet published its manifest cannot be collected. A value `<= 0` disables
+/// the grace window.
+pub async fn collect(
+    registry: &Registry,
+    storage: &Storage,
+    dry_run: bool,
+    grace_secs: i64,
+) -> Result<GcReport> {
     let db = registry.db();
 
     let roots: Vec<String> = sqlx::query_scalar(
@@ -98,12 +111,14 @@ pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> R
         }
     }
 
-    let all_blobs = sqlx::query_as::<_, BlobRow>("SELECT id, digest, size FROM blobs")
+    let all_blobs = sqlx::query_as::<_, BlobRow>("SELECT id, digest, size, created_at FROM blobs")
         .fetch_all(db)
         .await?;
+    let grace_cutoff = (grace_secs > 0).then(|| Utc::now() - Duration::seconds(grace_secs));
     let unmarked: Vec<BlobRow> = all_blobs
         .into_iter()
         .filter(|blob| !marks.contains(&blob.digest))
+        .filter(|blob| grace_cutoff.map_or(true, |cutoff| blob.created_at <= cutoff))
         .collect();
 
     let mut tx = db.begin().await?;
@@ -126,8 +141,19 @@ pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> R
         bytes_reclaimed += blob.size.max(0) as u64;
         if let Ok(digest) = Digest::parse(&blob.digest) {
             if !dry_run {
-                storage.delete_blob(&digest).await?;
+                if let Err(err) = storage.delete_blob(&digest).await {
+                    // The row is already committed; a failed unlink must not
+                    // abort the rest of the sweep. The janitor's orphan-file
+                    // sweep reclaims the file later.
+                    tracing::warn!(
+                        digest = %digest,
+                        error = %err,
+                        "blob file unlink failed"
+                    );
+                }
             }
+            // Even when the unlink failed, the row is gone, so cached views
+            // derived from it must be invalidated.
             deleted_digests.push(digest);
         }
     }
@@ -139,6 +165,155 @@ pub async fn collect(registry: &Registry, storage: &Storage, dry_run: bool) -> R
         bytes_reclaimed,
         deleted_digests,
     })
+}
+
+/// Sweeps blob directories that have no `blobs` row and whose `data` file is
+/// older than the grace window. This reclaims files orphaned when a previous
+/// GC pass committed the row deletion but failed to unlink the file (or the
+/// process crashed in between). Per-entry failures are logged and skipped; they
+/// never abort the sweep.
+pub async fn sweep_orphan_files(
+    registry: &Registry,
+    storage: &Storage,
+    grace_secs: i64,
+) -> Result<usize> {
+    let cutoff = Utc::now() - Duration::seconds(grace_secs.max(0));
+    let mut removed = 0usize;
+
+    let algorithms = match read_dir_paths(&storage.blobs_dir()).await {
+        Ok(paths) => paths,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err).context("reading blob root"),
+    };
+
+    for algorithm_path in algorithms {
+        let Some(algorithm) = algorithm_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+
+        let shards = match read_dir_paths(&algorithm_path).await {
+            Ok(paths) => paths,
+            Err(err) => {
+                tracing::warn!(
+                    path = %algorithm_path.display(),
+                    error = %err,
+                    "orphan sweep: cannot read algorithm directory"
+                );
+                continue;
+            }
+        };
+
+        for shard_path in shards {
+            let entries = match read_dir_paths(&shard_path).await {
+                Ok(paths) => paths,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %shard_path.display(),
+                        error = %err,
+                        "orphan sweep: cannot read shard directory"
+                    );
+                    continue;
+                }
+            };
+
+            for blob_path in entries {
+                let Some(hex) = blob_path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !is_lowercase_hex_64(hex) {
+                    continue;
+                }
+
+                match tokio::fs::symlink_metadata(&blob_path).await {
+                    Ok(meta) if meta.is_dir() => {}
+                    Ok(_) => continue,
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %blob_path.display(),
+                            error = %err,
+                            "orphan sweep: cannot stat blob directory"
+                        );
+                        continue;
+                    }
+                }
+
+                let digest = format!("{algorithm}:{hex}");
+                match sqlx::query_scalar::<_, i64>("SELECT 1 FROM blobs WHERE digest = ?")
+                    .bind(&digest)
+                    .fetch_optional(registry.db())
+                    .await
+                {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            digest = %digest,
+                            error = %err,
+                            "orphan sweep: blob lookup failed"
+                        );
+                        continue;
+                    }
+                }
+
+                // Age is judged by the data file; fall back to the directory
+                // itself when `data` is missing or unreadable.
+                let modified = match tokio::fs::metadata(blob_path.join("data")).await {
+                    Ok(meta) => meta.modified().ok(),
+                    Err(_) => match tokio::fs::metadata(&blob_path).await {
+                        Ok(meta) => meta.modified().ok(),
+                        Err(_) => None,
+                    },
+                };
+                let Some(modified) = modified else {
+                    continue;
+                };
+                if DateTime::<Utc>::from(modified) > cutoff {
+                    continue;
+                }
+
+                match tokio::fs::remove_dir_all(&blob_path).await {
+                    Ok(()) => removed += 1,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %blob_path.display(),
+                            error = %err,
+                            "orphan sweep: cannot remove orphan blob"
+                        );
+                        continue;
+                    }
+                }
+
+                if let Some(shard) = blob_path.parent() {
+                    // Best-effort: only succeeds once the shard is empty.
+                    let _ = tokio::fs::remove_dir(shard).await;
+                }
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+async fn read_dir_paths(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        paths.push(entry.path());
+    }
+    Ok(paths)
+}
+
+/// True for a 64-character lowercase hexadecimal string (a sha256 payload).
+fn is_lowercase_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Repeatedly deletes manifests that are unreachable: no repository link, no
@@ -295,7 +470,9 @@ mod tests {
         let (_dir, registry, storage) = setup().await;
         let (repo_id, index_digest) = build_graph(&registry).await;
 
-        let report = collect(&registry, &storage, false).await.expect("collect");
+        let report = collect(&registry, &storage, false, 0)
+            .await
+            .expect("collect");
         assert_eq!(report.blobs_deleted, 0);
         assert_eq!(report.manifests_deleted, 0);
         assert_eq!(report.marked, 7); // 3 manifests + 4 blobs
@@ -311,7 +488,9 @@ mod tests {
             .await
             .expect("delete tag");
 
-        let report = collect(&registry, &storage, false).await.expect("collect");
+        let report = collect(&registry, &storage, false, 0)
+            .await
+            .expect("collect");
         assert_eq!(report.blobs_deleted, 4);
         assert_eq!(report.manifests_deleted, 3);
         assert!(report.bytes_reclaimed > 0);
@@ -335,16 +514,16 @@ mod tests {
         let (_dir, registry, storage) = setup().await;
         let (repo_id, index_digest) = build_graph(&registry).await;
 
-        collect(&registry, &storage, false).await.expect("first");
+        collect(&registry, &storage, false, 0).await.expect("first");
         registry
             .delete_tag(repo_id, "latest")
             .await
             .expect("delete tag");
-        collect(&registry, &storage, false).await.expect("sweep");
+        collect(&registry, &storage, false, 0).await.expect("sweep");
 
         // Re-push the graph and tag it again: nothing is collected.
         let (_repo_id, _digest) = build_graph(&registry).await;
-        let report = collect(&registry, &storage, false).await.expect("final");
+        let report = collect(&registry, &storage, false, 0).await.expect("final");
         assert_eq!(report.blobs_deleted, 0);
         assert_eq!(report.manifests_deleted, 0);
         assert_eq!(
@@ -365,7 +544,9 @@ mod tests {
             .await
             .expect("delete tag");
 
-        let report = collect(&registry, &storage, true).await.expect("dry run");
+        let report = collect(&registry, &storage, true, 0)
+            .await
+            .expect("dry run");
         assert_eq!(report.blobs_deleted, 4);
         assert_eq!(report.manifests_deleted, 3);
         assert!(report.bytes_reclaimed > 0);
@@ -376,5 +557,116 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(blob_count, 4);
+    }
+
+    #[tokio::test]
+    async fn grace_window_keeps_fresh_blobs() {
+        let (_dir, registry, storage) = setup().await;
+        let repo = registry
+            .ensure_repository("darktohka/site")
+            .await
+            .expect("repository");
+
+        let content = b"grace-window-layer".to_vec();
+        let digest = Digest::from_bytes(&content);
+        let source = storage.tmp_dir().join("grace-source");
+        tokio::fs::write(&source, &content).await.expect("write");
+        storage
+            .put_blob_from_path(&source, &digest)
+            .await
+            .expect("put blob");
+
+        let manifest = image_manifest(&digest.to_string(), &[]);
+        let manifest_digest = Digest::from_bytes(&manifest);
+        registry
+            .put_manifest(repo.id, media_types::OCI_IMAGE_MANIFEST, &manifest)
+            .await
+            .expect("manifest");
+        registry
+            .set_tag(repo.id, "latest", &manifest_digest)
+            .await
+            .expect("tag");
+        // Make the tag the only root so the blob becomes unmarked.
+        sqlx::query("DELETE FROM manifest_repositories")
+            .execute(registry.db())
+            .await
+            .expect("unlink repositories");
+        registry.delete_tag(repo.id, "latest").await.expect("untag");
+
+        let report = collect(&registry, &storage, false, 3600)
+            .await
+            .expect("grace collect");
+        assert_eq!(report.blobs_deleted, 0, "fresh blob must be protected");
+        assert!(storage.blob_path(&digest).exists());
+        assert!(registry.blob_stat(&digest).await.expect("stat").is_some());
+
+        let report = collect(&registry, &storage, false, 0)
+            .await
+            .expect("full collect");
+        assert_eq!(report.blobs_deleted, 1);
+        assert!(registry.blob_stat(&digest).await.expect("stat").is_none());
+        assert!(!storage.blob_path(&digest).exists());
+    }
+
+    #[tokio::test]
+    async fn sweep_orphan_files_removes_untracked_old_dirs() {
+        let (_dir, registry, storage) = setup().await;
+
+        let hex_old = format!("ab{}", "0".repeat(62));
+        let hex_fresh = format!("cd{}", "1".repeat(62));
+        let old_dir = storage.blobs_dir().join("sha256").join("ab").join(&hex_old);
+        let fresh_dir = storage
+            .blobs_dir()
+            .join("sha256")
+            .join("cd")
+            .join(&hex_fresh);
+        tokio::fs::create_dir_all(&old_dir).await.expect("old dir");
+        tokio::fs::create_dir_all(&fresh_dir)
+            .await
+            .expect("fresh dir");
+        tokio::fs::write(old_dir.join("data"), b"orphan")
+            .await
+            .expect("old data");
+        tokio::fs::write(fresh_dir.join("data"), b"fresh")
+            .await
+            .expect("fresh data");
+
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::open(old_dir.join("data"))
+            .expect("open old data")
+            .set_modified(long_ago)
+            .expect("age old file");
+
+        let removed = sweep_orphan_files(&registry, &storage, 60)
+            .await
+            .expect("sweep");
+        assert_eq!(removed, 1);
+        assert!(!old_dir.exists());
+        assert!(!old_dir.parent().expect("shard").exists());
+        assert!(fresh_dir.exists(), "fresh orphan must survive the grace");
+    }
+
+    #[tokio::test]
+    async fn delete_blob_prunes_empty_shard_directory() {
+        let (_dir, _registry, storage) = setup().await;
+
+        let content = b"prunable-shard-blob".to_vec();
+        let digest = Digest::from_bytes(&content);
+        let source = storage.tmp_dir().join("prune-source");
+        tokio::fs::write(&source, &content).await.expect("write");
+        storage
+            .put_blob_from_path(&source, &digest)
+            .await
+            .expect("put blob");
+
+        let blob_dir = storage.blob_dir(&digest);
+        let shard = blob_dir.parent().expect("shard").to_path_buf();
+        assert!(blob_dir.exists());
+        assert!(shard.exists());
+
+        storage.delete_blob(&digest).await.expect("delete");
+        assert!(!blob_dir.exists());
+        assert!(!shard.exists(), "empty shard directory should be pruned");
+        assert!(storage.blobs_dir().exists(), "blob root must survive");
     }
 }

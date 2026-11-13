@@ -3,9 +3,10 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use crate::db::{self, Db};
@@ -142,7 +143,10 @@ impl Uploads {
         self.delete_session(uuid).await
     }
 
-    /// Cancels upload sessions whose `updated_at` is older than `ttl_secs`.
+    /// Cancels upload sessions whose `updated_at` is older than `ttl_secs`, and
+    /// removes upload directories that no `uploads` row references and that are
+    /// older than the same cutoff. Returns the number of sessions and orphan
+    /// directories removed.
     pub async fn cleanup_stale(&self, ttl_secs: i64) -> RegistryResult<usize> {
         let cutoff = Utc::now() - Duration::seconds(ttl_secs);
         let stale: Vec<String> =
@@ -156,6 +160,78 @@ impl Uploads {
             self.cancel(&uuid).await?;
             removed += 1;
         }
+
+        // Directories left behind by a crash before the row was written (or
+        // after it was dropped) have no row of their own; expire them once the
+        // same TTL has elapsed.
+        let known: HashSet<String> = sqlx::query_scalar("SELECT uuid FROM uploads")
+            .fetch_all(&self.db)
+            .await?
+            .into_iter()
+            .collect();
+
+        let mut entries = match tokio::fs::read_dir(self.storage.uploads_dir()).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
+            Err(err) => {
+                tracing::warn!(error = %err, "reading upload root failed");
+                return Ok(removed);
+            }
+        };
+
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(error = %err, "reading upload directory failed");
+                    break;
+                }
+            };
+            let path = entry.path();
+            let Some(uuid) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if known.contains(uuid) {
+                continue;
+            }
+
+            let metadata = match tokio::fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            let modified = metadata.modified().ok().or_else(|| {
+                std::fs::metadata(path.join("startedat"))
+                    .ok()?
+                    .modified()
+                    .ok()
+            });
+            let Some(modified) = modified else {
+                continue;
+            };
+            if DateTime::<Utc>::from(modified) >= cutoff {
+                continue;
+            }
+
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::info!(uuid = %uuid, "removed orphan upload directory");
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "removing orphan upload directory failed"
+                    );
+                }
+            }
+        }
+
         Ok(removed)
     }
 
@@ -346,6 +422,43 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(uploads.status(&stale.uuid).await.expect("status").is_none());
         assert!(uploads.status(&fresh.uuid).await.expect("status").is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_removes_orphan_upload_directory() {
+        let (_dir, uploads, _repo_id) = harness().await;
+
+        let orphan = "orphan-upload-dir";
+        uploads
+            .storage
+            .create_upload(orphan, Utc::now() - Duration::hours(2))
+            .await
+            .expect("create orphan");
+        let fresh = "fresh-orphan-upload";
+        uploads
+            .storage
+            .create_upload(fresh, Utc::now())
+            .await
+            .expect("create fresh");
+
+        let orphan_dir = uploads.storage.upload_dir(orphan).expect("path");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::open(&orphan_dir)
+            .expect("open orphan dir")
+            .set_modified(old)
+            .expect("age orphan dir");
+        std::fs::File::open(orphan_dir.join("data"))
+            .expect("open orphan data")
+            .set_modified(old)
+            .expect("age orphan data");
+
+        let removed = uploads.cleanup_stale(3600).await.expect("cleanup");
+        assert_eq!(removed, 1);
+        assert!(!orphan_dir.exists(), "old orphan directory removed");
+        assert!(
+            uploads.storage.upload_dir(fresh).expect("path").exists(),
+            "fresh orphan directory survives the ttl"
+        );
     }
 
     #[tokio::test]
