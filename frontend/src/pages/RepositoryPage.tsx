@@ -42,6 +42,23 @@ import { useAsync } from '../lib/useAsync'
 const PER_PAGE = 25
 const FILTER_DEBOUNCE_MS = 300
 
+/**
+ * The API forwards the regex parser's multi-line diagnostic. Collapse it into
+ * one readable sentence for the inline error slot, keeping the cap/validation
+ * messages (which are already a single line) untouched.
+ */
+function describeFilterError(message: string): string {
+  const lines = message
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const detail = lines[lines.length - 1]
+  if (lines.length > 1 && detail?.startsWith('error: ')) {
+    return `Invalid regular expression: ${detail.slice('error: '.length)}`
+  }
+  return message
+}
+
 type TagQuery = {
   /** Committed regular expression (empty means "no filter"). */
   regex: string
@@ -161,7 +178,7 @@ export function RepositoryPage({ namespace, repo }: RepositoryPageProps) {
   const filterActive = query.regex.length > 0
   const regexError =
     isApiError(tagsState.error) && tagsState.error.status === 400
-      ? tagsState.error.message
+      ? describeFilterError(tagsState.error.message)
       : null
   const visibleTags = tagsState.data ?? (regexError ? lastGoodTags : null)
   const pageItems = visibleTags?.items ?? []
