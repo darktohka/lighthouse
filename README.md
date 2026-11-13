@@ -72,7 +72,7 @@ docker pull <host>:8080/<username>/my-image:v1
 ```
 
 For local development, run the backend with `cargo run` in `backend/` and the
-frontend with `pnpm dev` in `frontend/` (the dev server proxies `/api` and `/v2`).
+frontend with `bun run dev` in `frontend/` (the dev server proxies `/api` and `/v2`).
 
 ## Layout
 
@@ -102,11 +102,11 @@ cp .env.example .env && $EDITOR .env     # set JWT_SECRET, then use the dev prof
 cargo run --manifest-path backend/Cargo.toml
 
 # terminal B — frontend on :5173 (proxies /api and /v2 to :8080)
-cd frontend && pnpm install && pnpm dev
+cd frontend && bun install && bun run dev
 ```
 
 Open <http://localhost:5173>. Tests: `cargo test --manifest-path backend/Cargo.toml`
-(220 tests) and `pnpm build` in `frontend/`.
+(220 tests) and `bun run build` in `frontend/`.
 
 ## License
 

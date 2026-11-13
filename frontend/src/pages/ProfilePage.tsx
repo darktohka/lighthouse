@@ -12,11 +12,13 @@ import { ErrorState, LoadingState } from '../components/primitives/StateViews'
 import { useAsync } from '../lib/useAsync'
 import { NotFoundPage } from './NotFoundPage'
 
+/** Today's UTC date, resolved once per module load (renders must stay pure). */
+const TODAY_ISO = new Date().toISOString().slice(0, 10)
+
 export function ProfilePage() {
   const params = useParams()
   const username = params.username ?? ''
-  const todayIso = new Date().toISOString().slice(0, 10)
-  const [endDate, setEndDate] = useState(todayIso)
+  const [endDate, setEndDate] = useState(TODAY_ISO)
   const [reloadToken, setReloadToken] = useState(0)
 
   const profileState = useAsync(
@@ -72,7 +74,7 @@ export function ProfilePage() {
                 error={heatmapState.error}
                 onRetry={heatmapState.reload}
                 onWindowChange={setEndDate}
-                maxEnd={todayIso}
+                maxEnd={TODAY_ISO}
               />
             </div>
           </Box>

@@ -12,30 +12,27 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Stage 1 — frontend build (Vite + pnpm, npm fallback)
+# Stage 1 — frontend build (Vite + bun)
 # -----------------------------------------------------------------------------
-FROM node:24-alpine AS frontend
+FROM oven/bun:1-alpine AS frontend
 
+# The image defaults to the unprivileged `bun` user; the build stage writes
+# node_modules and dist under /app, so run it as root.
+USER root
 WORKDIR /app
 
-# Node 24 bundles corepack. Disable the download prompt so the pnpm shim can
-# fetch its release non-interactively. If corepack or pnpm is unavailable the
-# install/build commands fall back to npm below.
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-RUN corepack enable || true
-
-# The pnpm lockfile may not exist yet: the `*` glob matches it when present and
-# is a no-op when absent (BuildKit tolerates an unmatched COPY glob).
-COPY frontend/package.json frontend/pnpm-lock.yaml* ./
-RUN pnpm install --no-frozen-lockfile || npm install
+# Install from the committed lockfile: `--frozen-lockfile` makes the build fail
+# when package.json and bun.lock drift apart.
+COPY frontend/package.json frontend/bun.lock ./
+RUN bun install --frozen-lockfile
 
 COPY frontend/ ./
-RUN pnpm run build || npm run build
+RUN bun run build
 
 # -----------------------------------------------------------------------------
 # Stage 2 — backend builder (static musl)
 # -----------------------------------------------------------------------------
-FROM rust:1.98.1-alpine AS builder
+FROM rust:1-alpine AS builder
 
 # aws-lc-rs (pulled in by reqwest/rustls) needs cmake/make/perl; libsqlite3-sys
 # and the other *-sys crates compile C with gcc/g++/musl-dev. reqwest is built

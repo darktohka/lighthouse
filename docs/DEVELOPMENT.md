@@ -8,9 +8,8 @@ How to run Lighthouse locally and iterate on it.
 
 | Tool | Version | Notes |
 |---|---|---|
-| Rust | 1.85+ (edition 2024) | `rustup toolchain install stable` |
-| Node.js | 24 | Vite 8 / TypeScript 6 |
-| pnpm | 10+ | `corepack enable pnpm` |
+| Rust | 1.98+ (edition 2024) | `rustup toolchain install stable` |
+| Bun | 1.2+ | `curl -fsSL https://bun.sh/install \| bash` |
 | Docker | optional | only for the container path and for `docker push` testing |
 | `sqlite3` | optional | inspecting `database/lighthouse.db` |
 
@@ -32,8 +31,8 @@ cargo run --manifest-path backend/Cargo.toml
 
 ```bash
 cd frontend
-pnpm install
-pnpm dev
+bun install
+bun run dev
 ```
 
 Open **http://localhost:5173**. The frontend proxies `/api` and `/v2` to the
@@ -140,8 +139,8 @@ rm -rf database data logs        # stops being a registry with any images
 
 ```bash
 cd frontend
-pnpm install
-pnpm dev
+bun install
+bun run dev
 ```
 
 ```
@@ -163,10 +162,10 @@ Scripts:
 
 | Command | Purpose |
 |---|---|
-| `pnpm dev` | Vite dev server with HMR on `:5173` |
-| `pnpm build` | `tsc -b && vite build` → `frontend/dist` |
-| `pnpm preview` | serve the production build on `:4173` |
-| `pnpm lint` | oxlint |
+| `bun run dev` | Vite dev server with HMR on `:5173` |
+| `bun run build` | `tsc -b && vite build` → `frontend/dist` |
+| `bun run preview` | serve the production build on `:4173` |
+| `bun run lint` | oxlint |
 
 ---
 
@@ -217,7 +216,7 @@ To run exactly what the container runs — backend serving the built SPA — wit
 building an image:
 
 ```bash
-cd frontend && pnpm build && cd ..
+cd frontend && bun run build && cd ..
 FRONTEND_DIR=frontend/dist \
 BASE_URL=http://localhost:8080 \
 PUBLIC_HOST=localhost:8080 \
@@ -250,9 +249,9 @@ so you can inspect or back up the state directly from the host.
 | Backend build | `cargo build --manifest-path backend/Cargo.toml` |
 | Backend lint | `cargo clippy --manifest-path backend/Cargo.toml --all-targets` |
 | Backend format | `cargo fmt --manifest-path backend/Cargo.toml` |
-| Frontend dev | `cd frontend && pnpm dev` |
-| Frontend build | `cd frontend && pnpm build` |
-| Frontend lint | `cd frontend && pnpm lint` |
+| Frontend dev | `cd frontend && bun run dev` |
+| Frontend build | `cd frontend && bun run build` |
+| Frontend lint | `cd frontend && bun run lint` |
 | Health | `curl localhost:8080/healthz` |
 
 ---

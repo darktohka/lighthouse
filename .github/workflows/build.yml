@@ -28,15 +28,15 @@ jobs:
   # ---------------------------------------------------------------------------
   checks:
     name: Checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -51,28 +51,23 @@ jobs:
           RUST_LOG: info
         run: cargo test --locked
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          version: 10
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
+          bun-version: 1
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: pnpm install --no-frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Build frontend
         working-directory: frontend
-        run: pnpm build
+        run: bun run build
 
   # ---------------------------------------------------------------------------
   # Native per-architecture builds. `push-by-digest` means each job publishes an
   # untagged single-platform manifest; the merge job stitches them together.
-  # There is no QEMU: amd64 runs on ubuntu-24.04, arm64 on ubuntu-24.04-arm.
+  # There is no QEMU: amd64 runs on ubuntu-26.04, arm64 on ubuntu-26.04-arm.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.platform }}
@@ -85,22 +80,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             platform: linux/amd64
             arch: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             platform: linux/arm64
             arch: arm64
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -109,14 +104,14 @@ jobs:
       # Optional: only runs when Docker Hub credentials are configured.
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_PASSWORD }}
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -137,7 +132,7 @@ jobs:
           touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -153,7 +148,7 @@ jobs:
     name: Publish multi-arch image
     needs: [build, checks]
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04-arm
     permissions:
       contents: read
       packages: write
@@ -162,16 +157,16 @@ jobs:
       DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -179,7 +174,7 @@ jobs:
 
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_PASSWORD }}

@@ -26,10 +26,10 @@ the reference for the next wave of pages.
 
 ```bash
 cd frontend
-pnpm install
-pnpm dev      # Vite dev server; proxies /api and /v2 to http://localhost:8080
-pnpm build    # tsc -b && vite build  →  frontend/dist
-pnpm lint     # oxlint
+bun install
+bun run dev      # Vite dev server; proxies /api and /v2 to http://localhost:8080
+bun run build    # tsc -b && vite build  →  frontend/dist
+bun run lint     # oxlint
 ```
 
 `vite.config.ts` registers the Tailwind plugin and proxies `/api` and `/v2` to
