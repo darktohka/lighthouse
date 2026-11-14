@@ -2041,6 +2041,86 @@ async fn nested_repository_names_route_correctly() {
 }
 
 #[tokio::test]
+async fn index_push_accepts_children_whose_tags_were_replaced() {
+    let (_dir, _state, app) = harness().await;
+    let name = "darktohka/site";
+
+    // A multi-platform client stages each platform manifest under the same tag
+    // and only then pushes the index. The second platform replaces the tag, so
+    // the first manifest loses its tag-backed repository link before the index
+    // references it.
+    let config_a = push_blob(&app, name, b"config-a").await;
+    let layer_a = push_blob(&app, name, b"layer-a").await;
+    let platform_a = oci_manifest(&config_a, 8, &layer_a, 7);
+    let digest_a = push_manifest(
+        &app,
+        name,
+        "latest",
+        media_types::OCI_IMAGE_MANIFEST,
+        &platform_a,
+    )
+    .await;
+
+    let config_b = push_blob(&app, name, b"config-b").await;
+    let layer_b = push_blob(&app, name, b"layer-b").await;
+    let platform_b = oci_manifest(&config_b, 8, &layer_b, 7);
+    let digest_b = push_manifest(
+        &app,
+        name,
+        "latest",
+        media_types::OCI_IMAGE_MANIFEST,
+        &platform_b,
+    )
+    .await;
+
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": media_types::OCI_IMAGE_INDEX,
+        "manifests": [
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": digest_a,
+                "size": platform_a.len(),
+                "platform": { "os": "linux", "architecture": "amd64" }
+            },
+            {
+                "mediaType": media_types::OCI_IMAGE_MANIFEST,
+                "digest": digest_b,
+                "size": platform_b.len(),
+                "platform": { "os": "linux", "architecture": "arm64" }
+            }
+        ]
+    })
+    .to_string()
+    .into_bytes();
+
+    let response = send(
+        &app,
+        Method::PUT,
+        &format!("/v2/{name}/manifests/latest"),
+        Some(USER),
+        &[("content-type", media_types::OCI_IMAGE_INDEX)],
+        &index,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Both platform manifests must stay resolvable through the index.
+    for digest in [&digest_a, &digest_b] {
+        let fetched = send(
+            &app,
+            Method::GET,
+            &format!("/v2/{name}/manifests/{digest}"),
+            Some(USER),
+            &[("accept", media_types::OCI_IMAGE_MANIFEST)],
+            &[],
+        )
+        .await;
+        assert_eq!(fetched.status(), StatusCode::OK, "{digest}");
+    }
+}
+
+#[tokio::test]
 async fn pulls_and_pushes_are_audited() {
     let (_dir, state, app) = harness().await;
     let content = b"audited-blob".to_vec();

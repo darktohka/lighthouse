@@ -279,6 +279,22 @@ impl Registry {
 
             apply_references(&mut tx, manifest_id, &references).await?;
 
+            // An index carries its children into the repository: linking them
+            // here keeps `GET /v2/<name>/manifests/<digest>` resolvable for
+            // every platform, even when a tag that previously pointed at a
+            // child was re-pointed earlier in the same push.
+            sqlx::query(
+                "INSERT OR IGNORE INTO manifest_repositories \
+                 (manifest_id, repository_id, created_at) \
+                 SELECT child_manifest_id, ?, ? FROM manifest_children \
+                 WHERE parent_manifest_id = ?",
+            )
+            .bind(repo_id)
+            .bind(now)
+            .bind(manifest_id)
+            .execute(&mut *tx)
+            .await?;
+
             let manifest = sqlx::query_as::<_, Manifest>("SELECT * FROM manifests WHERE id = ?")
                 .bind(manifest_id)
                 .fetch_one(&mut *tx)
@@ -309,6 +325,45 @@ impl Registry {
         .fetch_optional(&self.db)
         .await?;
         Ok(found.is_some())
+    }
+
+    /// True when the manifest exists and *all* of its blobs are linked to the
+    /// repository.
+    ///
+    /// A manifest whose repository link was dropped (for example because a tag
+    /// was re-pointed while a multi-platform push was in flight) can still be
+    /// legitimately referenced by an index pushed to that repository: its blobs
+    /// were uploaded there and are still linked. Membership follows the content,
+    /// not the tag that happened to point at it.
+    pub async fn manifest_blobs_in_repository(
+        &self,
+        repo_id: i64,
+        digest: &Digest,
+    ) -> RegistryResult<bool> {
+        let digest = digest.to_string();
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM manifest_blobs mb \
+             JOIN manifests m ON m.id = mb.manifest_id \
+             WHERE m.digest = ?",
+        )
+        .bind(&digest)
+        .fetch_one(&self.db)
+        .await?;
+        if total == 0 {
+            return Ok(false);
+        }
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM manifest_blobs mb \
+             JOIN manifests m ON m.id = mb.manifest_id \
+             JOIN blob_repositories br \
+               ON br.blob_id = mb.blob_id AND br.repository_id = ? \
+             WHERE m.digest = ?",
+        )
+        .bind(repo_id)
+        .bind(&digest)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(linked == total)
     }
 
     /// Resolves a tag to its manifest digest.

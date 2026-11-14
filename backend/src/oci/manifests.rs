@@ -375,11 +375,20 @@ async fn validate_references(
         let mut missing = Vec::new();
         for entry in manifests {
             let digest = descriptor_digest(entry)?;
+            // A child is acceptable when it is linked to the repository, or
+            // when its blobs were uploaded here and only its (now re-pointed)
+            // tag link was dropped. Multi-platform pushes stage each platform
+            // under the same tag before the index replaces it, so requiring a
+            // tag-backed link would reject the index.
             let present = state.registry.manifest(&digest).await?.is_some()
-                && state
+                && (state
                     .registry
                     .manifest_in_repository(repository_id, &digest)
-                    .await?;
+                    .await?
+                    || state
+                        .registry
+                        .manifest_blobs_in_repository(repository_id, &digest)
+                        .await?);
             if !present {
                 missing.push(digest.to_string());
             }
