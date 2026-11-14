@@ -611,22 +611,61 @@ impl ManifestReferences {
     }
 }
 
-/// Removes the `manifest_repositories` link for a manifest once no tag in the
-/// same repository references it anymore. Other repositories' links, and links
-/// still backed by a tag, are left untouched.
+/// Removes `manifest_repositories` links that no longer keep a manifest reachable
+/// from a tag in `repo_id`.
+///
+/// A link may only be dropped when the manifest is neither tagged nor referenced
+/// by an index that is still linked to the repository: `GET
+/// /v2/<name>/manifests/<digest>` resolves a manifest through
+/// `manifest_repositories`, so dropping the link of an index child makes the
+/// index unpullable and makes an index re-push fail with `MANIFEST_BLOB_UNKNOWN`.
+/// Children that become unreachable when their parent's link is dropped are
+/// cleaned up in the same pass.
 async fn unlink_if_untagged(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     repo_id: i64,
     manifest_id: i64,
 ) -> Result<(), sqlx::Error> {
-    let remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE repository_id = ? AND manifest_id = ?")
-            .bind(repo_id)
-            .bind(manifest_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    let mut pending = std::collections::VecDeque::from([manifest_id]);
+    let mut seen = std::collections::HashSet::new();
 
-    if remaining == 0 {
+    while let Some(manifest_id) = pending.pop_front() {
+        if !seen.insert(manifest_id) {
+            continue;
+        }
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tags WHERE repository_id = ? AND manifest_id = ?",
+        )
+        .bind(repo_id)
+        .bind(manifest_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if remaining > 0 {
+            continue;
+        }
+
+        let referenced: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM manifest_children mc \
+             JOIN manifest_repositories mr \
+               ON mr.manifest_id = mc.parent_manifest_id AND mr.repository_id = ? \
+             WHERE mc.child_manifest_id = ?",
+        )
+        .bind(repo_id)
+        .bind(manifest_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if referenced > 0 {
+            continue;
+        }
+
+        let children: Vec<i64> = sqlx::query_scalar(
+            "SELECT child_manifest_id FROM manifest_children WHERE parent_manifest_id = ?",
+        )
+        .bind(manifest_id)
+        .fetch_all(&mut **tx)
+        .await?;
+
         sqlx::query(
             "DELETE FROM manifest_repositories WHERE manifest_id = ? AND repository_id = ?",
         )
@@ -634,6 +673,8 @@ async fn unlink_if_untagged(
         .bind(repo_id)
         .execute(&mut **tx)
         .await?;
+
+        pending.extend(children);
     }
     Ok(())
 }
@@ -1107,6 +1148,90 @@ mod tests {
                 .await
                 .expect("child row");
         assert!(child_row.is_some());
+    }
+
+    #[tokio::test]
+    async fn retagging_to_index_keeps_child_repository_links() {
+        let (_dir, registry) = test_registry().await;
+        create_namespace(&registry, "darktohka").await;
+        let repository = registry
+            .ensure_repository("darktohka/site")
+            .await
+            .expect("repository");
+
+        let config = Digest::from_bytes(b"config");
+        let layer = Digest::from_bytes(b"layer");
+        let image = image_manifest(&config.to_string(), &[&layer.to_string()]);
+        let child = Digest::from_bytes(&image);
+        registry
+            .put_manifest(repository.id, media_types::OCI_IMAGE_MANIFEST, &image)
+            .await
+            .expect("put child");
+        registry
+            .set_tag(repository.id, "latest", &child)
+            .await
+            .expect("tag child");
+
+        let index = index_manifest(&[&child.to_string()]);
+        let index_digest = Digest::from_bytes(&index);
+        registry
+            .put_manifest(repository.id, media_types::OCI_IMAGE_INDEX, &index)
+            .await
+            .expect("put index");
+        // The same tag now points at the index, so the child is no longer
+        // tagged -- but it must stay linked to the repository for the index to
+        // be pullable.
+        registry
+            .set_tag(repository.id, "latest", &index_digest)
+            .await
+            .expect("retag to index");
+
+        assert!(
+            registry
+                .manifest_in_repository(repository.id, &child)
+                .await
+                .expect("child link"),
+            "index children must stay resolvable after a retag"
+        );
+
+        // Deleting the tag must not unlink the index while it is still tagged,
+        // nor the child that the index references.
+        registry
+            .set_tag(repository.id, "latest", &index_digest)
+            .await
+            .expect("re-tag index");
+        assert!(
+            registry
+                .manifest_in_repository(repository.id, &index_digest)
+                .await
+                .expect("index link")
+        );
+        assert!(
+            registry
+                .manifest_in_repository(repository.id, &child)
+                .await
+                .expect("child link")
+        );
+
+        // Once the index itself is deleted, both links become garbage.
+        assert!(
+            registry
+                .delete_tag(repository.id, "latest")
+                .await
+                .expect("delete tag")
+        );
+        assert!(
+            !registry
+                .manifest_in_repository(repository.id, &index_digest)
+                .await
+                .expect("index link")
+        );
+        assert!(
+            !registry
+                .manifest_in_repository(repository.id, &child)
+                .await
+                .expect("child link")
+        );
     }
 
     #[tokio::test]
